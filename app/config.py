@@ -1,0 +1,20 @@
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="FOOTBALL_RESULTS_",
+        env_file=".env",
+        extra="ignore",
+    )
+
+    database_url: str = "postgresql+psycopg_async://football:football@localhost:5432/football"
+    request_timeout_seconds: float = 20.0
+    user_agent: str = "FootballResultsAPI/0.11 (contact: set-your-email@example.com)"
+    scheduler_loop_seconds: float = 30.0
+    scheduler_claim_limit: int = 5
+    football_data_api_token: str | None = None
+    football_data_min_request_interval_seconds: float = 6.0
+
+
+settings = Settings()

@@ -1,0 +1,29 @@
+[project]
+name = "football-results-api"
+version = "0.12.1"
+description = "Cached multi-competition REST API for football match results"
+requires-python = ">=3.12"
+dependencies = [
+  "alembic>=1.16,<2",
+  "beautifulsoup4>=4.12,<5",
+  "fastapi>=0.116,<1",
+  "httpx[socks]>=0.28,<1",
+  "pydantic-settings>=2.10,<3",
+  "psycopg[binary]>=3.2,<4",
+  "sqlalchemy[asyncio]>=2.0,<2.2",
+  "uvicorn[standard]>=0.35,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1.1,<2",
+  "ruff>=0.12,<1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100

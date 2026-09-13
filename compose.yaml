@@ -1,0 +1,52 @@
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-football}
+      POSTGRES_USER: ${POSTGRES_USER:-football}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-football}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-football} -d ${POSTGRES_DB:-football}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      FOOTBALL_RESULTS_DATABASE_URL: postgresql+psycopg_async://${POSTGRES_USER:-football}:${POSTGRES_PASSWORD:-football}@db:5432/${POSTGRES_DB:-football}
+      FOOTBALL_RESULTS_USER_AGENT: ${FOOTBALL_RESULTS_USER_AGENT:-FootballResultsAPI/0.11}
+      FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN: ${FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN:-}
+      FOOTBALL_RESULTS_FOOTBALL_DATA_MIN_REQUEST_INTERVAL_SECONDS: ${FOOTBALL_RESULTS_FOOTBALL_DATA_MIN_REQUEST_INTERVAL_SECONDS:-6}
+    ports:
+      - "${API_BIND_ADDRESS:-0.0.0.0}:${API_PORT:-8000}:8000"
+
+  scheduler:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      api:
+        condition: service_started
+    entrypoint: ["python", "-m", "app.scheduler"]
+    environment:
+      FOOTBALL_RESULTS_DATABASE_URL: postgresql+psycopg_async://${POSTGRES_USER:-football}:${POSTGRES_PASSWORD:-football}@db:5432/${POSTGRES_DB:-football}
+      FOOTBALL_RESULTS_USER_AGENT: ${FOOTBALL_RESULTS_USER_AGENT:-FootballResultsAPI/0.11}
+      FOOTBALL_RESULTS_SCHEDULER_LOOP_SECONDS: ${FOOTBALL_RESULTS_SCHEDULER_LOOP_SECONDS:-30}
+      FOOTBALL_RESULTS_SCHEDULER_CLAIM_LIMIT: ${FOOTBALL_RESULTS_SCHEDULER_CLAIM_LIMIT:-5}
+      FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN: ${FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN:-}
+      FOOTBALL_RESULTS_FOOTBALL_DATA_MIN_REQUEST_INTERVAL_SECONDS: ${FOOTBALL_RESULTS_FOOTBALL_DATA_MIN_REQUEST_INTERVAL_SECONDS:-6}
+
+volumes:
+  postgres_data:
