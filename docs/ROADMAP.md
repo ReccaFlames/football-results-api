@@ -96,91 +96,120 @@ reviewed: 2026-11-14, at version 0.12.1.
     context on every turn, and curated servers perform better.
 - **Skip for now.** A2A agent cards, NLWeb and Arazzo matter little for a small data API.
 
-## Ordered backlog
+## Implementation checklist
 
-The reasoning behind the order: every agent-facing surface (CLI, skill, MCP, llms.txt) copies the
-API contract. Fix the contract and configuration first, or every surface will need to be rewritten.
+Work top to bottom. The reasoning behind the order: every agent-facing surface (CLI, skill, MCP,
+llms.txt) copies the API contract. Fix the contract and configuration first, or every surface will
+need to be rewritten.
+
+How to use this list:
+- Tick a sub-task (`[x]`) when it is merged; tick the parent item when all of its sub-tasks are done.
+- Each item should normally be one branch and one PR.
+- Every item is done only when `uv run pytest -q` and `uv run ruff check .` pass and `README.md`
+  reflects the change.
+- If scope changes, edit this list in the same PR.
 
 ### Phase 0: Foundations
 
-1. **CI and Postgres integration tests.** Add a GitHub Actions workflow that runs pytest, ruff and
-   `alembic upgrade --sql`. Add repository tests against a real PostgreSQL (service container or
-   testcontainers) that cover seeding, claiming due seasons and replacing matches.
-2. **Housekeeping.**
-   - Keep the version in one place.
-   - Untrack `.idea/`.
-   - Build the Docker image from `uv.lock`.
-   - Run `ruff format`.
-   - Remove the Ekstraklasa defaults.
-   - Handle the no-current-season case.
-3. **Safe write endpoints.**
-   - Require an API key (`X-API-Key`) for refresh and history fetch.
-   - Make refresh asynchronous: queue the season for the scheduler and return `202` with a job or
-     status URL. Do not scrape inside the request.
-4. **Polite and resilient scraping.**
-   - Throttle requests per host for 90minut.
-   - Make detail-page failures affect only that match (leave its fields `null` and log a warning).
-   - Bound the detail cache, or persist it.
+- [ ] **1. CI and PostgreSQL integration tests**
+  - [ ] GitHub Actions workflow: `uv sync`, `pytest`, `ruff check`, `ruff format --check`,
+        `alembic upgrade head --sql`
+  - [ ] PostgreSQL service container (or testcontainers) for integration tests
+  - [ ] Repository tests: seeding, `claim_due_seasons` (incl. `SKIP LOCKED`), `replace_competition`,
+        `record_scrape_failure`
+  - [ ] Migration round-trip test (upgrade → downgrade → upgrade)
+- [ ] **2. Housekeeping**
+  - [ ] Single version source (read from package metadata in `app/main.py` and the User-Agent)
+  - [ ] Untrack `.idea/` and add it to `.gitignore`
+  - [ ] Build the Docker image from `uv.lock` (`uv sync --frozen`)
+  - [ ] Run `ruff format` on the whole repo
+  - [ ] Remove the Ekstraklasa defaults (`RefreshRequest.competition`, `MatchResult.competition`)
+  - [ ] `list_competitions` handles a competition with no current season
+- [ ] **3. Safe write endpoints**
+  - [ ] API-key authentication (`X-API-Key`, `FOOTBALL_RESULTS_API_KEYS`) for refresh and
+        history fetch
+  - [ ] Refresh queues the season for the scheduler and returns `202` with a status URL
+  - [ ] History fetch runs as a queued job
+  - [ ] Job/status endpoint backed by `scrape_run`
+- [ ] **4. Polite and resilient scraping**
+  - [ ] Per-host throttling for 90minut (configurable minimum interval)
+  - [ ] A detail-page failure affects only that match (fields stay `null`, warning logged)
+  - [ ] Bounded or persistent detail-page cache
 
 ### Phase 1: Generic and configurable (the README target state)
 
-5. **Configuration file.** Add `config/competitions.yaml` with Pydantic validation and a
-   `check` command.
-   - Seed only on startup or when the file changes, not every cycle.
-   - Competitions removed from the file are disabled, not deleted.
-6. **Stable data model.**
-   - Upsert matches by provider match ID (or a key that ignores kickoff time) instead of
-     deleting and re-inserting.
-   - Expose a stable match `id`.
-   - Add a `team` table with canonical slugs and aliases.
-7. **Generic seasons and providers.**
-   - Allow calendar-year seasons (`2026`) alongside `2026-2027`.
-   - Generalise football-data.org to any competition code.
-   - Write down the provider contract.
-8. **Per-competition scheduler settings.** Make the thresholds configurable. Add automatic season
-   discovery and rollover.
+- [ ] **5. Configuration file**
+  - [ ] `config/competitions.yaml` schema (competitions, providers, schedule defaults)
+  - [ ] Pydantic validation and a `python -m app.config check` command
+  - [ ] `FOOTBALL_RESULTS_CONFIG_FILE` setting with a default file shipped in the image
+  - [ ] Seed only on startup or when the file changes, not every scheduler cycle
+  - [ ] Competitions removed from the file are disabled, not deleted
+  - [ ] Remove the hard-coded registry from `app/competitions.py`
+- [ ] **6. Stable data model**
+  - [ ] Upsert matches by provider match ID, or a key that ignores kickoff time
+  - [ ] Expose a stable match `id` in the API
+  - [ ] `team` table with canonical slugs and aliases; matches reference team IDs
+  - [ ] Escape `%` and `_` in team/stage search
+- [ ] **7. Generic seasons and providers**
+  - [ ] Allow calendar-year seasons (`2026`) alongside `2026-2027`
+  - [ ] Season-to-date mapping per competition (no hard-coded July start)
+  - [ ] football-data.org adapter and URL validation for any competition code
+  - [ ] Written provider contract (capabilities, `discover_seasons`)
+- [ ] **8. Scheduler settings per competition**
+  - [ ] Scheduler thresholds read from the configuration file
+  - [ ] Automatic season discovery and rollover
 
 ### Phase 2: Agent-first API surface
 
-9. **API contract v1.1.**
-   - `GET /matches` (finished and scheduled, filtered by status, date range, team ID).
-   - `GET /standings`.
-   - `GET /teams`.
-   - Cursor pagination with a default `limit`.
-   - A `fields=` parameter.
-   - Freshness metadata: `data_as_of`, `next_update_at`, `source`.
-   - Keep `/results` for backward compatibility.
-10. **OpenAPI polish.**
-    - Explicit `operation_id`s, tags and summaries that say when to use each endpoint.
-    - Parameter descriptions with examples, and documented error responses.
-    - This is the input for every later step.
-11. **RFC 9457 errors** with `type`, `title`, `detail`, and extension members such as
-    `valid_values` (competitions, seasons) and `hint`. Add `RateLimit` and `Retry-After` headers
-    and ETag caching.
-12. **`/llms.txt` and `/agents` static page.** Generate both from the OpenAPI spec and the
-    competition config: purpose, base URL, auth, the 5 most common tasks with curl and CLI
-    examples, and links to `/openapi.json`, the CLI and the skill.
-13. **CLI** (`football-results`, Typer, installable with `uvx`/`pipx`, using the HTTP API):
-    - Commands: `competitions`, `matches`, `standings`, `teams`, `refresh`, `status`.
-    - JSON when piped, a table on a TTY, `--json` and `--fields`.
-    - Exit codes: 0 ok, 2 usage error, 3 not found, 4 upstream or stale, 5 auth.
-    - Errors as JSON on stderr.
-    - Configured through `FOOTBALL_RESULTS_URL` and `FOOTBALL_RESULTS_API_KEY`.
-14. **Consumer Agent Skill.**
-    - A `skills/football-results/SKILL.md` that teaches the CLI: when to use it, common recipes,
-      and how to interpret nulls and freshness.
-    - Keep it in the repo and serve it at `/skills/football-results/SKILL.md`, so it can be
-      installed with `copilot skill add <url>`.
-15. **Curated MCP server.**
-    - FastMCP, mounted at `/mcp`.
-    - Read-only tools: `list_competitions`, `find_matches`, `get_standings`, `get_team_form`.
-    - Optional authenticated `request_refresh`.
-    - Structured output schemas.
-    - Publish it to the MCP Registry once it is stable.
+- [ ] **9. API contract v1.1**
+  - [ ] `GET /api/v1/matches` (status, date range, team, round/stage filters)
+  - [ ] `GET /api/v1/standings`
+  - [ ] `GET /api/v1/teams`
+  - [ ] Cursor pagination with a default `limit`
+  - [ ] `fields=` parameter for compact responses
+  - [ ] Freshness metadata: `data_as_of`, `next_update_at`, `source`
+  - [ ] `/results` kept for backward compatibility
+- [ ] **10. OpenAPI polish**
+  - [ ] Explicit `operation_id` on every endpoint
+  - [ ] Tags and summaries that say when to use each endpoint
+  - [ ] Parameter descriptions and examples
+  - [ ] Documented error responses
+- [ ] **11. Errors, rate limits and caching**
+  - [ ] RFC 9457 `application/problem+json` with `hint` and `valid_values`
+  - [ ] Rate limiting with `RateLimit` and `Retry-After` headers
+  - [ ] `ETag` / `Cache-Control` on read endpoints
+- [ ] **12. `/llms.txt` and `/agents` page**
+  - [ ] Generated from the OpenAPI spec and competition config
+  - [ ] Purpose, base URL, auth, top 5 tasks with curl and CLI examples
+  - [ ] Links to `/openapi.json`, the CLI and the skill
+- [ ] **13. CLI (`football-results`)**
+  - [ ] Typer app over the HTTP API, installable with `uvx`/`pipx`
+  - [ ] Commands: `competitions`, `matches`, `standings`, `teams`, `refresh`, `status`
+  - [ ] JSON when piped, a table on a TTY, `--json` and `--fields`
+  - [ ] Stable exit codes (0 ok, 2 usage, 3 not found, 4 upstream/stale, 5 auth)
+  - [ ] Errors as JSON on stderr
+  - [ ] Configured through `FOOTBALL_RESULTS_URL` and `FOOTBALL_RESULTS_API_KEY`
+  - [ ] `--help` with examples on every command
+- [ ] **14. Consumer Agent Skill**
+  - [ ] `skills/football-results/SKILL.md` teaching the CLI (when to use, recipes, nulls, freshness)
+  - [ ] Served at `/skills/football-results/SKILL.md`
+  - [ ] Install instructions (`copilot skill add <url>`) on `/agents` and in the README
+- [ ] **15. Curated MCP server**
+  - [ ] FastMCP mounted at `/mcp`
+  - [ ] Read-only tools: `list_competitions`, `find_matches`, `get_standings`, `get_team_form`
+  - [ ] Optional authenticated `request_refresh`
+  - [ ] Structured output schemas
+  - [ ] Published to the MCP Registry
 
 ### Phase 3: Operations and growth
 
-16. **Observability.** `/metrics` (Prometheus), admin status endpoints (recent `scrape_run` rows,
-    scheduler state), and alerts when data goes stale. Use structured logs.
-17. **More providers and fallback sources**, using the `add-data-provider` skill.
-18. **Optional hosted access.** OAuth for remote MCP, per-key quotas and a public demo instance.
+- [ ] **16. Observability**
+  - [ ] `/metrics` (Prometheus)
+  - [ ] Admin status endpoints (recent `scrape_run` rows, scheduler state)
+  - [ ] Alerts when data goes stale
+  - [ ] Structured JSON logs
+- [ ] **17. More providers and fallback sources** (use the `add-data-provider` skill)
+- [ ] **18. Optional hosted access**
+  - [ ] OAuth for remote MCP
+  - [ ] Per-key quotas
+  - [ ] Public demo instance

@@ -59,6 +59,13 @@ Run `pytest` and `ruff check` before declaring any change done.
 - Keep the version in sync in `pyproject.toml` and `app/main.py` (`FastAPI(version=...)`).
 - Update `README.md` when behaviour, endpoints, or configuration change.
 
+## Roadmap workflow
+
+`docs/ROADMAP.md` contains the ordered **Implementation checklist**. When starting work, pick the
+first unchecked item (unless the user says otherwise). When a sub-task is completed, tick it
+(`[x]`) in the same change; tick the parent item once all sub-tasks are done. Do not skip ahead
+without the user's agreement, because later items depend on earlier ones.
+
 ## Skills in this repo
 
 Task-specific playbooks live in `.github/skills/`:
