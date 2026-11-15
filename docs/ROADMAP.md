@@ -52,7 +52,7 @@ reviewed: 2026-11-14, at version 0.12.1.
 8. **Test gaps:**
    - No tests run against PostgreSQL. The most complex logic (seeding, claiming due seasons,
      replacing matches) is untested.
-   - There is no CI.
+   - There is no CI. (Both fixed in step 1.)
 9. **Housekeeping:**
    - The version is set in two places, and the User-Agent still says 0.11.
    - `.idea/` is committed.
@@ -61,7 +61,7 @@ reviewed: 2026-11-14, at version 0.12.1.
      `MatchResult.competition`).
    - `list_competitions` raises if a competition has no current season.
    - The 90minut detail cache is an unbounded in-memory dict.
-   - One file fails `ruff format --check`.
+   - One file fails `ruff format --check`. (Fixed in step 1.)
 
 ## Agent-first: current practice (researched 2026-11)
 
@@ -111,18 +111,18 @@ How to use this list:
 
 ### Phase 0: Foundations
 
-- [ ] **1. CI and PostgreSQL integration tests**
-  - [ ] GitHub Actions workflow: `uv sync`, `pytest`, `ruff check`, `ruff format --check`,
+- [x] **1. CI and PostgreSQL integration tests**
+  - [x] GitHub Actions workflow: `uv sync`, `pytest`, `ruff check`, `ruff format --check`,
         `alembic upgrade head --sql`
-  - [ ] PostgreSQL service container (or testcontainers) for integration tests
-  - [ ] Repository tests: seeding, `claim_due_seasons` (incl. `SKIP LOCKED`), `replace_competition`,
+  - [x] PostgreSQL service container (or testcontainers) for integration tests
+  - [x] Repository tests: seeding, `claim_due_seasons` (incl. `SKIP LOCKED`), `replace_competition`,
         `record_scrape_failure`
-  - [ ] Migration round-trip test (upgrade → downgrade → upgrade)
+  - [x] Migration round-trip test (upgrade → downgrade → upgrade)
 - [ ] **2. Housekeeping**
   - [ ] Single version source (read from package metadata in `app/main.py` and the User-Agent)
   - [ ] Untrack `.idea/` and add it to `.gitignore`
   - [ ] Build the Docker image from `uv.lock` (`uv sync --frozen`)
-  - [ ] Run `ruff format` on the whole repo
+  - [x] Run `ruff format` on the whole repo
   - [ ] Remove the Ekstraklasa defaults (`RefreshRequest.competition`, `MatchResult.competition`)
   - [ ] `list_competitions` handles a competition with no current season
 - [ ] **3. Safe write endpoints**

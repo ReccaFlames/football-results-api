@@ -21,7 +21,7 @@ league-data API**. This README describes both:
 | Season rollover | Manual: edit `current_season` and source URLs in code | Automatic discovery of the new season's source |
 | Scheduling | Adaptive per-season scheduler driven by fixture times (built-in rules) | Same engine, with policy thresholds configurable per competition |
 | Configuration | Environment variables (`FOOTBALL_RESULTS_*`) for infrastructure only | Env vars for infrastructure + one validated config file for leagues, sources, and schedules |
-| Observability | `/health` (DB + scheduler heartbeat), `scrape_run` table, logs | Scheduler/scrape status endpoints, metrics, alerting on stale data |
+| Observability | `/health` (DB + scheduler heartbeat), `scrape_run` table, logs; CI with PostgreSQL integration tests | Scheduler/scrape status endpoints, metrics, alerting on stale data |
 | API | Read results, manual refresh, historical fetch | Plus fixtures, standings, teams, and authenticated admin endpoints |
 
 ## Current state
@@ -363,11 +363,39 @@ Never commit .env.
 uv sync --extra dev
 uv run pytest
 uv run ruff check .
+uv run ruff format --check .
 uv run alembic upgrade head --sql
 ~~~
 
-API tests use a repository test double and do not require PostgreSQL. Before deployment, run the
-Compose stack and exercise at least one real refresh against PostgreSQL.
+Unit and API tests use a repository test double and do not require PostgreSQL.
+
+### PostgreSQL integration tests
+
+`tests/integration/` tests the repository and migrations against a real PostgreSQL database:
+seeding, scheduler claims (including `SKIP LOCKED`), atomic season replacement, failure backoff,
+and a migration round trip followed by `alembic check`. That last check fails when
+`app/db_models.py` changes without a matching migration. The tests are skipped unless
+`FOOTBALL_RESULTS_TEST_DATABASE_URL` is set. They truncate and drop tables, so the database name
+must contain `test`. Use the disposable Compose service; it stores data in memory only:
+
+~~~bash
+docker compose --profile test up -d --wait test-db
+FOOTBALL_RESULTS_TEST_DATABASE_URL=postgresql+psycopg_async://football:football@localhost:55432/football_test \
+  uv run pytest
+docker compose --profile test down
+~~~
+
+Set `TEST_POSTGRES_PORT` to use a port other than 55432.
+
+### Continuous integration
+
+`.github/workflows/ci.yml` runs on every push and pull request on Python 3.12. It installs
+dependencies from `uv.lock` (`--locked`), runs ruff lint and format checks, renders migrations
+offline, and runs all tests against a PostgreSQL 17 service container. In CI, missing integration
+database configuration is an error rather than a skip.
+
+Before deployment, run the Compose stack and exercise at least one real refresh against
+PostgreSQL.
 
 ## Target state and roadmap
 

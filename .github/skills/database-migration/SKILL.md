@@ -32,8 +32,10 @@ The app never calls `create_all`; Alembic in `migrations/` owns the schema. The 
 
    ~~~bash
    uv run alembic upgrade head --sql > /dev/null   # offline render
-   uv run alembic upgrade head && uv run alembic downgrade -1 && uv run alembic upgrade head
-   uv run pytest -q && uv run ruff check .
+   docker compose --profile test up -d --wait test-db
+   FOOTBALL_RESULTS_TEST_DATABASE_URL=postgresql+psycopg_async://football:football@localhost:55432/football_test \
+     uv run pytest -q   # includes migration round trip + `alembic check` for model drift
+   uv run ruff check . && uv run ruff format --check .
    ~~~
 
 6. Update the database-table list in `README.md` if tables changed. Remind the user to back up

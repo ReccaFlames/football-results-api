@@ -48,5 +48,23 @@ services:
       FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN: ${FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN:-}
       FOOTBALL_RESULTS_FOOTBALL_DATA_MIN_REQUEST_INTERVAL_SECONDS: ${FOOTBALL_RESULTS_FOOTBALL_DATA_MIN_REQUEST_INTERVAL_SECONDS:-6}
 
+  # Disposable database for integration tests: docker compose --profile test up -d test-db
+  test-db:
+    image: postgres:17-alpine
+    profiles: ["test"]
+    environment:
+      POSTGRES_DB: football_test
+      POSTGRES_USER: football
+      POSTGRES_PASSWORD: football
+    ports:
+      - "127.0.0.1:${TEST_POSTGRES_PORT:-55432}:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U football -d football_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
 volumes:
   postgres_data:

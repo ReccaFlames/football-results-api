@@ -21,9 +21,14 @@ class Base(DeclarativeBase):
 
 class CompetitionRow(Base):
     __tablename__ = "competition"
+    # Mirrors migration 0001: a unique constraint plus a separate non-unique index.
+    __table_args__ = (
+        UniqueConstraint("slug", name="competition_slug_key"),
+        Index("ix_competition_slug", "slug"),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    slug: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+    slug: Mapped[str] = mapped_column(String(100))
     name: Mapped[str] = mapped_column(String(200))
     country: Mapped[str | None] = mapped_column(String(100))
     format: Mapped[str] = mapped_column(String(30))

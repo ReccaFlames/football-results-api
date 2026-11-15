@@ -26,21 +26,29 @@ API.
 | `app/config.py` | `Settings` from env vars with prefix `FOOTBALL_RESULTS_` |
 | `migrations/` | Alembic migrations (schema changes go here only; no `create_all`) |
 | `tests/` | pytest; API tests use `FakeRepository` and need no database |
+| `tests/integration/` | Repository and migration tests against real PostgreSQL (skipped without `FOOTBALL_RESULTS_TEST_DATABASE_URL`) |
 
 ## Commands
 
 ~~~bash
 uv sync --extra dev                 # install
-uv run pytest -q                    # tests (no DB needed)
+uv run pytest -q                    # unit tests; integration tests skip without a test DB
 uv run ruff check .                 # lint (line length 100)
-uv run ruff format --check .        # formatting (not yet enforced; 1 file currently differs)
+uv run ruff format --check .        # formatting (enforced in CI)
 uv run alembic upgrade head --sql   # validate migrations offline
+
+# PostgreSQL integration tests (repository + migrations), disposable DB on port 55432
+docker compose --profile test up -d --wait test-db
+FOOTBALL_RESULTS_TEST_DATABASE_URL=postgresql+psycopg_async://football:football@localhost:55432/football_test uv run pytest -q
+docker compose --profile test down
 docker compose up -d db             # local PostgreSQL
 uv run alembic upgrade head && uv run uvicorn app.main:app --reload
 uv run python -m app.scheduler      # scheduler, second terminal
 ~~~
 
-Run `pytest` and `ruff check` before declaring any change done.
+Before declaring a change done, run `ruff check`, `ruff format --check`, and `pytest` **with** the
+integration database when touching `app/repository.py`, `app/db_models.py`, or `migrations/`.
+CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request.
 
 ## Conventions and gotchas
 
@@ -56,6 +64,10 @@ Run `pytest` and `ruff check` before declaring any change done.
 - football-data.org is throttled (`FOOTBALL_DATA_MIN_REQUEST_INTERVAL_SECONDS`, default 6s) and
   needs `FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN`. Never commit tokens or `.env`.
 - Tests must not hit the network. Parser tests use inline HTML/JSON fixtures.
+- The integration test database name must contain `test`; the fixtures truncate all tables and
+  the migration test downgrades to `base`.
+- The ORM models must match the migrations exactly (`alembic check` runs in the integration
+  tests). Example: `competition.slug` is a unique constraint plus a separate non-unique index.
 - Keep the version in sync in `pyproject.toml` and `app/main.py` (`FastAPI(version=...)`).
 - Update `README.md` when behaviour, endpoints, or configuration change.
 
