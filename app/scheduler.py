@@ -28,11 +28,14 @@ async def run() -> None:
         try:
             await repository.seed_competitions(COMPETITIONS)
             await repository.heartbeat(worker_id, started_at)
-            targets = await repository.claim_due_seasons(settings.scheduler_claim_limit)
+            targets = await repository.claim_queued_scrape_runs(settings.scheduler_claim_limit)
+            targets.extend(await repository.claim_due_seasons(settings.scheduler_claim_limit))
             for target in targets:
                 try:
                     matches = await scraper.scrape(target.competition, target.source)
-                    await repository.replace_competition(target.competition, target.source, matches)
+                    await repository.replace_competition(
+                        target.competition, target.source, matches, run_id=target.run_id
+                    )
                     logger.info(
                         "refreshed %s %s (%d fixtures)",
                         target.competition.slug,
@@ -43,7 +46,9 @@ async def run() -> None:
                     logger.exception(
                         "refresh failed for %s %s", target.competition.slug, target.source.season
                     )
-                    await repository.record_scrape_failure(target.competition, target.source, error)
+                    await repository.record_scrape_failure(
+                        target.competition, target.source, error, run_id=target.run_id
+                    )
         except Exception:
             logger.exception("scheduler cycle failed; will retry")
         await asyncio.sleep(settings.scheduler_loop_seconds)

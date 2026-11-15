@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SeasonSource(BaseModel):
@@ -124,11 +124,29 @@ class ResultsResponse(BaseModel):
     fetched: bool | None = None
 
 
+class JobAccepted(BaseModel):
+    job_id: int
+    status: str
+    status_url: str
+
+
+class ScrapeJobStatus(BaseModel):
+    job_id: int
+    competition: str
+    season: str
+    status: str
+    queued_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+    matches_found: int | None
+    error_message: str | None
+
+
 class RefreshRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     competition: str = Field(examples=["ekstraklasa"])
     season: str | None = Field(default=None, pattern=r"^\d{4}-\d{4}$")
-    first_round: int | None = Field(default=None, ge=1)
-    last_round: int | None = Field(default=None, ge=1)
 
 
 class HistoricalFetchRequest(BaseModel):

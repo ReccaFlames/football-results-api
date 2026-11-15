@@ -1,9 +1,11 @@
+import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Path, Query, Response
+from fastapi.security import APIKeyHeader
 
 from app.competitions import COMPETITIONS, source_from_url
 from app.config import settings
@@ -11,10 +13,12 @@ from app.database import session_factory
 from app.models import (
     CompetitionSummary,
     HistoricalFetchRequest,
+    JobAccepted,
     RefreshRequest,
     ResultsResponse,
+    ScrapeJobStatus,
 )
-from app.repository import PostgresResultRepository
+from app.repository import ActiveScrapeJobConflict, PostgresResultRepository
 from app.scraper import create_scraper_registry
 
 store = PostgresResultRepository(session_factory)
@@ -24,6 +28,29 @@ scraper = create_scraper_registry(
     settings.football_data_api_token,
     settings.football_data_min_request_interval_seconds,
 )
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+async def require_api_key(api_key: str | None = Depends(api_key_header)) -> None:
+    configured_keys = tuple(key.strip() for key in settings.api_keys.split(",") if key.strip())
+    if not configured_keys:
+        raise HTTPException(status_code=503, detail="Write endpoints are disabled")
+    supplied_key = api_key or ""
+    authenticated = False
+    for configured_key in configured_keys:
+        authenticated = secrets.compare_digest(supplied_key, configured_key) | authenticated
+    if not authenticated:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing API key",
+            headers={"WWW-Authenticate": "ApiKey"},
+        )
+
+
+def _job_accepted(response: Response, job_id: int, status: str) -> JobAccepted:
+    status_url = f"/api/v1/jobs/{job_id}"
+    response.headers["Location"] = status_url
+    return JobAccepted(job_id=job_id, status=status, status_url=status_url)
 
 
 @asynccontextmanager
@@ -81,8 +108,13 @@ async def get_results(
     )
 
 
-@app.post("/api/v1/results/refresh", response_model=ResultsResponse)
-async def refresh_results(request: RefreshRequest) -> ResultsResponse:
+@app.post(
+    "/api/v1/results/refresh",
+    response_model=JobAccepted,
+    status_code=202,
+    dependencies=[Depends(require_api_key)],
+)
+async def refresh_results(request: RefreshRequest, response: Response) -> JobAccepted:
     competition = await store.get_competition(request.competition)
     if competition is None:
         raise HTTPException(status_code=404, detail=f"Unknown competition: {request.competition}")
@@ -95,46 +127,36 @@ async def refresh_results(request: RefreshRequest) -> ResultsResponse:
                 "use /api/v1/results/history/fetch for historical seasons"
             ),
         )
-    if (
-        request.first_round is not None
-        and request.last_round is not None
-        and request.first_round > request.last_round
-    ):
-        raise HTTPException(status_code=422, detail="first_round cannot exceed last_round")
-    if (request.first_round is None) != (request.last_round is None):
-        raise HTTPException(
-            status_code=422,
-            detail="first_round and last_round must be provided together",
-        )
-    if competition.format != "league" and request.first_round is not None:
-        raise HTTPException(
-            status_code=422,
-            detail="Round ranges are available only for league competitions",
-        )
     source = competition.seasons[competition.current_season]
     try:
-        all_results = await scraper.scrape(competition, source)
-    except Exception as error:
-        await store.record_scrape_failure(competition, source, error)
-        raise HTTPException(status_code=502, detail=f"Source refresh failed: {error}") from error
-    refreshed_at = await store.replace_competition(competition, source, all_results)
-    fresh = [result for item in all_results if (result := item.as_result()) is not None]
-    if request.first_round is not None and request.last_round is not None:
-        fresh = [
-            item
-            for item in fresh
-            if item.round is not None and request.first_round <= item.round <= request.last_round
-        ]
-    return ResultsResponse(
-        results=fresh,
-        count=len(fresh),
-        refreshed_at=refreshed_at,
-        stale=False,
-    )
+        job_id, status = await store.enqueue_scrape(competition, source)
+    except ActiveScrapeJobConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return _job_accepted(response, job_id, status)
 
 
-@app.post("/api/v1/results/history/fetch", response_model=ResultsResponse)
-async def fetch_historical_results(request: HistoricalFetchRequest) -> ResultsResponse:
+@app.get(
+    "/api/v1/jobs/{job_id}",
+    response_model=ScrapeJobStatus,
+    dependencies=[Depends(require_api_key)],
+)
+async def get_job_status(job_id: int = Path(ge=1)) -> ScrapeJobStatus:
+    job = await store.get_scrape_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Unknown job: {job_id}")
+    return job
+
+
+@app.post(
+    "/api/v1/results/history/fetch",
+    response_model=JobAccepted | ResultsResponse,
+    status_code=202,
+    responses={200: {"model": ResultsResponse}},
+    dependencies=[Depends(require_api_key)],
+)
+async def fetch_historical_results(
+    request: HistoricalFetchRequest, response: Response
+) -> JobAccepted | ResultsResponse:
     competition = await store.get_competition(request.competition)
     if competition is None:
         raise HTTPException(status_code=404, detail=f"Unknown competition: {request.competition}")
@@ -172,6 +194,7 @@ async def fetch_historical_results(request: HistoricalFetchRequest) -> ResultsRe
             competition=competition.slug,
             season=request.season,
         )
+        response.status_code = 200
         return ResultsResponse(
             results=cached,
             count=len(cached),
@@ -180,16 +203,7 @@ async def fetch_historical_results(request: HistoricalFetchRequest) -> ResultsRe
             fetched=False,
         )
     try:
-        fresh = await scraper.scrape(competition, source)
-    except Exception as error:
-        await store.record_scrape_failure(competition, source, error)
-        raise HTTPException(status_code=502, detail=f"Source fetch failed: {error}") from error
-    refreshed_at = await store.replace_competition(competition, source, fresh)
-    results = [result for item in fresh if (result := item.as_result()) is not None]
-    return ResultsResponse(
-        results=results,
-        count=len(results),
-        refreshed_at=refreshed_at,
-        stale=False,
-        fetched=True,
-    )
+        job_id, status = await store.enqueue_scrape(competition, source)
+    except ActiveScrapeJobConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return _job_accepted(response, job_id, status)

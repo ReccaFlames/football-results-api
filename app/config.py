@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     )
     scheduler_loop_seconds: float = 30.0
     scheduler_claim_limit: int = 5
+    api_keys: str = ""
     football_data_api_token: str | None = None
     football_data_min_request_interval_seconds: float = 6.0
 

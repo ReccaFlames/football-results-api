@@ -13,7 +13,14 @@ from app.db_models import (
     SchedulerHeartbeatRow,
     ScrapeRunRow,
 )
-from app.models import Competition, CompetitionSummary, MatchResult, ScrapedMatch, SeasonSource
+from app.models import (
+    Competition,
+    CompetitionSummary,
+    MatchResult,
+    ScrapedMatch,
+    ScrapeJobStatus,
+    SeasonSource,
+)
 from app.scheduling import calculate_next_check, failure_backoff
 
 
@@ -33,6 +40,11 @@ def _source_key(match: ScrapedMatch) -> str:
 class RefreshTarget:
     competition: Competition
     source: SeasonSource
+    run_id: int | None = None
+
+
+class ActiveScrapeJobConflict(ValueError):
+    pass
 
 
 class PostgresResultRepository:
@@ -246,8 +258,121 @@ class PostgresResultRepository:
             )
             return value is not None
 
+    async def enqueue_scrape(
+        self, competition: Competition, source: SeasonSource
+    ) -> tuple[int, str]:
+        now = _now()
+        async with self.sessions.begin() as session:
+            row = await session.scalar(
+                select(CompetitionRow)
+                .where(CompetitionRow.slug == competition.slug)
+                .with_for_update()
+            )
+            if row is None:
+                raise ValueError(f"Unknown competition: {competition.slug}")
+            season = await self._ensure_season(session, row, competition, source, now)
+            season = await session.scalar(
+                select(CompetitionSeasonRow)
+                .where(CompetitionSeasonRow.id == season.id)
+                .with_for_update()
+            )
+            if season is None:
+                raise ValueError(f"Unknown season: {competition.slug} {source.season}")
+            active_run = await session.scalar(
+                select(ScrapeRunRow)
+                .where(
+                    ScrapeRunRow.competition_season_id == season.id,
+                    ScrapeRunRow.status.in_(("queued", "running")),
+                )
+                .order_by(ScrapeRunRow.id.desc())
+                .limit(1)
+                .with_for_update()
+            )
+            if active_run is not None:
+                if active_run.source_url != source.source_url:
+                    raise ActiveScrapeJobConflict(
+                        f"A scrape job for {competition.slug} {source.season} is already active"
+                    )
+                return active_run.id, active_run.status
+
+            run = ScrapeRunRow(
+                competition_season_id=season.id,
+                status="queued",
+                source_url=source.source_url,
+                queued_at=now,
+                started_at=None,
+                completed_at=None,
+                matches_found=None,
+                error_message=None,
+            )
+            session.add(run)
+            await session.flush()
+            return run.id, run.status
+
+    async def get_scrape_job(self, run_id: int) -> ScrapeJobStatus | None:
+        async with self.sessions() as session:
+            row = await session.execute(
+                select(ScrapeRunRow, CompetitionSeasonRow.season, CompetitionRow.slug)
+                .join(
+                    CompetitionSeasonRow,
+                    ScrapeRunRow.competition_season_id == CompetitionSeasonRow.id,
+                )
+                .join(CompetitionRow, CompetitionSeasonRow.competition_id == CompetitionRow.id)
+                .where(ScrapeRunRow.id == run_id)
+            )
+            result = row.one_or_none()
+            if result is None:
+                return None
+            run, season, competition = result
+            return ScrapeJobStatus(
+                job_id=run.id,
+                competition=competition,
+                season=season,
+                status=run.status,
+                queued_at=run.queued_at,
+                started_at=run.started_at,
+                completed_at=run.completed_at,
+                matches_found=run.matches_found,
+                error_message=run.error_message,
+            )
+
+    async def claim_queued_scrape_runs(self, limit: int) -> list[RefreshTarget]:
+        now = _now()
+        async with self.sessions.begin() as session:
+            rows = (
+                await session.execute(
+                    select(ScrapeRunRow, CompetitionSeasonRow, CompetitionRow)
+                    .join(
+                        CompetitionSeasonRow,
+                        ScrapeRunRow.competition_season_id == CompetitionSeasonRow.id,
+                    )
+                    .join(CompetitionRow, CompetitionSeasonRow.competition_id == CompetitionRow.id)
+                    .options(selectinload(CompetitionRow.seasons))
+                    .where(ScrapeRunRow.status == "queued")
+                    .order_by(ScrapeRunRow.queued_at, ScrapeRunRow.id)
+                    .limit(limit)
+                    .with_for_update(skip_locked=True, of=ScrapeRunRow)
+                )
+            ).all()
+            result = []
+            for run, season, competition_row in rows:
+                run.status = "running"
+                run.started_at = now
+                competition = self._competition(competition_row)
+                source = SeasonSource(
+                    season=season.season,
+                    source_url=run.source_url,
+                    provider=season.provider,
+                )
+                result.append(RefreshTarget(competition, source, run.id))
+            return result
+
     async def replace_competition(
-        self, competition: Competition, source: SeasonSource, fresh: list[ScrapedMatch]
+        self,
+        competition: Competition,
+        source: SeasonSource,
+        fresh: list[ScrapedMatch],
+        run_id: int | None = None,
     ) -> datetime:
         started = _now()
         async with self.sessions.begin() as session:
@@ -257,16 +382,22 @@ class PostgresResultRepository:
             if row is None:
                 raise ValueError(f"Unknown competition: {competition.slug}")
             season = await self._ensure_season(session, row, competition, source, started)
-            run = ScrapeRunRow(
-                competition_season_id=season.id,
-                status="running",
-                source_url=source.source_url,
-                started_at=started,
-                completed_at=None,
-                matches_found=None,
-                error_message=None,
-            )
-            session.add(run)
+            if run_id is None:
+                run = ScrapeRunRow(
+                    competition_season_id=season.id,
+                    status="running",
+                    source_url=source.source_url,
+                    queued_at=started,
+                    started_at=started,
+                    completed_at=None,
+                    matches_found=None,
+                    error_message=None,
+                )
+                session.add(run)
+            else:
+                run = await session.get(ScrapeRunRow, run_id)
+                if run is None or run.competition_season_id != season.id or run.status != "running":
+                    raise ValueError(f"Scrape job {run_id} is not running for {source.season}")
             await session.execute(
                 delete(MatchRow).where(MatchRow.competition_season_id == season.id)
             )
@@ -317,7 +448,11 @@ class PostgresResultRepository:
         return now
 
     async def record_scrape_failure(
-        self, competition: Competition, source: SeasonSource, error: Exception
+        self,
+        competition: Competition,
+        source: SeasonSource,
+        error: Exception,
+        run_id: int | None = None,
     ) -> None:
         now = _now()
         async with self.sessions.begin() as session:
@@ -325,6 +460,8 @@ class PostgresResultRepository:
                 select(CompetitionRow).where(CompetitionRow.slug == competition.slug)
             )
             if row is None:
+                if run_id is not None:
+                    raise ValueError(f"Unknown competition: {competition.slug}")
                 return
             season = await self._ensure_season(session, row, competition, source, now)
             season.last_checked_at, season.updated_at = now, now
@@ -332,17 +469,29 @@ class PostgresResultRepository:
             if season.is_current and season.automatic_refresh_enabled:
                 season.scheduler_state = "retrying"
                 season.next_check_at = now + failure_backoff(season.consecutive_failures)
-            session.add(
-                ScrapeRunRow(
-                    competition_season_id=season.id,
-                    status="failed",
-                    source_url=source.source_url,
-                    started_at=now,
-                    completed_at=now,
-                    matches_found=None,
-                    error_message=str(error)[:4000],
+            if run_id is not None:
+                run = await session.get(ScrapeRunRow, run_id)
+                if run is None or run.competition_season_id != season.id or run.status != "running":
+                    raise ValueError(f"Scrape job {run_id} is not running for {source.season}")
+                run.started_at = run.started_at or now
+                run.status, run.completed_at, run.error_message = (
+                    "failed",
+                    now,
+                    str(error)[:4000],
                 )
-            )
+            else:
+                session.add(
+                    ScrapeRunRow(
+                        competition_season_id=season.id,
+                        status="failed",
+                        source_url=source.source_url,
+                        queued_at=now,
+                        started_at=now,
+                        completed_at=now,
+                        matches_found=None,
+                        error_message=str(error)[:4000],
+                    )
+                )
 
     async def claim_due_seasons(self, limit: int) -> list[RefreshTarget]:
         now = _now()
@@ -356,10 +505,16 @@ class PostgresResultRepository:
                         CompetitionSeasonRow.is_current,
                         CompetitionSeasonRow.automatic_refresh_enabled,
                         CompetitionSeasonRow.next_check_at <= now,
+                        ~select(ScrapeRunRow.id)
+                        .where(
+                            ScrapeRunRow.competition_season_id == CompetitionSeasonRow.id,
+                            ScrapeRunRow.status.in_(("queued", "running")),
+                        )
+                        .exists(),
                     )
                     .order_by(CompetitionSeasonRow.next_check_at)
                     .limit(limit)
-                    .with_for_update(skip_locked=True)
+                    .with_for_update(skip_locked=True, of=CompetitionSeasonRow)
                 )
             ).all()
             result = []
@@ -378,7 +533,19 @@ class PostgresResultRepository:
                     current_season=season.season,
                     seasons={season.season: source},
                 )
-                result.append(RefreshTarget(value, source))
+                run = ScrapeRunRow(
+                    competition_season_id=season.id,
+                    status="running",
+                    source_url=source.source_url,
+                    queued_at=now,
+                    started_at=now,
+                    completed_at=None,
+                    matches_found=None,
+                    error_message=None,
+                )
+                session.add(run)
+                await session.flush()
+                result.append(RefreshTarget(value, source, run.id))
             return result
 
     async def heartbeat(self, worker_id: str, started_at: datetime) -> None:

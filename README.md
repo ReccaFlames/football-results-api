@@ -72,8 +72,8 @@ and alembic_version.
 - 90minut source URLs must match `http(s)://(www.)90minut.pl/liga/1/ligaNNNNN.html`.
 - Scheduler thresholds (match duration, polling intervals, backoff) are constants in code.
 - Only finished matches are exposed; scheduled fixtures are stored but not served.
-- There is no authentication; refresh and fetch endpoints are open to any client that can reach
-  the API.
+- Refresh and history-fetch requests require an API key; write endpoints return `503` until at
+  least one key is configured.
 - 90minut match-detail pages are cached in process memory only.
 
 ## Local development
@@ -96,6 +96,15 @@ FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN=your-token-here
 
 Do not commit the token. The API can start without it and the 90minut competitions continue to
 work, but Premier League refreshes will report a clear configuration error until it is configured.
+
+Protect refresh and history-fetch requests by setting one or more comma-separated API keys:
+
+~~~dotenv
+FOOTBALL_RESULTS_API_KEYS=replace-with-a-long-random-key
+~~~
+
+Send a configured key in the `X-API-Key` header. Keep API keys out of source control and logs.
+With no keys configured, the write endpoints are disabled and return `503`.
 
 ### Run PostgreSQL in Docker and FastAPI locally
 
@@ -156,9 +165,10 @@ only finished matches. For each current season the worker calculates next_check_
 - with no published schedule: once daily;
 - after source errors: 5, 15, 30, then 60 minutes.
 
-Manual current-season refreshes use the same scheduling calculation. Historical seasons are never
-scheduled automatically; they remain available through the historical fetch endpoint. PostgreSQL
-row locking makes claims safe if more than one worker is accidentally running.
+Manual current-season refreshes are queued and use the same scheduling calculation when completed.
+Historical seasons are never scheduled automatically; they remain available through the queued
+historical fetch endpoint. PostgreSQL row locking makes claims safe if more than one worker is
+accidentally running.
 
 ## Database migrations
 
@@ -178,8 +188,9 @@ go through Alembic.
 | GET | `/health` | Database connectivity and scheduler heartbeat (`ok`, `stale`, or `not_started`) |
 | GET | `/api/v1/competitions` | Competitions with available/fetched seasons and scheduler state; `current_season` is `null` when none is designated |
 | GET | `/api/v1/results` | Finished matches; filters: `competition`, `season`, `round`, `stage`, `team` |
-| POST | `/api/v1/results/refresh` | Re-import the current season now (required `competition`); optional `first_round`/`last_round` filter the response |
-| POST | `/api/v1/results/history/fetch` | Import a non-current season, optionally from a supplied `source_url` |
+| POST | `/api/v1/results/refresh` | Queue a current-season refresh (`202 Accepted`; requires `X-API-Key`) |
+| POST | `/api/v1/results/history/fetch` | Queue a non-current-season fetch (`202 Accepted`; requires `X-API-Key`); cached results return immediately |
+| GET | `/api/v1/jobs/{job_id}` | Get queued, running, completed, or failed scrape-job status (`X-API-Key` required) |
 
 Interactive documentation is available at `/docs`.
 
@@ -191,21 +202,25 @@ List database-backed competitions and seasons:
 curl 'http://localhost:8000/api/v1/competitions'
 ~~~
 
-Refresh the current season:
+Queue a refresh of the current season:
 
 ~~~bash
 curl -X POST http://localhost:8000/api/v1/results/refresh \
+  -H 'X-API-Key: your-api-key' \
   -H 'content-type: application/json' \
   -d '{"competition":"ekstraklasa"}'
 ~~~
 
-The whole season is always re-imported. For league competitions you can limit the returned results
-to a round range with `"first_round": 1, "last_round": 5` (both are required together).
+The response is `202 Accepted` with a `Location` header and a `status_url`. Poll that URL, using
+the same API key, until the job completes. The scheduler must be running to process queued jobs.
+Each refresh replaces the full season; query `/api/v1/results` with `round` to limit displayed
+results.
 
-Fetch a configured historical season:
+Queue a fetch of a configured historical season:
 
 ~~~bash
 curl -X POST http://localhost:8000/api/v1/results/history/fetch \
+  -H 'X-API-Key: your-api-key' \
   -H 'content-type: application/json' \
   -d '{"competition":"ekstraklasa","season":"2025-2026"}'
 ~~~
@@ -214,6 +229,7 @@ Fetch and persist an unregistered historical season:
 
 ~~~bash
 curl -X POST http://localhost:8000/api/v1/results/history/fetch \
+  -H 'X-API-Key: your-api-key' \
   -H 'content-type: application/json' \
   -d '{
     "competition":"ekstraklasa",
@@ -222,14 +238,16 @@ curl -X POST http://localhost:8000/api/v1/results/history/fetch \
   }'
 ~~~
 
-The competition-season row and matches are committed together. The season then appears in
-GET /api/v1/competitions. Add force_refresh=true to replace a cached historical snapshot.
-The supplied URL must use a provider already configured for that competition.
+New historical fetches return `202 Accepted` and a job status URL. Cached seasons return their
+results immediately unless `force_refresh` is true. The competition-season row and matches are
+committed together. The season then appears in GET /api/v1/competitions. The supplied URL must use
+a provider already configured for that competition.
 
 Premier League historical sources use season-specific football-data.org URLs, for example:
 
 ~~~bash
 curl -X POST http://localhost:8000/api/v1/results/history/fetch \
+  -H 'X-API-Key: your-api-key' \
   -H 'content-type: application/json' \
   -d '{
     "competition":"premier-league",
@@ -342,7 +360,8 @@ Application variables:
 | FOOTBALL_RESULTS_REQUEST_TIMEOUT_SECONDS | `20` | HTTP timeout for source requests |
 | FOOTBALL_RESULTS_USER_AGENT | `FootballResultsAPI/<package version> (contact: ...)` | Sent to sources; default version comes from package metadata; include a contact address |
 | FOOTBALL_RESULTS_SCHEDULER_LOOP_SECONDS | `30` | Pause between scheduler cycles |
-| FOOTBALL_RESULTS_SCHEDULER_CLAIM_LIMIT | `5` | Max due seasons refreshed per cycle |
+| FOOTBALL_RESULTS_SCHEDULER_CLAIM_LIMIT | `5` | Max queued jobs and due seasons claimed per cycle (each limit applies separately) |
+| FOOTBALL_RESULTS_API_KEYS | empty | Comma-separated API keys; required for write endpoints and job status |
 | FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN | empty | football-data.org token (needed for Premier League) |
 | FOOTBALL_RESULTS_FOOTBALL_DATA_MIN_REQUEST_INTERVAL_SECONDS | `6` | Throttle for football-data.org (free tier: 10 req/min) |
 

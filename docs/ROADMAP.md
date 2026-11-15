@@ -125,12 +125,12 @@ How to use this list:
   - [x] Run `ruff format` on the whole repo
   - [x] Remove the Ekstraklasa defaults (`RefreshRequest.competition`, `MatchResult.competition`)
   - [x] `list_competitions` handles a competition with no current season
-- [ ] **3. Safe write endpoints**
-  - [ ] API-key authentication (`X-API-Key`, `FOOTBALL_RESULTS_API_KEYS`) for refresh and
+- [x] **3. Safe write endpoints**
+  - [x] API-key authentication (`X-API-Key`, `FOOTBALL_RESULTS_API_KEYS`) for refresh and
         history fetch
-  - [ ] Refresh queues the season for the scheduler and returns `202` with a status URL
-  - [ ] History fetch runs as a queued job
-  - [ ] Job/status endpoint backed by `scrape_run`
+  - [x] Refresh queues the season for the scheduler and returns `202` with a status URL
+  - [x] History fetch runs as a queued job
+  - [x] Job/status endpoint backed by `scrape_run`
 - [ ] **4. Polite and resilient scraping**
   - [ ] Per-host throttling for 90minut (configurable minimum interval)
   - [ ] A detail-page failure affects only that match (fields stay `null`, warning logged)

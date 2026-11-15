@@ -1,12 +1,15 @@
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main_module
 from app.competitions import COMPETITIONS, competition_summary
 from app.main import app
-from app.models import MatchResult, ScrapedMatch
+from app.models import MatchResult, ScrapedMatch, ScrapeJobStatus
+
+AUTH_HEADERS = {"X-API-Key": "test-api-key"}
 
 
 class FakeRepository:
@@ -17,6 +20,8 @@ class FakeRepository:
         self.results: dict[tuple[str, str], list[MatchResult]] = {}
         self.fetched: dict[str, set[str]] = {}
         self.refreshed_at: datetime | None = None
+        self.jobs: dict[int, ScrapeJobStatus] = {}
+        self.active_jobs: dict[tuple[str, str], int] = {}
 
     async def health(self) -> None:
         return None
@@ -65,14 +70,53 @@ class FakeRepository:
     async def is_cached(self, competition: str, season: str) -> bool:
         return season in self.fetched.get(competition, set())
 
-    async def replace_competition(self, competition, source, fresh):
+    async def enqueue_scrape(self, competition, source):
+        key = competition.slug, source.season
+        active_id = self.active_jobs.get(key)
+        if active_id is not None:
+            return active_id, self.jobs[active_id].status
+        job_id = max(self.jobs, default=0) + 1
+        self.jobs[job_id] = ScrapeJobStatus(
+            job_id=job_id,
+            competition=competition.slug,
+            season=source.season,
+            status="queued",
+            queued_at=datetime.now(UTC),
+            started_at=None,
+            completed_at=None,
+            matches_found=None,
+            error_message=None,
+        )
+        self.active_jobs[key] = job_id
+        return job_id, "queued"
+
+    async def get_scrape_job(self, job_id):
+        return self.jobs.get(job_id)
+
+    async def replace_competition(self, competition, source, fresh, run_id=None):
         competition.seasons[source.season] = source
         self.results[(competition.slug, source.season)] = [
             result for item in fresh if (result := item.as_result()) is not None
         ]
         self.fetched.setdefault(competition.slug, set()).add(source.season)
         self.refreshed_at = datetime.now(UTC)
+        if run_id is not None:
+            job = self.jobs[run_id]
+            self.jobs[run_id] = job.model_copy(
+                update={
+                    "status": "completed",
+                    "started_at": job.queued_at,
+                    "completed_at": self.refreshed_at,
+                    "matches_found": len(fresh),
+                }
+            )
+            self.active_jobs.pop((competition.slug, source.season), None)
         return self.refreshed_at
+
+
+@pytest.fixture(autouse=True)
+def configured_api_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(main_module.settings, "api_keys", "test-api-key")
 
 
 def client_with_empty_store(_tmp_path: Path) -> tuple[TestClient, FakeRepository]:
@@ -120,7 +164,7 @@ def test_unknown_competition_is_rejected(tmp_path: Path) -> None:
     assert response.status_code == 404
 
 
-def test_round_range_is_rejected_for_cup(tmp_path: Path) -> None:
+def test_refresh_rejects_removed_round_response_filters(tmp_path: Path) -> None:
     client, _ = client_with_empty_store(tmp_path)
     response = client.post(
         "/api/v1/results/refresh",
@@ -129,14 +173,15 @@ def test_round_range_is_rejected_for_cup(tmp_path: Path) -> None:
             "first_round": 1,
             "last_round": 2,
         },
+        headers=AUTH_HEADERS,
     )
     assert response.status_code == 422
-    assert "only for league competitions" in response.json()["detail"]
+    assert response.json()["detail"][0]["type"] == "extra_forbidden"
 
 
 def test_refresh_requires_competition(tmp_path: Path) -> None:
     client, _ = client_with_empty_store(tmp_path)
-    response = client.post("/api/v1/results/refresh", json={})
+    response = client.post("/api/v1/results/refresh", json={}, headers=AUTH_HEADERS)
     assert response.status_code == 422
     assert response.json()["detail"][0]["loc"] == ["body", "competition"]
 
@@ -146,9 +191,56 @@ def test_refresh_rejects_historical_season(tmp_path: Path) -> None:
     response = client.post(
         "/api/v1/results/refresh",
         json={"competition": "ekstraklasa", "season": "2025-2026"},
+        headers=AUTH_HEADERS,
     )
     assert response.status_code == 422
     assert "history/fetch" in response.json()["detail"]
+
+
+def test_write_endpoints_require_a_configured_api_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _ = client_with_empty_store(tmp_path)
+    monkeypatch.setattr(main_module.settings, "api_keys", "")
+
+    disabled = client.post(
+        "/api/v1/results/refresh",
+        json={"competition": "ekstraklasa"},
+    )
+    assert disabled.status_code == 503
+
+    monkeypatch.setattr(main_module.settings, "api_keys", "test-api-key")
+    missing_key = client.post(
+        "/api/v1/results/refresh",
+        json={"competition": "ekstraklasa"},
+    )
+    invalid_key = client.post(
+        "/api/v1/results/history/fetch",
+        json={"competition": "ekstraklasa", "season": "2025-2026"},
+        headers={"X-API-Key": "wrong"},
+    )
+    assert missing_key.status_code == invalid_key.status_code == 401
+
+
+def test_refresh_is_queued_and_status_is_protected(tmp_path: Path) -> None:
+    client, _ = client_with_empty_store(tmp_path)
+
+    response = client.post(
+        "/api/v1/results/refresh",
+        json={"competition": "ekstraklasa"},
+        headers=AUTH_HEADERS,
+    )
+
+    assert response.status_code == 202
+    assert response.json() == {
+        "job_id": 1,
+        "status": "queued",
+        "status_url": "/api/v1/jobs/1",
+    }
+    assert response.headers["location"] == "/api/v1/jobs/1"
+    assert client.get("/api/v1/jobs/1", headers=AUTH_HEADERS).json()["status"] == "queued"
+    assert client.get("/api/v1/jobs/1").status_code == 401
+    assert client.get("/api/v1/jobs/999", headers=AUTH_HEADERS).status_code == 404
 
 
 def match_for(competition, source) -> ScrapedMatch:
@@ -169,7 +261,9 @@ def match_for(competition, source) -> ScrapedMatch:
     )
 
 
-def test_historical_fetch_downloads_only_once(tmp_path: Path) -> None:
+async def test_historical_fetch_is_queued_and_cached_requests_return_results(
+    tmp_path: Path,
+) -> None:
     class FakeScraper:
         calls = 0
 
@@ -179,30 +273,36 @@ def test_historical_fetch_downloads_only_once(tmp_path: Path) -> None:
 
     fake = FakeScraper()
     main_module.scraper = fake
-    client, _ = client_with_empty_store(tmp_path)
+    client, repository = client_with_empty_store(tmp_path)
     payload = {"competition": "ekstraklasa", "season": "2025-2026"}
 
-    first = client.post("/api/v1/results/history/fetch", json=payload)
-    second = client.post("/api/v1/results/history/fetch", json=payload)
+    first = client.post("/api/v1/results/history/fetch", json=payload, headers=AUTH_HEADERS)
 
-    assert first.status_code == 200
-    assert first.json()["fetched"] is True
-    assert first.json()["results"][0]["home_goals"] == 2
-    assert first.json()["results"][0]["home_corners"] is None
-    assert second.status_code == 200
-    assert second.json()["fetched"] is False
-    assert fake.calls == 1
+    assert first.status_code == 202
+    assert first.json()["status"] == "queued"
+    assert fake.calls == 0
+    competition = repository.competitions["ekstraklasa"]
+    source = competition.seasons["2025-2026"]
+    await repository.replace_competition(
+        competition, source, [match_for(competition, source)], run_id=first.json()["job_id"]
+    )
+    cached = client.post("/api/v1/results/history/fetch", json=payload, headers=AUTH_HEADERS)
+    assert cached.status_code == 200
+    assert cached.json()["fetched"] is False
+    assert cached.json()["results"][0]["home_goals"] == 2
+    assert cached.json()["results"][0]["home_corners"] is None
 
     forced = client.post(
         "/api/v1/results/history/fetch",
         json={**payload, "force_refresh": True},
+        headers=AUTH_HEADERS,
     )
-    assert forced.status_code == 200
-    assert forced.json()["fetched"] is True
-    assert fake.calls == 2
+    assert forced.status_code == 202
+    assert forced.json()["status"] == "queued"
+    assert fake.calls == 0
 
 
-def test_unknown_historical_season_is_persisted_and_listed(tmp_path: Path) -> None:
+def test_unknown_historical_season_is_queued(tmp_path: Path) -> None:
     class FakeScraper:
         async def scrape(self, competition, source):
             return [match_for(competition, source)]
@@ -216,18 +316,11 @@ def test_unknown_historical_season_is_persisted_and_listed(tmp_path: Path) -> No
             "season": "2024-2025",
             "source_url": "http://www.90minut.pl/liga/1/liga13482.html",
         },
+        headers=AUTH_HEADERS,
     )
-    assert response.status_code == 200
-    assert response.json()["fetched"] is True
-
-    competitions = client.get("/api/v1/competitions").json()
-    ekstraklasa = next(item for item in competitions if item["slug"] == "ekstraklasa")
-    assert ekstraklasa["available_seasons"] == [
-        "2026-2027",
-        "2025-2026",
-        "2024-2025",
-    ]
-    assert ekstraklasa["fetched_seasons"] == ["2024-2025"]
+    assert response.status_code == 202
+    job = client.get(response.json()["status_url"], headers=AUTH_HEADERS)
+    assert job.json()["season"] == "2024-2025"
 
 
 def test_unknown_historical_season_requires_source(tmp_path: Path) -> None:
@@ -235,6 +328,7 @@ def test_unknown_historical_season_requires_source(tmp_path: Path) -> None:
     response = client.post(
         "/api/v1/results/history/fetch",
         json={"competition": "ekstraklasa", "season": "2024-2025"},
+        headers=AUTH_HEADERS,
     )
     assert response.status_code == 422
     assert "provide source_url" in response.json()["detail"]
@@ -249,6 +343,7 @@ def test_historical_source_rejects_arbitrary_url(tmp_path: Path) -> None:
             "season": "2024-2025",
             "source_url": "http://127.0.0.1/private",
         },
+        headers=AUTH_HEADERS,
     )
     assert response.status_code == 422
     assert "90minut page or football-data.org" in response.json()["detail"]
@@ -265,6 +360,7 @@ def test_historical_source_rejects_provider_from_another_competition(
             "season": "2024-2025",
             "source_url": ("https://api.football-data.org/v4/competitions/PL/matches?season=2024"),
         },
+        headers=AUTH_HEADERS,
     )
     assert response.status_code == 422
     assert "not configured for ekstraklasa" in response.json()["detail"]

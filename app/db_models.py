@@ -134,7 +134,10 @@ class MatchRow(Base):
 
 class ScrapeRunRow(Base):
     __tablename__ = "scrape_run"
-    __table_args__ = (Index("ix_scrape_run_season_started", "competition_season_id", "started_at"),)
+    __table_args__ = (
+        Index("ix_scrape_run_season_started", "competition_season_id", "started_at"),
+        Index("ix_scrape_run_status_queued_at", "status", "queued_at"),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     competition_season_id: Mapped[int] = mapped_column(
@@ -143,7 +146,8 @@ class ScrapeRunRow(Base):
     )
     status: Mapped[str] = mapped_column(String(20))
     source_url: Mapped[str] = mapped_column(Text)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    queued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     matches_found: Mapped[int | None] = mapped_column(Integer)
     error_message: Mapped[str | None] = mapped_column(Text)
