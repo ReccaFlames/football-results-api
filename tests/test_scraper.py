@@ -1,5 +1,16 @@
+import logging
+import time
+from itertools import pairwise
+
+import httpx
+
 from app.competitions import COMPETITIONS
-from app.scraper import parse_matches, parse_ninety_minut_details, parse_results
+from app.scraper import (
+    NinetyMinutScraper,
+    parse_matches,
+    parse_ninety_minut_details,
+    parse_results,
+)
 
 
 def current_source(slug: str):
@@ -25,6 +36,44 @@ def result_row(score: str = "2-1") -> str:
         <td width="190">25 lipca, 17:30 (<nobr>25 998</nobr>)</td>
       </tr>
     """
+
+
+def result_row_for(match_id: int, home_team: str, away_team: str) -> str:
+    return f"""
+      <tr align="left">
+        <td width="180"><b>{home_team}</b></td>
+        <td align="center" width="50"><a href="/mecz.php?id_mecz={match_id}"><b>0-0</b></a></td>
+        <td width="180"><b>{away_team}</b></td>
+        <td width="190">25 lipca, 17:30</td>
+      </tr>
+    """
+
+
+def install_mock_client(
+    monkeypatch,
+    responses: dict[str, tuple[int, bytes]],
+    requests: list[tuple[str, float]],
+) -> None:
+    class MockAsyncClient:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args) -> None:
+            pass
+
+        async def get(self, url: str) -> httpx.Response:
+            requests.append((url, time.monotonic()))
+            status, content = responses[url]
+            return httpx.Response(
+                status,
+                content=content,
+                request=httpx.Request("GET", url),
+            )
+
+    monkeypatch.setattr("app.scraper.httpx.AsyncClient", MockAsyncClient)
 
 
 def test_parses_actual_90minut_league_markup() -> None:
@@ -194,3 +243,71 @@ def test_missing_90minut_goal_minute_is_non_fatal() -> None:
     assert details["away_goals_first_half"] is None
     assert details["home_goals_second_half"] is None
     assert details["away_goals_second_half"] is None
+
+
+async def test_detail_page_failure_only_leaves_that_matches_details_null(
+    monkeypatch, caplog
+) -> None:
+    source = current_source("ekstraklasa")
+    listing_url = source.source_url
+    detail_url = "http://www.90minut.pl/mecz.php?id_mecz=1"
+    listing = page_with_rows("Kolejka 1", result_row_for(1, "Górnik", "Śląsk"))
+    requests: list[tuple[str, float]] = []
+    install_mock_client(
+        monkeypatch,
+        {
+            listing_url: (200, listing.encode("iso-8859-2")),
+            detail_url: (503, b"temporarily unavailable"),
+        },
+        requests,
+    )
+    scraper = NinetyMinutScraper(1, "test-agent", min_interval_seconds=0)
+
+    with caplog.at_level(logging.WARNING, logger="app.scraper"):
+        matches = await scraper.scrape(COMPETITIONS["ekstraklasa"], source)
+
+    assert len(matches) == 1
+    assert matches[0].home_score == 0
+    assert matches[0].home_goals_first_half is None
+    assert matches[0].away_goals_first_half is None
+    assert matches[0].home_cards is None
+    assert "leaving detail fields null" in caplog.text
+
+
+async def test_detail_cache_is_bounded_and_requests_are_throttled_per_host(monkeypatch) -> None:
+    source = current_source("ekstraklasa")
+    listing_url = source.source_url
+    first_url = "http://www.90minut.pl/mecz.php?id_mecz=1"
+    second_url = "http://www.90minut.pl/mecz.php?id_mecz=2"
+    listing = page_with_rows(
+        "Kolejka 1",
+        result_row_for(1, "Górnik", "Śląsk") + result_row_for(2, "Wisła", "Lech"),
+    )
+    detail = b"<table><tr><td>A</td><td><nobr>0 - 0</nobr></td><td>B</td></tr></table>"
+    requests: list[tuple[str, float]] = []
+    install_mock_client(
+        monkeypatch,
+        {
+            listing_url: (200, listing.encode("iso-8859-2")),
+            first_url: (200, detail),
+            second_url: (200, detail),
+        },
+        requests,
+    )
+    scraper = NinetyMinutScraper(
+        1,
+        "test-agent",
+        min_interval_seconds=0.005,
+        detail_cache_max_entries=1,
+    )
+
+    for _ in range(2):
+        matches = await scraper.scrape(COMPETITIONS["ekstraklasa"], source)
+        assert len(matches) == 2
+    detail_requests = [url for url, _ in requests if "mecz.php" in url]
+    request_times = [requested_at for _, requested_at in requests]
+
+    assert detail_requests.count(first_url) == 2
+    assert detail_requests.count(second_url) == 2
+    assert len(scraper._detail_cache) == 1
+    assert all(later - earlier >= 0.004 for earlier, later in pairwise(request_times))

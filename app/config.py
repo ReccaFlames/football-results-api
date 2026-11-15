@@ -1,5 +1,6 @@
 from importlib.metadata import version
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -22,6 +23,8 @@ class Settings(BaseSettings):
     api_keys: str = ""
     football_data_api_token: str | None = None
     football_data_min_request_interval_seconds: float = 6.0
+    ninety_minut_min_request_interval_seconds: float = Field(default=2.0, ge=0)
+    ninety_minut_detail_cache_max_entries: int = Field(default=512, ge=0)
 
 
 settings = Settings()

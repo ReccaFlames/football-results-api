@@ -1,6 +1,8 @@
 import asyncio
+import logging
 import re
 import time
+from collections import OrderedDict
 from datetime import datetime
 from typing import Protocol
 from zoneinfo import ZoneInfo
@@ -14,6 +16,8 @@ from app.models import (
     ScrapedMatch,
     SeasonSource,
 )
+
+logger = logging.getLogger(__name__)
 
 ROUND_RE = re.compile(r"^Kolejka\s+(\d+)\b", re.IGNORECASE)
 SCORE_RE = re.compile(r"^(\d{1,2})-(\d{1,2})$")
@@ -267,10 +271,40 @@ def parse_ninety_minut_details(
 
 
 class NinetyMinutScraper:
-    def __init__(self, timeout: float, user_agent: str) -> None:
+    def __init__(
+        self,
+        timeout: float,
+        user_agent: str,
+        min_interval_seconds: float = 2.0,
+        detail_cache_max_entries: int = 512,
+    ) -> None:
         self.timeout = timeout
         self.user_agent = user_agent
-        self._detail_cache: dict[str, dict[str, int | str | None]] = {}
+        self.min_interval_seconds = min_interval_seconds
+        self.detail_cache_max_entries = detail_cache_max_entries
+        self._detail_cache: OrderedDict[str, dict[str, int | str | None]] = OrderedDict()
+        self._host_locks: dict[str, asyncio.Lock] = {}
+        self._last_request_at: dict[str, float] = {}
+
+    async def _get(self, client: httpx.AsyncClient, url: str) -> httpx.Response:
+        host = httpx.URL(url).netloc
+        lock = self._host_locks.setdefault(host, asyncio.Lock())
+        async with lock:
+            previous_request_at = self._last_request_at.get(host)
+            if previous_request_at is not None:
+                delay = self.min_interval_seconds - (time.monotonic() - previous_request_at)
+                if delay > 0:
+                    await asyncio.sleep(delay)
+            self._last_request_at[host] = time.monotonic()
+            return await client.get(url)
+
+    def _cache_details(self, url: str, details: dict[str, int | str | None]) -> None:
+        if self.detail_cache_max_entries == 0:
+            return
+        self._detail_cache[url] = details
+        self._detail_cache.move_to_end(url)
+        if len(self._detail_cache) > self.detail_cache_max_entries:
+            self._detail_cache.popitem(last=False)
 
     async def scrape(
         self,
@@ -282,7 +316,7 @@ class NinetyMinutScraper:
             headers={"User-Agent": self.user_agent},
             follow_redirects=False,
         ) as client:
-            response = await client.get(source.source_url)
+            response = await self._get(client, source.source_url)
             response.raise_for_status()
             matches = parse_ninety_minut_matches(
                 response.content.decode("iso-8859-2"),
@@ -296,12 +330,23 @@ class NinetyMinutScraper:
                     continue
                 details = self._detail_cache.get(match.source_url)
                 if details is None:
-                    detail_response = await client.get(match.source_url)
-                    detail_response.raise_for_status()
-                    details = parse_ninety_minut_details(
-                        detail_response.content.decode("iso-8859-2"), match
-                    )
-                    self._detail_cache[match.source_url] = details
+                    try:
+                        detail_response = await self._get(client, match.source_url)
+                        detail_response.raise_for_status()
+                        details = parse_ninety_minut_details(
+                            detail_response.content.decode("iso-8859-2"), match
+                        )
+                    except (httpx.HTTPError, UnicodeDecodeError, ValueError) as error:
+                        logger.warning(
+                            "failed to fetch 90minut details for %s; leaving detail fields null: %s",
+                            match.source_url,
+                            error,
+                        )
+                        enriched.append(match)
+                        continue
+                    self._cache_details(match.source_url, details)
+                else:
+                    self._detail_cache.move_to_end(match.source_url)
                 enriched.append(match.model_copy(update=details))
         return enriched
 
@@ -508,10 +553,17 @@ def create_scraper_registry(
     user_agent: str,
     football_data_api_token: str | None,
     football_data_min_interval_seconds: float,
+    ninety_minut_min_interval_seconds: float = 2.0,
+    ninety_minut_detail_cache_max_entries: int = 512,
 ) -> ScraperRegistry:
     return ScraperRegistry(
         {
-            "90minut": NinetyMinutScraper(timeout, user_agent),
+            "90minut": NinetyMinutScraper(
+                timeout,
+                user_agent,
+                ninety_minut_min_interval_seconds,
+                ninety_minut_detail_cache_max_entries,
+            ),
             "football-data": FootballDataScraper(
                 timeout,
                 user_agent,

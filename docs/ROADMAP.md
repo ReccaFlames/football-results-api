@@ -131,10 +131,10 @@ How to use this list:
   - [x] Refresh queues the season for the scheduler and returns `202` with a status URL
   - [x] History fetch runs as a queued job
   - [x] Job/status endpoint backed by `scrape_run`
-- [ ] **4. Polite and resilient scraping**
-  - [ ] Per-host throttling for 90minut (configurable minimum interval)
-  - [ ] A detail-page failure affects only that match (fields stay `null`, warning logged)
-  - [ ] Bounded or persistent detail-page cache
+- [x] **4. Polite and resilient scraping**
+  - [x] Per-host throttling for 90minut (configurable minimum interval)
+  - [x] A detail-page failure affects only that match (fields stay `null`, warning logged)
+  - [x] Bounded or persistent detail-page cache
 
 ### Phase 1: Generic and configurable (the README target state)
 

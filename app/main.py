@@ -27,6 +27,8 @@ scraper = create_scraper_registry(
     settings.user_agent,
     settings.football_data_api_token,
     settings.football_data_min_request_interval_seconds,
+    settings.ninety_minut_min_request_interval_seconds,
+    settings.ninety_minut_detail_cache_max_entries,
 )
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 

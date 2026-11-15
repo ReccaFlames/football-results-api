@@ -74,7 +74,9 @@ and alembic_version.
 - Only finished matches are exposed; scheduled fixtures are stored but not served.
 - Refresh and history-fetch requests require an API key; write endpoints return `503` until at
   least one key is configured.
-- 90minut match-detail pages are cached in process memory only.
+- 90minut league and match-detail requests are throttled per host (2 seconds by default).
+  Detail-page failures leave that match's optional detail fields null and are logged without
+  failing the season refresh. Successfully parsed details use a bounded, process-local LRU cache.
 
 ## Local development
 
@@ -364,6 +366,8 @@ Application variables:
 | FOOTBALL_RESULTS_API_KEYS | empty | Comma-separated API keys; required for write endpoints and job status |
 | FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN | empty | football-data.org token (needed for Premier League) |
 | FOOTBALL_RESULTS_FOOTBALL_DATA_MIN_REQUEST_INTERVAL_SECONDS | `6` | Throttle for football-data.org (free tier: 10 req/min) |
+| FOOTBALL_RESULTS_NINETY_MINUT_MIN_REQUEST_INTERVAL_SECONDS | `2` | Minimum delay between requests to each 90minut host; set to `0` to disable |
+| FOOTBALL_RESULTS_NINETY_MINUT_DETAIL_CACHE_MAX_ENTRIES | `512` | Maximum successful 90minut detail responses kept in the process-local LRU cache; set to `0` to disable |
 
 Deployment variables (Docker Compose):
 
