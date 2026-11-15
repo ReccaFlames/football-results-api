@@ -134,6 +134,13 @@ def test_round_range_is_rejected_for_cup(tmp_path: Path) -> None:
     assert "only for league competitions" in response.json()["detail"]
 
 
+def test_refresh_requires_competition(tmp_path: Path) -> None:
+    client, _ = client_with_empty_store(tmp_path)
+    response = client.post("/api/v1/results/refresh", json={})
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["body", "competition"]
+
+
 def test_refresh_rejects_historical_season(tmp_path: Path) -> None:
     client, _ = client_with_empty_store(tmp_path)
     response = client.post(

@@ -118,13 +118,13 @@ How to use this list:
   - [x] Repository tests: seeding, `claim_due_seasons` (incl. `SKIP LOCKED`), `replace_competition`,
         `record_scrape_failure`
   - [x] Migration round-trip test (upgrade → downgrade → upgrade)
-- [ ] **2. Housekeeping**
-  - [ ] Single version source (read from package metadata in `app/main.py` and the User-Agent)
-  - [ ] Untrack `.idea/` and add it to `.gitignore`
-  - [ ] Build the Docker image from `uv.lock` (`uv sync --frozen`)
+- [x] **2. Housekeeping**
+  - [x] Single version source (read from package metadata in `app/main.py` and the User-Agent)
+  - [x] Untrack `.idea/` and add it to `.gitignore`
+  - [x] Build the Docker image from `uv.lock` (`uv sync --frozen`)
   - [x] Run `ruff format` on the whole repo
-  - [ ] Remove the Ekstraklasa defaults (`RefreshRequest.competition`, `MatchResult.competition`)
-  - [ ] `list_competitions` handles a competition with no current season
+  - [x] Remove the Ekstraklasa defaults (`RefreshRequest.competition`, `MatchResult.competition`)
+  - [x] `list_competitions` handles a competition with no current season
 - [ ] **3. Safe write endpoints**
   - [ ] API-key authentication (`X-API-Key`, `FOOTBALL_RESULTS_API_KEYS`) for refresh and
         history fetch

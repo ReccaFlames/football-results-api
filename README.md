@@ -176,9 +176,9 @@ go through Alembic.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/health` | Database connectivity and scheduler heartbeat (`ok`, `stale`, or `not_started`) |
-| GET | `/api/v1/competitions` | Competitions with available/fetched seasons and scheduler state |
+| GET | `/api/v1/competitions` | Competitions with available/fetched seasons and scheduler state; `current_season` is `null` when none is designated |
 | GET | `/api/v1/results` | Finished matches; filters: `competition`, `season`, `round`, `stage`, `team` |
-| POST | `/api/v1/results/refresh` | Re-import the current season now; optional `first_round`/`last_round` filter the response |
+| POST | `/api/v1/results/refresh` | Re-import the current season now (required `competition`); optional `first_round`/`last_round` filter the response |
 | POST | `/api/v1/results/history/fetch` | Import a non-current season, optionally from a supplied `source_url` |
 
 Interactive documentation is available at `/docs`.
@@ -340,7 +340,7 @@ Application variables:
 | --- | --- | --- |
 | FOOTBALL_RESULTS_DATABASE_URL | `postgresql+psycopg_async://football:football@localhost:5432/football` | PostgreSQL connection |
 | FOOTBALL_RESULTS_REQUEST_TIMEOUT_SECONDS | `20` | HTTP timeout for source requests |
-| FOOTBALL_RESULTS_USER_AGENT | `FootballResultsAPI/0.11 (contact: ...)` | Sent to sources; include a contact address |
+| FOOTBALL_RESULTS_USER_AGENT | `FootballResultsAPI/<package version> (contact: ...)` | Sent to sources; default version comes from package metadata; include a contact address |
 | FOOTBALL_RESULTS_SCHEDULER_LOOP_SECONDS | `30` | Pause between scheduler cycles |
 | FOOTBALL_RESULTS_SCHEDULER_CLAIM_LIMIT | `5` | Max due seasons refreshed per cycle |
 | FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN | empty | football-data.org token (needed for Premier League) |
@@ -505,8 +505,7 @@ The current adaptive scheduler is the foundation; planned improvements:
 - `/metrics` (Prometheus): refresh counts, failures, latency, data age per competition.
 - Alerts when a current season has not been refreshed successfully within its expected window.
 - Structured JSON logging.
-- Rename remaining Ekstraklasa-specific defaults (e.g. the default `competition` in refresh
-  requests) once multi-league configuration is in place.
+- Move remaining hard-coded competition configuration into explicit, documented configuration.
 
 ### Suggested implementation order
 

@@ -1,6 +1,7 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from importlib.metadata import version
 
 from fastapi import FastAPI, HTTPException, Query
 
@@ -31,7 +32,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     yield
 
 
-app = FastAPI(title="Football Results API", version="0.12.1", lifespan=lifespan)
+app = FastAPI(
+    title="Football Results API", version=version("football-results-api"), lifespan=lifespan
+)
 
 
 @app.get("/health")

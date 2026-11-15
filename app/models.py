@@ -23,7 +23,7 @@ class CompetitionSummary(BaseModel):
     name: str
     country: str | None = None
     format: str
-    current_season: str
+    current_season: str | None
     available_seasons: list[str]
     fetched_seasons: list[str]
     automatic_refresh_enabled: bool = False
@@ -32,7 +32,7 @@ class CompetitionSummary(BaseModel):
 
 
 class MatchResult(BaseModel):
-    competition: str = "ekstraklasa"
+    competition: str
     season: str
     stage: str = "Unknown stage"
     round: int | None = Field(default=None, ge=1)
@@ -125,7 +125,7 @@ class ResultsResponse(BaseModel):
 
 
 class RefreshRequest(BaseModel):
-    competition: str = Field(default="ekstraklasa", examples=["pierwsza-liga"])
+    competition: str = Field(examples=["ekstraklasa"])
     season: str | None = Field(default=None, pattern=r"^\d{4}-\d{4}$")
     first_round: int | None = Field(default=None, ge=1)
     last_round: int | None = Field(default=None, ge=1)

@@ -68,7 +68,10 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
   the migration test downgrades to `base`.
 - The ORM models must match the migrations exactly (`alembic check` runs in the integration
   tests). Example: `competition.slug` is a unique constraint plus a separate non-unique index.
-- Keep the version in sync in `pyproject.toml` and `app/main.py` (`FastAPI(version=...)`).
+- Read the application and default User-Agent versions from the `football-results-api` package
+  metadata; `pyproject.toml` is the authoritative version source.
+- Build Docker images from `uv.lock` with `uv sync --frozen`.
+- `RefreshRequest.competition` is required. Competition summaries may have a null `current_season`.
 - Update `README.md` when behaviour, endpoints, or configuration change.
 
 ## Roadmap workflow

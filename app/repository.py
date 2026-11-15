@@ -140,21 +140,23 @@ class PostgresResultRepository:
             ).all()
             result = []
             for row in rows:
-                current = next(item for item in row.seasons if item.is_current)
+                current = next((item for item in row.seasons if item.is_current), None)
                 result.append(
                     CompetitionSummary(
                         slug=row.slug,
                         name=row.name,
                         country=row.country,
                         format=row.format,
-                        current_season=current.season,
+                        current_season=None if current is None else current.season,
                         available_seasons=sorted((s.season for s in row.seasons), reverse=True),
                         fetched_seasons=sorted(
                             (s.season for s in row.seasons if s.fetched_at), reverse=True
                         ),
-                        automatic_refresh_enabled=current.automatic_refresh_enabled,
-                        scheduler_state=current.scheduler_state,
-                        next_check_at=current.next_check_at,
+                        automatic_refresh_enabled=(
+                            False if current is None else current.automatic_refresh_enabled
+                        ),
+                        scheduler_state=None if current is None else current.scheduler_state,
+                        next_check_at=None if current is None else current.next_check_at,
                     )
                 )
             return result
