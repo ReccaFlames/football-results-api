@@ -7,8 +7,8 @@ from importlib.metadata import version
 from fastapi import Depends, FastAPI, HTTPException, Path, Query, Response
 from fastapi.security import APIKeyHeader
 
-from app.competitions import COMPETITIONS, source_from_url
-from app.config import settings
+from app.competitions import source_from_url
+from app.config import load_config, settings
 from app.database import session_factory
 from app.models import (
     CompetitionSummary,
@@ -19,17 +19,8 @@ from app.models import (
     ScrapeJobStatus,
 )
 from app.repository import ActiveScrapeJobConflict, PostgresResultRepository
-from app.scraper import create_scraper_registry
 
 store = PostgresResultRepository(session_factory)
-scraper = create_scraper_registry(
-    settings.request_timeout_seconds,
-    settings.user_agent,
-    settings.football_data_api_token,
-    settings.football_data_min_request_interval_seconds,
-    settings.ninety_minut_min_request_interval_seconds,
-    settings.ninety_minut_detail_cache_max_entries,
-)
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
@@ -57,7 +48,8 @@ def _job_accepted(response: Response, job_id: int, status: str) -> JobAccepted:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    await store.seed_competitions(COMPETITIONS)
+    config = load_config()
+    await store.seed_competitions(config.to_competitions())
     yield
 
 
@@ -120,6 +112,8 @@ async def refresh_results(request: RefreshRequest, response: Response) -> JobAcc
     competition = await store.get_competition(request.competition)
     if competition is None:
         raise HTTPException(status_code=404, detail=f"Unknown competition: {request.competition}")
+    if competition.current_season is None:
+        raise HTTPException(status_code=422, detail="No current season is configured")
     season = request.season or competition.current_season
     if season != competition.current_season:
         raise HTTPException(

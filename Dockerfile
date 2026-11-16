@@ -3,13 +3,15 @@ FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PATH="/app/.venv/bin:$PATH"
+    PATH="/app/.venv/bin:$PATH" \
+    FOOTBALL_RESULTS_CONFIG_FILE=/app/config/competitions.yaml
 
 WORKDIR /app
 
 COPY --from=uv /uv /uvx /bin/
 COPY pyproject.toml uv.lock README.md alembic.ini ./
 COPY app ./app
+COPY config ./config
 COPY migrations ./migrations
 COPY docker-entrypoint.sh ./
 

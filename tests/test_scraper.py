@@ -4,13 +4,15 @@ from itertools import pairwise
 
 import httpx
 
-from app.competitions import COMPETITIONS
+from app.config import load_config
 from app.scraper import (
     NinetyMinutScraper,
     parse_matches,
     parse_ninety_minut_details,
     parse_results,
 )
+
+COMPETITIONS = load_config().to_competitions()
 
 
 def current_source(slug: str):

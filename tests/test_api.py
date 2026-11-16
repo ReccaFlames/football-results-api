@@ -5,11 +5,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main_module
-from app.competitions import COMPETITIONS, competition_summary
+from app.competitions import competition_summary
+from app.config import load_config
 from app.main import app
 from app.models import MatchResult, ScrapedMatch, ScrapeJobStatus
 
 AUTH_HEADERS = {"X-API-Key": "test-api-key"}
+COMPETITIONS = load_config().to_competitions()
 
 
 class FakeRepository:

@@ -14,7 +14,7 @@ class Competition(BaseModel):
     name: str
     country: str | None = None
     format: str
-    current_season: str
+    current_season: str | None
     seasons: dict[str, SeasonSource]
 
 

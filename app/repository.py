@@ -2,7 +2,7 @@ import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
@@ -58,6 +58,38 @@ class PostgresResultRepository:
     async def seed_competitions(self, seeds: dict[str, Competition]) -> None:
         async with self.sessions.begin() as session:
             now = _now()
+            existing_rows = (
+                await session.scalars(
+                    select(CompetitionRow).options(selectinload(CompetitionRow.seasons))
+                )
+            ).all()
+            for existing_row in existing_rows:
+                if existing_row.slug in seeds or not existing_row.is_enabled:
+                    continue
+                existing_row.is_enabled = False
+                existing_row.updated_at = now
+                for season in existing_row.seasons:
+                    season.is_current = False
+                    season.automatic_refresh_enabled = False
+                    season.scheduler_state = "disabled"
+                    season.next_check_at = None
+                    season.updated_at = now
+                await session.execute(
+                    update(ScrapeRunRow)
+                    .where(
+                        ScrapeRunRow.status == "queued",
+                        ScrapeRunRow.competition_season_id.in_(
+                            select(CompetitionSeasonRow.id).where(
+                                CompetitionSeasonRow.competition_id == existing_row.id
+                            )
+                        ),
+                    )
+                    .values(
+                        status="cancelled",
+                        completed_at=now,
+                        error_message="Competition removed from configuration",
+                    )
+                )
             for seed in seeds.values():
                 row = await session.scalar(
                     select(CompetitionRow).where(CompetitionRow.slug == seed.slug)
@@ -68,12 +100,14 @@ class PostgresResultRepository:
                         name=seed.name,
                         country=seed.country,
                         format=seed.format,
+                        is_enabled=True,
                         created_at=now,
                         updated_at=now,
                     )
                     session.add(row)
                     await session.flush()
                 else:
+                    row.is_enabled = True
                     row.name, row.country, row.format, row.updated_at = (
                         seed.name,
                         seed.country,
@@ -136,7 +170,7 @@ class PostgresResultRepository:
         async with self.sessions() as session:
             row = await session.scalar(
                 select(CompetitionRow)
-                .where(CompetitionRow.slug == slug.casefold())
+                .where(CompetitionRow.slug == slug.casefold(), CompetitionRow.is_enabled.is_(True))
                 .options(selectinload(CompetitionRow.seasons))
             )
             return None if row is None else self._competition(row)
@@ -146,6 +180,7 @@ class PostgresResultRepository:
             rows = (
                 await session.scalars(
                     select(CompetitionRow)
+                    .where(CompetitionRow.is_enabled.is_(True))
                     .options(selectinload(CompetitionRow.seasons))
                     .order_by(CompetitionRow.name)
                 )
@@ -186,7 +221,7 @@ class PostgresResultRepository:
             .select_from(MatchRow)
             .join(CompetitionSeasonRow, MatchRow.competition_season_id == CompetitionSeasonRow.id)
             .join(CompetitionRow, CompetitionSeasonRow.competition_id == CompetitionRow.id)
-            .where(MatchRow.status == "finished")
+            .where(MatchRow.status == "finished", CompetitionRow.is_enabled.is_(True))
             .order_by(MatchRow.played_at, MatchRow.id)
         )
         if competition:
@@ -207,6 +242,7 @@ class PostgresResultRepository:
                 select(func.max(CompetitionSeasonRow.fetched_at))
                 .select_from(CompetitionSeasonRow)
                 .join(CompetitionRow, CompetitionSeasonRow.competition_id == CompetitionRow.id)
+                .where(CompetitionRow.is_enabled.is_(True))
             )
             if competition:
                 refresh = refresh.where(CompetitionRow.slug == competition.casefold())
@@ -252,6 +288,7 @@ class PostgresResultRepository:
                 .select_from(CompetitionSeasonRow)
                 .join(CompetitionRow, CompetitionSeasonRow.competition_id == CompetitionRow.id)
                 .where(
+                    CompetitionRow.is_enabled.is_(True),
                     CompetitionRow.slug == competition.casefold(),
                     CompetitionSeasonRow.season == season,
                 )
@@ -265,7 +302,10 @@ class PostgresResultRepository:
         async with self.sessions.begin() as session:
             row = await session.scalar(
                 select(CompetitionRow)
-                .where(CompetitionRow.slug == competition.slug)
+                .where(
+                    CompetitionRow.slug == competition.slug,
+                    CompetitionRow.is_enabled.is_(True),
+                )
                 .with_for_update()
             )
             if row is None:
@@ -348,7 +388,10 @@ class PostgresResultRepository:
                     )
                     .join(CompetitionRow, CompetitionSeasonRow.competition_id == CompetitionRow.id)
                     .options(selectinload(CompetitionRow.seasons))
-                    .where(ScrapeRunRow.status == "queued")
+                    .where(
+                        ScrapeRunRow.status == "queued",
+                        CompetitionRow.is_enabled.is_(True),
+                    )
                     .order_by(ScrapeRunRow.queued_at, ScrapeRunRow.id)
                     .limit(limit)
                     .with_for_update(skip_locked=True, of=ScrapeRunRow)
@@ -502,6 +545,7 @@ class PostgresResultRepository:
                     .select_from(CompetitionSeasonRow)
                     .join(CompetitionRow, CompetitionSeasonRow.competition_id == CompetitionRow.id)
                     .where(
+                        CompetitionRow.is_enabled.is_(True),
                         CompetitionSeasonRow.is_current,
                         CompetitionSeasonRow.automatic_refresh_enabled,
                         CompetitionSeasonRow.next_check_at <= now,
@@ -608,14 +652,12 @@ class PostgresResultRepository:
     @staticmethod
     def _competition(row: CompetitionRow) -> Competition:
         current = next((season for season in row.seasons if season.is_current), None)
-        if current is None:
-            raise RuntimeError(f"Competition {row.slug} has no current season")
         return Competition(
             slug=row.slug,
             name=row.name,
             country=row.country,
             format=row.format,
-            current_season=current.season,
+            current_season=None if current is None else current.season,
             seasons={
                 s.season: SeasonSource(
                     season=s.season,

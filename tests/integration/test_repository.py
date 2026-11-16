@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.db_models import CompetitionRow, CompetitionSeasonRow, ScrapeRunRow
+from app.db_models import CompetitionRow, CompetitionSeasonRow, MatchRow, ScrapeRunRow
 from app.models import Competition, ScrapedMatch, SeasonSource
 from app.repository import ActiveScrapeJobConflict, PostgresResultRepository
 
@@ -124,6 +124,52 @@ async def test_seed_schedules_only_current_season_and_is_idempotent(
     assert not historical.is_current and not historical.automatic_refresh_enabled
     assert historical.scheduler_state == "disabled"
     assert historical.next_check_at is None
+
+
+async def test_removed_competition_is_disabled_without_deleting_data(
+    repository: PostgresResultRepository,
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    removed = cup()
+    await repository.seed_competitions({"test-league": league(), "test-cup": removed})
+    source_info = removed.seasons[removed.current_season]
+    played = datetime.now(UTC) - timedelta(days=1)
+    await repository.replace_competition(
+        removed, source_info, [match("A", "B", played, score=(1, 0))]
+    )
+    run_id, _ = await repository.enqueue_scrape(removed, source_info)
+
+    await repository.seed_competitions({"test-league": league()})
+
+    async with sessions() as session:
+        competition_row = await session.scalar(
+            select(CompetitionRow).where(CompetitionRow.slug == "test-cup")
+        )
+        assert competition_row is not None
+        season = await session.scalar(
+            select(CompetitionSeasonRow).where(
+                CompetitionSeasonRow.competition_id == competition_row.id,
+                CompetitionSeasonRow.season == source_info.season,
+            )
+        )
+        matches = await session.scalars(
+            select(MatchRow)
+            .join(CompetitionSeasonRow)
+            .where(CompetitionSeasonRow.competition_id == competition_row.id)
+        )
+        queued_job = await session.get(ScrapeRunRow, run_id)
+        assert not competition_row.is_enabled
+        assert season is not None
+        assert not season.is_current and not season.automatic_refresh_enabled
+        assert season.scheduler_state == "disabled" and season.next_check_at is None
+        assert len(matches.all()) == 1
+        assert queued_job is not None and queued_job.status == "cancelled"
+
+    assert await repository.get_competition("test-cup") is None
+    assert [item.slug for item in await repository.list_competitions()] == ["test-league"]
+    results, refreshed_at = await repository.get_results(competition="test-cup")
+    assert results == [] and refreshed_at is None
+    assert await repository.claim_queued_scrape_runs(10) == []
 
 
 async def test_list_competitions_without_current_season(

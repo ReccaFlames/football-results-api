@@ -138,13 +138,13 @@ How to use this list:
 
 ### Phase 1: Generic and configurable (the README target state)
 
-- [ ] **5. Configuration file**
-  - [ ] `config/competitions.yaml` schema (competitions, providers, schedule defaults)
-  - [ ] Pydantic validation and a `python -m app.config check` command
-  - [ ] `FOOTBALL_RESULTS_CONFIG_FILE` setting with a default file shipped in the image
-  - [ ] Seed only on startup or when the file changes, not every scheduler cycle
-  - [ ] Competitions removed from the file are disabled, not deleted
-  - [ ] Remove the hard-coded registry from `app/competitions.py`
+- [x] **5. Configuration file**
+  - [x] `config/competitions.yaml` schema (competitions, providers, schedule defaults)
+  - [x] Pydantic validation and a `python -m app.config check` command
+  - [x] `FOOTBALL_RESULTS_CONFIG_FILE` setting with a default file shipped in the image
+  - [x] Seed only on startup or when the file changes, not every scheduler cycle
+  - [x] Competitions removed from the file are disabled, not deleted
+  - [x] Remove the hard-coded registry from `app/competitions.py`
 - [ ] **6. Stable data model**
   - [ ] Upsert matches by provider match ID, or a key that ignores kickoff time
   - [ ] Expose a stable match `id` in the API

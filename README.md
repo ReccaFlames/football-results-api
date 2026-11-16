@@ -15,12 +15,12 @@ league-data API**. This README describes both:
 
 | Capability | Current state | Target state |
 | --- | --- | --- |
-| Competitions | 4 hard-coded in `app/competitions.py`: Ekstraklasa, I liga, Europa League, Premier League | Any league/cup, declared in a config file or through an admin API |
+| Competitions | 4 declared in `config/competitions.yaml`: Ekstraklasa, I liga, Europa League, Premier League | Any league/cup, declared in a config file or through an admin API |
 | Data providers | `90minut` (HTML scraping) and `football-data` (JSON API, Premier League only) | Pluggable provider adapters with a documented contract; any football-data.org competition; more sources |
-| Adding a competition/season | Python code change + redeploy | Edit configuration (no code), hot-reloaded |
-| Season rollover | Manual: edit `current_season` and source URLs in code | Automatic discovery of the new season's source |
+| Adding a competition/season | Edit `config/competitions.yaml`; the scheduler applies changes | Edit configuration (no code), hot-reloaded |
+| Season rollover | Manual: edit `current_season` and source URLs in YAML | Automatic discovery of the new season's source |
 | Scheduling | Adaptive per-season scheduler driven by fixture times (built-in rules) | Same engine, with policy thresholds configurable per competition |
-| Configuration | Environment variables (`FOOTBALL_RESULTS_*`) for infrastructure only | Env vars for infrastructure + one validated config file for leagues, sources, and schedules |
+| Configuration | Environment variables plus validated YAML for leagues, sources, providers, and schedule defaults | Env vars for infrastructure + one validated config file for leagues, sources, and schedules |
 | Observability | `/health` (DB + scheduler heartbeat), `scrape_run` table, logs; CI with PostgreSQL integration tests | Scheduler/scrape status endpoints, metrics, alerting on stale data |
 | API | Read results, manual refresh, historical fetch | Plus fixtures, standings, teams, and authenticated admin endpoints |
 
@@ -29,10 +29,9 @@ league-data API**. This README describes both:
 ### Architecture
 
 ~~~text
-HTTP clients ──▶ FastAPI (app.main) ──┐
-                                      ├──▶ ScraperRegistry ──▶ 90minut.pl / football-data.org
-Scheduler (app.scheduler) ────────────┤
-                                      └──▶ PostgresResultRepository ──▶ PostgreSQL
+HTTP clients ──▶ FastAPI (app.main) ───────────────▶ PostgresResultRepository ──▶ PostgreSQL
+Scheduler (app.scheduler) ──┬──▶ ScraperRegistry ──▶ sources
+                            └─────────────────────▶ PostgresResultRepository
 ~~~
 
 - FastAPI provides the HTTP API (`app/main.py`).
@@ -41,10 +40,11 @@ Scheduler (app.scheduler) ────────────┤
   the season's `provider` value.
 - SQLAlchemy's async PostgreSQL dialect handles persistence (`app/repository.py`).
 - Alembic owns database migrations.
-- The competition registry lives in `app/competitions.py`. It is seeded into PostgreSQL when the API
-  starts **and at the start of every scheduler cycle**, so the code is effectively authoritative for
-  competitions, seasons, source URLs, and which season is current. Seasons added through the
-  historical fetch endpoint are kept in the database alongside the seeded ones.
+- `config/competitions.yaml` is validated and seeded into PostgreSQL when the API or scheduler starts.
+  The scheduler reseeds only when the file contents change. Configured competitions are authoritative
+  for names, sources, and the current season; seasons added through the historical fetch endpoint
+  remain in the database alongside them. Removed competitions are disabled and retained in the
+  database, including their matches.
 - A refresh replaces one competition-season atomically.
 - A separate adaptive scheduler process refreshes only current seasons and sleeps between fixtures
   (`app/scheduler.py`, rules in `app/scheduling.py`).
@@ -65,8 +65,7 @@ and alembic_version.
 
 ### Known limitations
 
-- Adding a competition, a season, or changing the current season requires editing
-  `app/competitions.py` and redeploying.
+- Source URLs are validated against the currently supported 90minut and football-data.org endpoints.
 - The football-data adapter and URL validation are restricted to the Premier League (`PL`)
   endpoint; other football-data.org competitions are not accepted yet.
 - 90minut source URLs must match `http(s)://(www.)90minut.pl/liga/1/ligaNNNNN.html`.
@@ -351,22 +350,38 @@ docker compose exec -T db pg_restore \
 ## Configuration
 
 Infrastructure settings come from environment variables or `.env` (see `app/config.py`).
-Competitions and their sources are **not** configurable this way yet; they live in
-`app/competitions.py`.
+Competitions, provider defaults, and schedule defaults are declared in `config/competitions.yaml`.
+The API seeds that file at startup; the scheduler also checks it for content changes and updates the
+database when it changes. Removed competitions are disabled rather than deleted, so their existing
+matches remain stored. In Docker Compose the file is mounted read-only from the repository, so
+editing it takes effect without rebuilding the image. In other deployments, mount the file at the
+path configured by `FOOTBALL_RESULTS_CONFIG_FILE`.
+
+Validate a config file before starting the services:
+
+~~~bash
+uv run python -m app.config check
+~~~
+
+The check can target an alternate file with `--config-file`. Invalid YAML, unsupported source URLs,
+undeclared providers, duplicate slugs, and inconsistent season/provider declarations fail
+validation. Schedule defaults are validated and recorded in the config, but the scheduler still
+uses its built-in thresholds until the scheduler-settings roadmap step.
 
 Application variables:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | FOOTBALL_RESULTS_DATABASE_URL | `postgresql+psycopg_async://football:football@localhost:5432/football` | PostgreSQL connection |
+| FOOTBALL_RESULTS_CONFIG_FILE | `config/competitions.yaml` locally; `/app/config/competitions.yaml` in Docker | Validated competition configuration file |
 | FOOTBALL_RESULTS_REQUEST_TIMEOUT_SECONDS | `20` | HTTP timeout for source requests |
 | FOOTBALL_RESULTS_USER_AGENT | `FootballResultsAPI/<package version> (contact: ...)` | Sent to sources; default version comes from package metadata; include a contact address |
 | FOOTBALL_RESULTS_SCHEDULER_LOOP_SECONDS | `30` | Pause between scheduler cycles |
 | FOOTBALL_RESULTS_SCHEDULER_CLAIM_LIMIT | `5` | Max queued jobs and due seasons claimed per cycle (each limit applies separately) |
 | FOOTBALL_RESULTS_API_KEYS | empty | Comma-separated API keys; required for write endpoints and job status |
 | FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN | empty | football-data.org token (needed for Premier League) |
-| FOOTBALL_RESULTS_FOOTBALL_DATA_MIN_REQUEST_INTERVAL_SECONDS | `6` | Throttle for football-data.org (free tier: 10 req/min) |
-| FOOTBALL_RESULTS_NINETY_MINUT_MIN_REQUEST_INTERVAL_SECONDS | `2` | Minimum delay between requests to each 90minut host; set to `0` to disable |
+| FOOTBALL_RESULTS_FOOTBALL_DATA_MIN_REQUEST_INTERVAL_SECONDS | `6` (from YAML) | Optional environment override for the football-data.org throttle (free tier: 10 req/min) |
+| FOOTBALL_RESULTS_NINETY_MINUT_MIN_REQUEST_INTERVAL_SECONDS | `2` (from YAML) | Optional environment override for the minimum delay between requests to each 90minut host; set to `0` to disable |
 | FOOTBALL_RESULTS_NINETY_MINUT_DETAIL_CACHE_MAX_ENTRIES | `512` | Maximum successful 90minut detail responses kept in the process-local LRU cache; set to `0` to disable |
 
 Deployment variables (Docker Compose):
@@ -435,15 +450,17 @@ PostgreSQL.
 
 ### Declarative competition configuration
 
-Replace the hard-coded registry in `app/competitions.py` with a configuration file, for example
-`config/competitions.yaml`, loaded and validated with Pydantic at startup:
+Competitions, provider defaults, and schedule defaults live in `config/competitions.yaml` and are
+loaded and validated with Pydantic:
 
 ~~~yaml
 defaults:
   schedule:
     policy: adaptive
     pre_match_check_minutes: 30
-    match_duration_minutes: { league: 105, cup: 135 }
+    match_duration_minutes:
+      league: 105
+      cup: 135
     result_poll_minutes: [5, 15, 60]
     idle_interval: 1d
     failure_backoff_minutes: [5, 15, 30, 60]
@@ -452,7 +469,6 @@ providers:
   90minut:
     min_request_interval_seconds: 2
   football-data:
-    api_token: ${FOOTBALL_DATA_API_TOKEN}
     min_request_interval_seconds: 6
 
 competitions:
@@ -463,29 +479,30 @@ competitions:
     provider: 90minut
     current_season: 2026-2027
     seasons:
-      2026-2027: { league_id: 14675 }
-      2025-2026: { league_id: 14072 }
+      "2026-2027":
+        source_url: http://www.90minut.pl/liga/1/liga14675.html
+      "2025-2026":
+        source_url: http://www.90minut.pl/liga/1/liga14072.html
 
   - slug: premier-league
     name: Premier League
     country: England
     format: league
     provider: football-data
-    provider_options: { competition_code: PL }
     current_season: 2026-2027
-    seasons: auto            # derive URLs from the season, no per-season entry needed
-    schedule:
-      result_poll_minutes: [10, 30, 120]
+    seasons:
+      "2026-2027":
+        source_url: https://api.football-data.org/v4/competitions/PL/matches?season=2026
 ~~~
 
-Planned behaviour:
+Configuration behaviour:
 
-- The file path is set by `FOOTBALL_RESULTS_CONFIG_FILE`; a default file ships with the image.
-- Invalid configuration fails fast with a clear message; `python -m app.config check` validates it
+- The file path is set by `FOOTBALL_RESULTS_CONFIG_FILE`; `config/competitions.yaml` ships in the
+  image and is mounted by Docker Compose for live edits.
+- Invalid configuration fails fast at service startup; `python -m app.config check` validates it
   without starting services.
-- The file is reloaded on change (or on `SIGHUP`) by both API and scheduler; the database stays the
-  runtime store, but competitions removed from the file are disabled rather than deleted.
-- Provider-specific season parameters (`league_id`, `competition_code`) replace hand-written URLs.
+- The scheduler detects file content changes and reseeds the database; competitions removed from
+  the file are disabled rather than deleted.
 
 ### Pluggable data providers
 

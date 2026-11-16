@@ -15,11 +15,13 @@ API.
 
 | Path | Responsibility |
 | --- | --- |
-| `app/main.py` | FastAPI app and all HTTP endpoints; module-level `store` and `scraper` singletons |
+| `app/main.py` | FastAPI app and all HTTP endpoints; module-level `store` singleton |
 | `app/scheduler.py` | Scheduler loop (`python -m app.scheduler`): seed → heartbeat → claim due seasons → scrape → persist |
 | `app/scheduling.py` | Pure functions: `calculate_next_check`, `failure_backoff` |
 | `app/scraper.py` | Provider adapters (`NinetyMinutScraper`, `FootballDataScraper`), parsers, `ScraperRegistry` |
-| `app/competitions.py` | Hard-coded competition registry (seed data) and `source_from_url` validation |
+| `app/competitions.py` | Competition summary helpers and `source_from_url` validation |
+| `app/config.py` | Environment settings, validated competition configuration, and `python -m app.config check` |
+| `config/competitions.yaml` | Competition, provider, and schedule defaults |
 | `app/repository.py` | `PostgresResultRepository`: seeding, queries, atomic season replace, scheduler claims |
 | `app/models.py` | Pydantic API/domain models (`Competition`, `SeasonSource`, `ScrapedMatch`, `MatchResult`, ...) |
 | `app/db_models.py` | SQLAlchemy ORM tables |
@@ -32,6 +34,7 @@ API.
 
 ~~~bash
 uv sync --extra dev                 # install
+uv run python -m app.config check   # validate the competition configuration
 uv run pytest -q                    # unit tests; integration tests skip without a test DB
 uv run ruff check .                 # lint (line length 100)
 uv run ruff format --check .        # formatting (enforced in CI)
@@ -54,8 +57,9 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
 
 - Python 3.12+, fully async (SQLAlchemy async + httpx). Type hints everywhere; Pydantic v2 models.
 - Seasons are strings `YYYY-YYYY` (validated by regex in request models).
-- `app/competitions.py` is re-seeded **on API startup and every scheduler cycle**; it overwrites
-  names, source URLs, provider and `is_current` in the DB. Editing DB rows by hand will be reverted.
+- `config/competitions.yaml` is seeded on API and scheduler startup; the scheduler reseeds only when
+  the file changes. Configured competitions overwrite names, sources, provider, and current season.
+  Removed competitions are disabled, not deleted, so their stored results remain in the database.
 - A refresh deletes and re-inserts all matches of one competition-season in one transaction.
   Database match IDs are therefore not stable; `source_key` is a hash of season/stage/teams/kickoff.
 - `MatchResult` (API) exposes only finished matches; `ScrapedMatch` (internal) also has scheduled ones.

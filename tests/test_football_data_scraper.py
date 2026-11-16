@@ -1,5 +1,8 @@
-from app.competitions import COMPETITIONS, source_from_url
+from app.competitions import source_from_url
+from app.config import load_config
 from app.scraper import parse_football_data_matches
+
+COMPETITIONS = load_config().to_competitions()
 
 
 def source():
