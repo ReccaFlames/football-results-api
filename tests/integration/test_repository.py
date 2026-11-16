@@ -206,6 +206,34 @@ async def test_seed_rollover_changes_which_season_is_claimed(
     assert [target.source.season for target in targets] == ["2026-2027"]
 
 
+async def test_seed_persists_calendar_season_settings_for_claims(
+    repository: PostgresResultRepository,
+) -> None:
+    calendar = Competition(
+        slug="calendar-league",
+        name="Calendar League",
+        format="league",
+        season_format="calendar",
+        season_start_month=1,
+        current_season="2026",
+        seasons={"2026": source("2026", 4)},
+    )
+    await repository.seed_competitions(
+        {"calendar-league": calendar.model_copy(update={"season_start_month": 8})}
+    )
+    await repository.seed_competitions({"calendar-league": calendar})
+
+    competition = await repository.get_competition("calendar-league")
+    summary = (await repository.list_competitions())[0]
+    targets = await repository.claim_due_seasons(10)
+    assert competition is not None
+    assert (competition.season_format, competition.season_start_month) == ("calendar", 1)
+    assert (summary.season_format, summary.available_seasons) == ("calendar", ["2026"])
+    assert [(target.source.season, target.competition.season_format) for target in targets] == [
+        ("2026", "calendar")
+    ]
+
+
 async def test_seed_resets_schedule_only_when_source_changes(
     repository: PostgresResultRepository, sessions: async_sessionmaker[AsyncSession]
 ) -> None:

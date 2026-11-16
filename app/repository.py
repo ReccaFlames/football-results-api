@@ -113,6 +113,8 @@ class PostgresResultRepository:
                         name=seed.name,
                         country=seed.country,
                         format=seed.format,
+                        season_format=seed.season_format,
+                        season_start_month=seed.season_start_month,
                         is_enabled=True,
                         created_at=now,
                         updated_at=now,
@@ -127,6 +129,8 @@ class PostgresResultRepository:
                         seed.format,
                         now,
                     )
+                    row.season_format = seed.season_format
+                    row.season_start_month = seed.season_start_month
                 seasons = (
                     await session.scalars(
                         select(CompetitionSeasonRow).where(
@@ -207,6 +211,8 @@ class PostgresResultRepository:
                         name=row.name,
                         country=row.country,
                         format=row.format,
+                        season_format=row.season_format,
+                        season_start_month=row.season_start_month,
                         current_season=None if current is None else current.season,
                         available_seasons=sorted((s.season for s in row.seasons), reverse=True),
                         fetched_seasons=sorted(
@@ -714,6 +720,8 @@ class PostgresResultRepository:
                     name=competition.name,
                     country=competition.country,
                     format=competition.format,
+                    season_format=competition.season_format,
+                    season_start_month=competition.season_start_month,
                     current_season=season.season,
                     seasons={season.season: source},
                 )
@@ -797,6 +805,8 @@ class PostgresResultRepository:
             name=row.name,
             country=row.country,
             format=row.format,
+            season_format=row.season_format,
+            season_start_month=row.season_start_month,
             current_season=None if current is None else current.season,
             seasons={
                 s.season: SeasonSource(

@@ -319,3 +319,25 @@ async def test_detail_cache_is_bounded_and_requests_are_throttled_per_host(monke
     assert detail_requests.count(second_url) == 2
     assert len(scraper._detail_cache) == 1
     assert all(later - earlier >= 0.004 for earlier, later in pairwise(request_times))
+
+
+def test_ninety_minut_dates_use_the_competition_season_start_month() -> None:
+    html = page_with_rows("Kolejka 1", result_row())
+    split = COMPETITIONS["ekstraklasa"].model_copy(
+        update={"season_start_month": 8, "current_season": "2025-2026"}
+    )
+    calendar = COMPETITIONS["ekstraklasa"].model_copy(
+        update={"season_format": "calendar", "season_start_month": 1, "current_season": "2026"}
+    )
+
+    split_match = parse_matches(
+        html, split, current_source("ekstraklasa").model_copy(update={"season": "2025-2026"})
+    )[0]
+    calendar_match = parse_matches(
+        html, calendar, current_source("ekstraklasa").model_copy(update={"season": "2026"})
+    )[0]
+
+    # 25 July falls before an August start, so it belongs to the season's second year.
+    assert split_match.played_at.date().isoformat() == "2026-07-25"
+    assert calendar_match.played_at.date().isoformat() == "2026-07-25"
+    assert calendar_match.season == "2026"

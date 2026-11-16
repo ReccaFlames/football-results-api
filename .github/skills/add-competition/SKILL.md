@@ -5,59 +5,60 @@ description: Add a new football competition or season to the Football Results AP
 
 # Add a competition or season
 
-The registry currently lives in code (`app/competitions.py`). It is seeded into PostgreSQL on API
-startup and on every scheduler cycle, so the code is authoritative. (Roadmap: move to a config
-file — if `config/competitions.yaml` exists, edit that instead and ignore the code steps below.)
+Competitions live in `config/competitions.yaml`. The file is validated with Pydantic, seeded into
+PostgreSQL on API startup, and reseeded by the scheduler whenever its contents change. Competitions
+removed from the file are disabled, not deleted.
 
 ## 1. Pick the provider and find the source
 
-| Provider | Source format | Helper |
-| --- | --- | --- |
-| `90minut` | `http://www.90minut.pl/liga/1/liga<ID>.html` (ID is per season) | `_source(season, league_id)` |
-| `football-data` | `https://api.football-data.org/v4/competitions/PL/matches?season=<start year>` | `_football_data_source(season)` |
+| Provider | Source format |
+| --- | --- |
+| `90minut` | `http://www.90minut.pl/liga/1/liga<ID>.html` (ID is per season) |
+| `football-data` | `https://api.football-data.org/v4/competitions/<CODE>/matches?season=<start year>` |
 
-football-data is currently hard-wired to `PL` in both `_football_data_source` and
-`FOOTBALL_DATA_PATH`/`source_from_url`. A non-PL competition requires generalising those first
-(add a competition code parameter, update validation and tests). If the source is neither, use the
-`add-data-provider` skill.
+football-data.org accepts any competition code (`PL`, `BL1`, `SA`, `PD`, `CL`, `BSA`, ...); all
+seasons of one competition must use the same code. If the source is neither provider, use the
+`add-data-provider` skill. The provider contract is in `docs/PROVIDERS.md`.
 
-## 2. Edit `app/competitions.py`
+## 2. Edit `config/competitions.yaml`
 
-Add or update the entry in `COMPETITIONS`:
-
-~~~python
-"slug": Competition(
-    slug="slug",                # lowercase, hyphenated, unique; used in URLs
-    name="Display Name",
-    country="Poland",           # None for international competitions
-    format="league",            # "league" (rounds) or "cup" (stages; longer match duration)
-    current_season="2026-2027", # must be a key in seasons
-    seasons={
-        "2025-2026": _source("2025-2026", 14072),
-        "2026-2027": _source("2026-2027", 14675),
-    },
-),
+~~~yaml
+  - slug: slug                  # lowercase, hyphenated, unique; used in URLs
+    name: Display Name
+    country: Poland             # omit for international competitions
+    format: league              # "league" (rounds) or "cup" (stages; longer match duration)
+    provider: 90minut           # must be declared under providers:
+    season_format: split        # "split" (2026-2027, default) or "calendar" (2026)
+    season_start_month: 7       # split seasons only; 2-12, default 7. Omit for calendar seasons
+    current_season: 2026-2027   # must be a key in seasons
+    seasons:
+      "2025-2026":
+        source_url: http://www.90minut.pl/liga/1/liga14072.html
+      "2026-2027":
+        source_url: http://www.90minut.pl/liga/1/liga14675.html
 ~~~
 
 Rules:
+- Season keys must match `season_format`; split seasons span consecutive years.
+- Set `season_start_month` to the month the season begins. It decides which year 90minut dates
+  (which omit the year) fall in.
 - `current_season` must exist in `seasons`; only the current season is auto-refreshed.
-- A competition should use a single provider; historical fetches reject providers not configured
-  for that competition.
+- A competition uses a single provider; historical fetches reject other providers and other
+  football-data.org codes.
 - Rolling over = add the new season entry and change `current_season`. Changing a season's
   source URL resets its scheduler state on next seed.
 
 ## 3. Verify
 
 ~~~bash
-uv run pytest -q && uv run ruff check .
+uv run python -m app.config check
+uv run pytest -q && uv run ruff check . && uv run ruff format --check .
 ~~~
 
-Then, with the stack running, check the competition appears and refreshes:
+With the stack running, check that the competition appears:
 
 ~~~bash
-curl -s localhost:8000/api/v1/competitions | jq '.[] | {slug, current_season, scheduler_state}'
-curl -s -X POST localhost:8000/api/v1/results/refresh -H 'content-type: application/json' \
-  -d '{"competition":"<slug>"}' | jq '.count'
+curl -s localhost:8000/api/v1/competitions | jq '.[] | {slug, season_format, current_season, scheduler_state}'
 ~~~
 
 For a new 90minut page layout, add a parser test with a trimmed HTML fixture in

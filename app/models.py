@@ -2,6 +2,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.seasons import DEFAULT_SPLIT_START_MONTH, SEASON_PATTERN, SeasonFormat
+
 
 class SeasonSource(BaseModel):
     season: str
@@ -14,6 +16,8 @@ class Competition(BaseModel):
     name: str
     country: str | None = None
     format: str
+    season_format: SeasonFormat = "split"
+    season_start_month: int = Field(default=DEFAULT_SPLIT_START_MONTH, ge=1, le=12)
     current_season: str | None
     seasons: dict[str, SeasonSource]
 
@@ -23,6 +27,8 @@ class CompetitionSummary(BaseModel):
     name: str
     country: str | None = None
     format: str
+    season_format: SeasonFormat = "split"
+    season_start_month: int = DEFAULT_SPLIT_START_MONTH
     current_season: str | None
     available_seasons: list[str]
     fetched_seasons: list[str]
@@ -150,11 +156,11 @@ class RefreshRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     competition: str = Field(examples=["ekstraklasa"])
-    season: str | None = Field(default=None, pattern=r"^\d{4}-\d{4}$")
+    season: str | None = Field(default=None, pattern=SEASON_PATTERN)
 
 
 class HistoricalFetchRequest(BaseModel):
     competition: str
-    season: str = Field(pattern=r"^\d{4}-\d{4}$")
+    season: str = Field(pattern=SEASON_PATTERN)
     source_url: str | None = None
     force_refresh: bool = False

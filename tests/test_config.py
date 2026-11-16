@@ -88,3 +88,88 @@ def test_config_check_cli_validates_the_requested_file(
     with pytest.raises(SystemExit) as error:
         cli(["check", "--config-file", str(invalid)])
     assert error.value.code == 2
+
+
+def write_config(tmp_path: Path, competition: dict[str, object]) -> Path:
+    data = yaml.safe_load(DEFAULT_CONFIG.read_text())
+    data["competitions"].append(competition)
+    path = tmp_path / "competitions.yaml"
+    path.write_text(yaml.safe_dump(data))
+    return path
+
+
+def calendar_competition(**overrides: object) -> dict[str, object]:
+    return {
+        "slug": "brasileirao",
+        "name": "Campeonato Brasileiro Série A",
+        "format": "league",
+        "provider": "football-data",
+        "season_format": "calendar",
+        "current_season": "2026",
+        "seasons": {
+            "2026": {
+                "source_url": (
+                    "https://api.football-data.org/v4/competitions/BSA/matches?season=2026"
+                )
+            }
+        },
+    } | overrides
+
+
+def test_config_accepts_calendar_year_seasons(tmp_path: Path) -> None:
+    unquoted_years = calendar_competition(
+        current_season=2026,
+        seasons={
+            2026: {
+                "source_url": (
+                    "https://api.football-data.org/v4/competitions/BSA/matches?season=2026"
+                )
+            }
+        },
+    )
+    competitions = load_config(write_config(tmp_path, unquoted_years)).to_competitions()
+
+    brasileirao = competitions["brasileirao"]
+    assert (brasileirao.season_format, brasileirao.season_start_month) == ("calendar", 1)
+    assert brasileirao.current_season == "2026"
+    assert competitions["ekstraklasa"].season_start_month == 7
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"season_format": "split"}, "split format"),
+        ({"season_start_month": 2}, "calendar seasons start in January"),
+        (
+            {
+                "season_format": "split",
+                "season_start_month": 1,
+                "current_season": None,
+                "seasons": {},
+            },
+            "cannot start in January",
+        ),
+        (
+            {
+                "seasons": {
+                    "2025": {
+                        "source_url": (
+                            "https://api.football-data.org/v4/competitions/BSA/matches?season=2025"
+                        )
+                    },
+                    "2026": {
+                        "source_url": (
+                            "https://api.football-data.org/v4/competitions/BL1/matches?season=2026"
+                        )
+                    },
+                }
+            },
+            "mixes provider competition codes",
+        ),
+    ],
+)
+def test_config_rejects_inconsistent_season_settings(
+    tmp_path: Path, overrides: dict[str, object], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        load_config(write_config(tmp_path, calendar_competition(**overrides)))

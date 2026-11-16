@@ -19,6 +19,7 @@ API.
 | `app/scheduler.py` | Scheduler loop (`python -m app.scheduler`): seed → heartbeat → claim due seasons → scrape → persist |
 | `app/scheduling.py` | Pure functions: `calculate_next_check`, `failure_backoff` |
 | `app/scraper.py` | Provider adapters (`NinetyMinutScraper`, `FootballDataScraper`), parsers, `ScraperRegistry` |
+| `app/seasons.py` | Season formats (`2026-2027`, `2026`) and season/date mapping |
 | `app/competitions.py` | Competition summary helpers and `source_from_url` validation |
 | `app/config.py` | Environment settings, validated competition configuration, and `python -m app.config check` |
 | `config/competitions.yaml` | Competition, provider, and schedule defaults |
@@ -27,6 +28,7 @@ API.
 | `app/db_models.py` | SQLAlchemy ORM tables |
 | `app/config.py` | `Settings` from env vars with prefix `FOOTBALL_RESULTS_` |
 | `migrations/` | Alembic migrations (schema changes go here only; no `create_all`) |
+| `docs/PROVIDERS.md` | Provider contract: `scrape`, `discover_seasons`, capabilities, URL rules |
 | `tests/` | pytest; API tests use `FakeRepository` and need no database |
 | `tests/integration/` | Repository and migration tests against real PostgreSQL (skipped without `FOOTBALL_RESULTS_TEST_DATABASE_URL`) |
 
@@ -56,7 +58,9 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
 ## Conventions and gotchas
 
 - Python 3.12+, fully async (SQLAlchemy async + httpx). Type hints everywhere; Pydantic v2 models.
-- Seasons are strings `YYYY-YYYY` (validated by regex in request models).
+- Seasons are strings: `YYYY-YYYY` (split, consecutive years) or `YYYY` (calendar), chosen per
+  competition by `season_format`; split seasons start in `season_start_month` (default July). Use
+  `app/seasons.py` for validation and date mapping; never assume a July start.
 - `config/competitions.yaml` is seeded on API and scheduler startup; the scheduler reseeds only when
   the file changes. Configured competitions overwrite names, sources, provider, and current season.
   Removed competitions are disabled, not deleted, so their stored results remain in the database.

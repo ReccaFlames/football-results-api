@@ -1,6 +1,5 @@
 import argparse
 import hashlib
-import re
 import sys
 from importlib.metadata import version
 from pathlib import Path
@@ -17,8 +16,9 @@ from pydantic import (
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.competitions import source_from_url
+from app.competitions import provider_competition_code, source_from_url
 from app.models import Competition, SeasonSource
+from app.seasons import SeasonFormat, default_start_month, validate_season
 
 
 class Settings(BaseSettings):
@@ -99,17 +99,40 @@ class CompetitionConfig(BaseModel):
     country: str | None = None
     format: str = Field(min_length=1, max_length=30)
     provider: str
+    season_format: SeasonFormat = "split"
+    season_start_month: int | None = Field(default=None, ge=1, le=12)
     current_season: str | None = None
     seasons: dict[str, SeasonConfig] = Field(default_factory=dict)
     schedule: ScheduleConfig | None = None
 
+    @field_validator("current_season", mode="before")
+    @classmethod
+    def calendar_season_as_string(cls, value: object) -> object:
+        # YAML reads an unquoted calendar season such as 2026 as an integer.
+        return str(value) if isinstance(value, int) and not isinstance(value, bool) else value
+
+    @field_validator("seasons", mode="before")
+    @classmethod
+    def calendar_season_keys_as_strings(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        return {
+            str(key) if isinstance(key, int) and not isinstance(key, bool) else key: item
+            for key, item in value.items()
+        }
+
     @model_validator(mode="after")
     def validate_sources(self) -> "CompetitionConfig":
+        if self.season_start_month is None:
+            self.season_start_month = default_start_month(self.season_format)
+        elif self.season_format == "calendar" and self.season_start_month != 1:
+            raise ValueError("calendar seasons start in January; omit season_start_month")
+        elif self.season_format == "split" and self.season_start_month == 1:
+            raise ValueError("a split season cannot start in January; use season_format: calendar")
         if self.current_season is not None and self.current_season not in self.seasons:
             raise ValueError("current_season must be a key in seasons")
         for season in self.seasons:
-            if not re.fullmatch(r"\d{4}-\d{4}", season):
-                raise ValueError(f"invalid season {season!r}; expected YYYY-YYYY")
+            validate_season(season, self.season_format)
         return self
 
     def to_competition(self) -> Competition:
@@ -118,6 +141,8 @@ class CompetitionConfig(BaseModel):
             name=self.name,
             country=self.country,
             format=self.format,
+            season_format=self.season_format,
+            season_start_month=self.season_start_month,
             current_season=self.current_season,
             seasons={
                 season: SeasonSource(
@@ -154,6 +179,7 @@ class CompetitionFile(BaseModel):
                     f"competition {competition.slug!r} references undeclared "
                     f"provider {competition.provider!r}"
                 )
+            codes: set[str] = set()
             for season, source_config in competition.seasons.items():
                 source = source_from_url(season, source_config.source_url)
                 if source.provider != competition.provider:
@@ -161,6 +187,13 @@ class CompetitionFile(BaseModel):
                         f"competition {competition.slug!r} season {season} source uses "
                         f"provider {source.provider!r}, not {competition.provider!r}"
                     )
+                if (code := provider_competition_code(source)) is not None:
+                    codes.add(code)
+            if len(codes) > 1:
+                raise ValueError(
+                    f"competition {competition.slug!r} mixes provider competition codes "
+                    f"{sorted(codes)}"
+                )
         return self
 
     def to_competitions(self) -> dict[str, Competition]:

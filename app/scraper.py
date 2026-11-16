@@ -3,19 +3,22 @@ import logging
 import re
 import time
 from collections import OrderedDict
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
 import httpx
 from bs4 import BeautifulSoup
 
+from app.competitions import football_data_source_url, provider_competition_code
 from app.models import (
     Competition,
     MatchResult,
     ScrapedMatch,
     SeasonSource,
 )
+from app.seasons import season_year_for_month
 
 logger = logging.getLogger(__name__)
 
@@ -42,12 +45,75 @@ POLISH_MONTHS = {
     "grudnia": 12,
 }
 
+MATCH_STATISTICS = frozenset(
+    {
+        "home_goals",
+        "away_goals",
+        "home_goals_first_half",
+        "away_goals_first_half",
+        "home_goals_second_half",
+        "away_goals_second_half",
+        "home_corners",
+        "away_corners",
+        "home_cards",
+        "away_cards",
+        "home_fouls",
+        "away_fouls",
+        "first_team_to_score",
+        "first_goal_minute",
+    }
+)
+DERIVED_GOAL_STATISTICS = frozenset(
+    {
+        "home_goals",
+        "away_goals",
+        "home_goals_first_half",
+        "away_goals_first_half",
+        "home_goals_second_half",
+        "away_goals_second_half",
+        "first_team_to_score",
+        "first_goal_minute",
+    }
+)
+
+
+@dataclass(frozen=True)
+class ProviderCapabilities:
+    """What a provider can supply; see docs/PROVIDERS.md.
+
+    ``statistics`` lists the optional ScrapedMatch statistic fields the provider may fill.
+    Every other statistic must stay ``None``.
+    """
+
+    statistics: frozenset[str]
+    season_discovery: bool
+    scheduled_fixtures: bool = True
+    requires_api_token: bool = False
+
+    def __post_init__(self) -> None:
+        unknown = self.statistics - MATCH_STATISTICS
+        if unknown:
+            raise ValueError(f"unknown statistics: {sorted(unknown)}")
+
+
+class CompetitionScraper(Protocol):
+    """Provider contract. The full contract is documented in docs/PROVIDERS.md."""
+
+    name: str
+    capabilities: ProviderCapabilities
+
+    async def scrape(
+        self, competition: Competition, source: SeasonSource
+    ) -> list[ScrapedMatch]: ...
+
+    async def discover_seasons(self, competition: Competition) -> list[SeasonSource]: ...
+
 
 def _clean(value: str) -> str:
     return " ".join(value.split())
 
 
-def _played_at(text: str, season: str) -> datetime | None:
+def _played_at(text: str, season: str, season_start_month: int) -> datetime | None:
     match = DATE_RE.search(_clean(text))
     if not match:
         return None
@@ -55,10 +121,8 @@ def _played_at(text: str, season: str) -> datetime | None:
     month = POLISH_MONTHS.get(month_name.casefold())
     if month is None:
         return None
-    start_year, end_year = map(int, season.split("-"))
-    year = start_year if month >= 7 else end_year
     return datetime(
-        year,
+        season_year_for_month(season, month, season_start_month),
         month,
         int(day),
         int(hour),
@@ -101,7 +165,12 @@ def parse_ninety_minut_matches(
             (
                 value
                 for cell in cells
-                if (value := _played_at(cell.get_text(), source.season)) is not None
+                if (
+                    value := _played_at(
+                        cell.get_text(), source.season, competition.season_start_month
+                    )
+                )
+                is not None
             ),
             None,
         )
@@ -273,6 +342,12 @@ def parse_ninety_minut_details(
 
 
 class NinetyMinutScraper:
+    name = "90minut"
+    capabilities = ProviderCapabilities(
+        statistics=DERIVED_GOAL_STATISTICS | {"home_cards", "away_cards"},
+        season_discovery=False,
+    )
+
     def __init__(
         self,
         timeout: float,
@@ -307,6 +382,10 @@ class NinetyMinutScraper:
         self._detail_cache.move_to_end(url)
         if len(self._detail_cache) > self.detail_cache_max_entries:
             self._detail_cache.popitem(last=False)
+
+    async def discover_seasons(self, competition: Competition) -> list[SeasonSource]:
+        # 90minut assigns an unrelated page ID to every season; sources are configured by hand.
+        return []
 
     async def scrape(
         self,
@@ -374,12 +453,14 @@ def parse_football_data_matches(
     for raw_match in raw_matches:
         if not isinstance(raw_match, dict):
             continue
-        matchday = raw_match.get("matchday")
+        raw_matchday = raw_match.get("matchday")
+        matchday = raw_matchday if isinstance(raw_matchday, int) and raw_matchday >= 1 else None
+        stage = _football_data_stage(raw_match, matchday)
         utc_date = raw_match.get("utcDate")
         home = raw_match.get("homeTeam")
         away = raw_match.get("awayTeam")
         if (
-            not isinstance(matchday, int)
+            stage is None
             or not isinstance(utc_date, str)
             or not isinstance(home, dict)
             or not isinstance(away, dict)
@@ -425,7 +506,7 @@ def parse_football_data_matches(
             ScrapedMatch(
                 competition=competition.slug,
                 season=source.season,
-                stage=f"Matchweek {matchday}",
+                stage=stage,
                 round=matchday,
                 home_team=home["name"],
                 away_team=away["name"],
@@ -448,6 +529,57 @@ def parse_football_data_matches(
             )
         )
     return matches
+
+
+def _football_data_label(value: str) -> str:
+    return " ".join(part.capitalize() for part in value.split("_")) if value.isupper() else value
+
+
+def _football_data_stage(raw_match: dict[object, object], matchday: int | None) -> str | None:
+    """Name a fixture's stage; league fixtures keep the historical ``Matchweek N`` form."""
+    raw_stage = raw_match.get("stage")
+    if raw_stage in (None, "REGULAR_SEASON"):
+        return None if matchday is None else f"Matchweek {matchday}"
+    if not isinstance(raw_stage, str) or not raw_stage:
+        return None
+    parts = [_football_data_label(raw_stage)]
+    group = raw_match.get("group")
+    if isinstance(group, str) and group:
+        parts.append(_football_data_label(group))
+    if matchday is not None:
+        parts.append(f"Matchday {matchday}")
+    return ", ".join(parts)
+
+
+def parse_football_data_seasons(
+    payload: dict[str, object],
+    competition: Competition,
+    code: str,
+) -> list[SeasonSource]:
+    """Map a football-data.org ``/v4/competitions/<CODE>`` response to season sources."""
+    raw_seasons = payload.get("seasons")
+    if not isinstance(raw_seasons, list):
+        raise TypeError("football-data.org response does not contain a seasons list")
+    sources: dict[str, SeasonSource] = {}
+    for raw_season in raw_seasons:
+        start_date = raw_season.get("startDate") if isinstance(raw_season, dict) else None
+        if not isinstance(start_date, str):
+            continue
+        try:
+            start_year = date.fromisoformat(start_date).year
+        except ValueError:
+            continue
+        season = (
+            str(start_year)
+            if competition.season_format == "calendar"
+            else f"{start_year}-{start_year + 1}"
+        )
+        sources[season] = SeasonSource(
+            season=season,
+            source_url=football_data_source_url(code, season),
+            provider="football-data",
+        )
+    return [sources[season] for season in sorted(sources, reverse=True)]
 
 
 def _team_event_count(events: object, team: dict[object, object]) -> int | None:
@@ -494,13 +626,14 @@ def _first_goal(goals: object) -> tuple[str | None, str | None]:
     return goal["team"]["name"], minute
 
 
-class CompetitionScraper(Protocol):
-    async def scrape(
-        self, competition: Competition, source: SeasonSource
-    ) -> list[ScrapedMatch]: ...
-
-
 class FootballDataScraper:
+    name = "football-data"
+    capabilities = ProviderCapabilities(
+        statistics=DERIVED_GOAL_STATISTICS | {"home_cards", "away_cards"},
+        season_discovery=True,
+        requires_api_token=True,
+    )
+
     def __init__(
         self,
         timeout: float,
@@ -515,7 +648,7 @@ class FootballDataScraper:
         self._lock = asyncio.Lock()
         self._last_request_at = 0.0
 
-    async def scrape(self, competition: Competition, source: SeasonSource) -> list[ScrapedMatch]:
+    async def _get_json(self, url: str) -> dict[str, object]:
         if not self.api_token or not self.api_token.strip():
             raise ValueError(
                 "FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN is required for football-data.org"
@@ -534,21 +667,45 @@ class FootballDataScraper:
                 },
                 follow_redirects=True,
             ) as client:
-                response = await client.get(source.source_url)
+                response = await client.get(url)
             self._last_request_at = time.monotonic()
         response.raise_for_status()
-        return parse_football_data_matches(response.json(), competition, source)
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise TypeError("football-data.org response is not a JSON object")
+        return payload
+
+    async def scrape(self, competition: Competition, source: SeasonSource) -> list[ScrapedMatch]:
+        payload = await self._get_json(source.source_url)
+        return parse_football_data_matches(payload, competition, source)
+
+    async def discover_seasons(self, competition: Competition) -> list[SeasonSource]:
+        codes = {
+            code
+            for source in competition.seasons.values()
+            if (code := provider_competition_code(source)) is not None
+        }
+        if len(codes) != 1:
+            raise ValueError(
+                f"cannot determine the football-data.org competition code for {competition.slug}"
+            )
+        code = codes.pop()
+        payload = await self._get_json(f"https://api.football-data.org/v4/competitions/{code}")
+        return parse_football_data_seasons(payload, competition, code)
 
 
 class ScraperRegistry:
     def __init__(self, scrapers: dict[str, CompetitionScraper]) -> None:
         self.scrapers = scrapers
 
-    async def scrape(self, competition: Competition, source: SeasonSource) -> list[ScrapedMatch]:
-        scraper = self.scrapers.get(source.provider)
+    def provider(self, name: str) -> CompetitionScraper:
+        scraper = self.scrapers.get(name)
         if scraper is None:
-            raise ValueError(f"Unsupported source provider: {source.provider}")
-        return await scraper.scrape(competition, source)
+            raise ValueError(f"Unsupported source provider: {name}")
+        return scraper
+
+    async def scrape(self, competition: Competition, source: SeasonSource) -> list[ScrapedMatch]:
+        return await self.provider(source.provider).scrape(competition, source)
 
 
 def create_scraper_registry(
@@ -559,19 +716,18 @@ def create_scraper_registry(
     ninety_minut_min_interval_seconds: float = 2.0,
     ninety_minut_detail_cache_max_entries: int = 512,
 ) -> ScraperRegistry:
-    return ScraperRegistry(
-        {
-            "90minut": NinetyMinutScraper(
-                timeout,
-                user_agent,
-                ninety_minut_min_interval_seconds,
-                ninety_minut_detail_cache_max_entries,
-            ),
-            "football-data": FootballDataScraper(
-                timeout,
-                user_agent,
-                football_data_api_token,
-                football_data_min_interval_seconds,
-            ),
-        }
-    )
+    providers: list[CompetitionScraper] = [
+        NinetyMinutScraper(
+            timeout,
+            user_agent,
+            ninety_minut_min_interval_seconds,
+            ninety_minut_detail_cache_max_entries,
+        ),
+        FootballDataScraper(
+            timeout,
+            user_agent,
+            football_data_api_token,
+            football_data_min_interval_seconds,
+        ),
+    ]
+    return ScraperRegistry({provider.name: provider for provider in providers})

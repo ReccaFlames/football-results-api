@@ -1,6 +1,14 @@
+import pytest
+
 from app.competitions import source_from_url
 from app.config import load_config
-from app.scraper import parse_football_data_matches
+from app.scraper import (
+    MATCH_STATISTICS,
+    FootballDataScraper,
+    NinetyMinutScraper,
+    parse_football_data_matches,
+    parse_football_data_seasons,
+)
 
 COMPETITIONS = load_config().to_competitions()
 
@@ -122,3 +130,95 @@ def test_missing_matches_list_is_rejected() -> None:
         assert "matches list" in str(error)
         return
     raise AssertionError("invalid response was accepted")
+
+
+@pytest.mark.parametrize(
+    ("season", "url"),
+    [
+        ("2025-2026", "https://api.football-data.org/v4/competitions/BL1/matches?season=2025"),
+        ("2025-2026", "https://api.football-data.org/v4/competitions/CL/matches?season=2025"),
+        ("2026", "https://api.football-data.org/v4/competitions/BSA/matches?season=2026"),
+    ],
+)
+def test_any_competition_code_is_accepted(season: str, url: str) -> None:
+    assert source_from_url(season, url).provider == "football-data"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://api.football-data.org/v4/competitions/bl1/matches?season=2025",
+        "https://api.football-data.org/v4/competitions/BL1/teams?season=2025",
+        "https://api.football-data.org/v4/competitions/../matches?season=2025",
+        "https://api.football-data.org/v4/competitions/BL1/matches?season=2025&limit=1",
+    ],
+)
+def test_invalid_football_data_urls_are_rejected(url: str) -> None:
+    with pytest.raises(ValueError, match="football-data.org"):
+        source_from_url("2025-2026", url)
+
+
+def test_cup_stages_and_groups_are_named() -> None:
+    knockout = match("FINISHED", 2, 1) | {"stage": "LAST_16", "matchday": None}
+    group = match("FINISHED", 2, 1) | {"id": 2, "stage": "GROUP_STAGE", "group": "GROUP_A"}
+    league = match("FINISHED", 2, 1) | {"id": 3, "stage": "REGULAR_SEASON"}
+
+    parsed = parse_football_data_matches(
+        {"matches": [knockout, group, league]}, COMPETITIONS["premier-league"], source()
+    )
+
+    assert [(item.stage, item.round) for item in parsed] == [
+        ("Last 16", None),
+        ("Group Stage, Group A, Matchday 2", 2),
+        ("Matchweek 2", 2),
+    ]
+
+
+def test_discovered_seasons_follow_the_competition_season_format() -> None:
+    payload = {
+        "seasons": [
+            {"startDate": "2025-08-15", "endDate": "2026-05-24"},
+            {"startDate": "2026-08-21", "endDate": "2027-05-30"},
+            {"startDate": "not-a-date"},
+        ]
+    }
+    split = parse_football_data_seasons(payload, COMPETITIONS["premier-league"], "PL")
+    calendar = parse_football_data_seasons(
+        {"seasons": [{"startDate": "2026-01-28", "endDate": "2026-12-06"}]},
+        COMPETITIONS["premier-league"].model_copy(update={"season_format": "calendar"}),
+        "BSA",
+    )
+
+    assert [(item.season, item.source_url) for item in split] == [
+        ("2026-2027", "https://api.football-data.org/v4/competitions/PL/matches?season=2026"),
+        ("2025-2026", "https://api.football-data.org/v4/competitions/PL/matches?season=2025"),
+    ]
+    assert [(item.season, item.source_url) for item in calendar] == [
+        ("2026", "https://api.football-data.org/v4/competitions/BSA/matches?season=2026"),
+    ]
+
+
+def test_parsed_statistics_stay_within_declared_capabilities() -> None:
+    parsed = parse_football_data_matches(
+        {"matches": [match("FINISHED", 2, 1)]}, COMPETITIONS["premier-league"], source()
+    )[0]
+    undeclared = MATCH_STATISTICS - FootballDataScraper.capabilities.statistics
+
+    assert all(getattr(parsed, field) is None for field in undeclared)
+    assert FootballDataScraper.capabilities.season_discovery
+    assert not NinetyMinutScraper.capabilities.season_discovery
+
+
+async def test_discovery_uses_the_configured_competition_code(monkeypatch) -> None:
+    requested: list[str] = []
+    scraper = FootballDataScraper(1, "test", "token", 0)
+
+    async def fake_get_json(url: str) -> dict[str, object]:
+        requested.append(url)
+        return {"seasons": [{"startDate": "2026-08-21"}]}
+
+    monkeypatch.setattr(scraper, "_get_json", fake_get_json)
+    discovered = await scraper.discover_seasons(COMPETITIONS["premier-league"])
+
+    assert requested == ["https://api.football-data.org/v4/competitions/PL"]
+    assert [item.season for item in discovered] == ["2026-2027"]

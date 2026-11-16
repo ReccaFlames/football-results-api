@@ -5,7 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main_module
-from app.competitions import competition_summary
+from app.competitions import competition_summary, source_from_url
 from app.config import load_config
 from app.main import app
 from app.models import MatchResult, ScrapedMatch, ScrapeJobStatus
@@ -366,3 +366,64 @@ def test_historical_source_rejects_provider_from_another_competition(
     )
     assert response.status_code == 422
     assert "not configured for ekstraklasa" in response.json()["detail"]
+
+
+def test_historical_season_must_match_the_competition_season_format(tmp_path: Path) -> None:
+    client, _ = client_with_empty_store(tmp_path)
+    response = client.post(
+        "/api/v1/results/history/fetch",
+        json={"competition": "ekstraklasa", "season": "2024"},
+        headers=AUTH_HEADERS,
+    )
+    assert response.status_code == 422
+    assert "split format" in response.json()["detail"]
+
+
+def test_calendar_historical_season_is_queued(tmp_path: Path) -> None:
+    client, repository = client_with_empty_store(tmp_path)
+    repository.competitions["premier-league"] = repository.competitions[
+        "premier-league"
+    ].model_copy(
+        update={
+            "season_format": "calendar",
+            "season_start_month": 1,
+            "current_season": "2025",
+            "seasons": {
+                "2025": source_from_url(
+                    "2025",
+                    "https://api.football-data.org/v4/competitions/PL/matches?season=2025",
+                )
+            },
+        }
+    )
+    response = client.post(
+        "/api/v1/results/history/fetch",
+        json={
+            "competition": "premier-league",
+            "season": "2024",
+            "source_url": "https://api.football-data.org/v4/competitions/PL/matches?season=2024",
+        },
+        headers=AUTH_HEADERS,
+    )
+    assert response.status_code == 202
+    summary = next(
+        item
+        for item in client.get("/api/v1/competitions").json()
+        if item["slug"] == "premier-league"
+    )
+    assert (summary["season_format"], summary["available_seasons"]) == ("calendar", ["2025"])
+
+
+def test_historical_source_rejects_another_football_data_competition(tmp_path: Path) -> None:
+    client, _ = client_with_empty_store(tmp_path)
+    response = client.post(
+        "/api/v1/results/history/fetch",
+        json={
+            "competition": "premier-league",
+            "season": "2023-2024",
+            "source_url": "https://api.football-data.org/v4/competitions/BL1/matches?season=2023",
+        },
+        headers=AUTH_HEADERS,
+    )
+    assert response.status_code == 422
+    assert "code BL1 is not configured" in response.json()["detail"]

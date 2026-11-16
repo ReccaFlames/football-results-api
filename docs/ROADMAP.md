@@ -150,11 +150,11 @@ How to use this list:
   - [x] Expose a stable match `id` in the API
   - [x] `team` table with canonical slugs and aliases; matches reference team IDs
   - [x] Escape `%` and `_` in team/stage search
-- [ ] **7. Generic seasons and providers**
-  - [ ] Allow calendar-year seasons (`2026`) alongside `2026-2027`
-  - [ ] Season-to-date mapping per competition (no hard-coded July start)
-  - [ ] football-data.org adapter and URL validation for any competition code
-  - [ ] Written provider contract (capabilities, `discover_seasons`)
+- [x] **7. Generic seasons and providers**
+  - [x] Allow calendar-year seasons (`2026`) alongside `2026-2027`
+  - [x] Season-to-date mapping per competition (no hard-coded July start)
+  - [x] football-data.org adapter and URL validation for any competition code
+  - [x] Written provider contract (capabilities, `discover_seasons`)
 - [ ] **8. Scheduler settings per competition**
   - [ ] Scheduler thresholds read from the configuration file
   - [ ] Automatic season discovery and rollover

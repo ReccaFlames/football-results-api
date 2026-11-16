@@ -3,10 +3,12 @@ from datetime import datetime
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
     Integer,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -25,6 +27,12 @@ class CompetitionRow(Base):
     __table_args__ = (
         UniqueConstraint("slug", name="competition_slug_key"),
         Index("ix_competition_slug", "slug"),
+        CheckConstraint(
+            "season_format IN ('split', 'calendar')", name="ck_competition_season_format"
+        ),
+        CheckConstraint(
+            "season_start_month BETWEEN 1 AND 12", name="ck_competition_season_start_month"
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -32,6 +40,12 @@ class CompetitionRow(Base):
     name: Mapped[str] = mapped_column(String(200))
     country: Mapped[str | None] = mapped_column(String(100))
     format: Mapped[str] = mapped_column(String(30))
+    season_format: Mapped[str] = mapped_column(
+        String(10), default="split", server_default=text("'split'")
+    )
+    season_start_month: Mapped[int] = mapped_column(
+        SmallInteger, default=7, server_default=text("7")
+    )
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

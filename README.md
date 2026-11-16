@@ -16,9 +16,10 @@ league-data API**. This README describes both:
 | Capability | Current state | Target state |
 | --- | --- | --- |
 | Competitions | 4 declared in `config/competitions.yaml`: Ekstraklasa, I liga, Europa League, Premier League | Any league/cup, declared in a config file or through an admin API |
-| Data providers | `90minut` (HTML scraping) and `football-data` (JSON API, Premier League only) | Pluggable provider adapters with a documented contract; any football-data.org competition; more sources |
+| Data providers | `90minut` (HTML scraping) and `football-data` (JSON API, any competition code) behind a [documented provider contract](docs/PROVIDERS.md) | More sources and fallback providers |
 | Adding a competition/season | Edit `config/competitions.yaml`; the scheduler applies changes | Edit configuration (no code), hot-reloaded |
-| Season rollover | Manual: edit `current_season` and source URLs in YAML | Automatic discovery of the new season's source |
+| Seasons | Split (`2026-2027`) or calendar-year (`2026`) per competition, with a configurable start month | Same |
+| Season rollover | Manual: edit `current_season` and source URLs in YAML (football-data can already list its seasons) | Automatic discovery of the new season's source |
 | Scheduling | Adaptive per-season scheduler driven by fixture times (built-in rules) | Same engine, with policy thresholds configurable per competition |
 | Configuration | Environment variables plus validated YAML for leagues, sources, providers, and schedule defaults | Env vars for infrastructure + one validated config file for leagues, sources, and schedules |
 | Observability | `/health` (DB + scheduler heartbeat), `scrape_run` table, logs; CI with PostgreSQL integration tests | Scheduler/scrape status endpoints, metrics, alerting on stale data |
@@ -36,8 +37,12 @@ Scheduler (app.scheduler) ──┬──▶ ScraperRegistry ──▶ sources
 
 - FastAPI provides the HTTP API (`app/main.py`).
 - Provider-specific adapters (`app/scraper.py`) parse 90minut pages and football-data.org JSON.
-  They implement a small `CompetitionScraper` protocol and are selected by `ScraperRegistry` using
-  the season's `provider` value.
+  They implement the `CompetitionScraper` provider contract (`scrape`, `discover_seasons`, and
+  declared capabilities; see [docs/PROVIDERS.md](docs/PROVIDERS.md)) and are selected by
+  `ScraperRegistry` using the season's `provider` value.
+- Each competition declares a season format: `split` seasons (`2026-2027`) start in a configurable
+  month (July by default); `calendar` seasons (`2026`) follow the calendar year. `app/seasons.py`
+  maps dates to seasons, for example to date 90minut fixtures that omit the year.
 - SQLAlchemy's async PostgreSQL dialect handles persistence (`app/repository.py`).
 - Alembic owns database migrations.
 - `config/competitions.yaml` is validated and seeded into PostgreSQL when the API or scheduler starts.
@@ -69,8 +74,10 @@ scheduler_heartbeat, and alembic_version.
 ### Known limitations
 
 - Source URLs are validated against the currently supported 90minut and football-data.org endpoints.
-- The football-data adapter and URL validation are restricted to the Premier League (`PL`)
-  endpoint; other football-data.org competitions are not accepted yet.
+- football-data.org sources must use `/v4/competitions/<CODE>/matches?season=<start year>`, and
+  all sources of one competition must share the same `<CODE>`.
+- Season discovery (`discover_seasons`) is implemented for football-data.org but not yet used by the
+  scheduler; 90minut sources are configured by hand.
 - 90minut source URLs must match `http(s)://(www.)90minut.pl/liga/1/ligaNNNNN.html`.
 - Scheduler thresholds (match duration, polling intervals, backoff) are constants in code.
 - Only finished matches are exposed; scheduled fixtures are stored but not served.
@@ -190,7 +197,7 @@ go through Alembic.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/health` | Database connectivity and scheduler heartbeat (`ok`, `stale`, or `not_started`) |
-| GET | `/api/v1/competitions` | Competitions with available/fetched seasons and scheduler state; `current_season` is `null` when none is designated |
+| GET | `/api/v1/competitions` | Competitions with `season_format`, `season_start_month`, available/fetched seasons, and scheduler state; `current_season` is `null` when none is designated |
 | GET | `/api/v1/results` | Finished matches with stable `id` and canonical team slugs; filters: `competition`, `season`, `round`, `stage`, `team` |
 | POST | `/api/v1/results/refresh` | Queue a current-season refresh (`202 Accepted`; requires `X-API-Key`) |
 | POST | `/api/v1/results/history/fetch` | Queue a non-current-season fetch (`202 Accepted`; requires `X-API-Key`); cached results return immediately |
@@ -244,7 +251,9 @@ curl -X POST http://localhost:8000/api/v1/results/history/fetch \
 
 New historical fetches return `202 Accepted` and a job status URL. Cached seasons return their
 results immediately unless `force_refresh` is true. The competition-season row and matches are
-committed together. The season then appears in GET /api/v1/competitions. The supplied URL must use
+committed together. The season then appears in GET /api/v1/competitions. The season must use the
+competition's `season_format` (`2024-2025` or `2024`); football-data.org URLs must use the
+competition's configured code. The supplied URL must use
 a provider already configured for that competition.
 
 Premier League historical sources use season-specific football-data.org URLs, for example:
@@ -367,8 +376,35 @@ uv run python -m app.config check
 ~~~
 
 The check can target an alternate file with `--config-file`. Invalid YAML, unsupported source URLs,
-undeclared providers, duplicate slugs, and inconsistent season/provider declarations fail
-validation. Schedule defaults are validated and recorded in the config, but the scheduler still
+undeclared providers, duplicate slugs, inconsistent season/provider declarations, seasons that do
+not match the competition's `season_format`, and mixed football-data.org competition codes fail
+validation.
+
+Per-competition season settings:
+
+| Key | Values | Default |
+| --- | --- | --- |
+| `season_format` | `split` (`2026-2027`, consecutive years) or `calendar` (`2026`) | `split` |
+| `season_start_month` | `2`–`12` for split seasons; omit for calendar seasons (always January) | `7` |
+
+A calendar-year football-data.org competition, for example the Brazilian Série A:
+
+~~~yaml
+  - slug: brasileirao
+    name: Campeonato Brasileiro Série A
+    country: Brazil
+    format: league
+    provider: football-data
+    season_format: calendar
+    current_season: 2026
+    seasons:
+      2026:
+        source_url: https://api.football-data.org/v4/competitions/BSA/matches?season=2026
+~~~
+
+football-data.org source URLs accept any competition code (`PL`, `BL1`, `SA`, `PD`, `CL`, ...);
+`season` is the season's start year. Which codes your token can read depends on your
+football-data.org plan. Schedule defaults are validated and recorded in the config, but the scheduler still
 uses its built-in thresholds until the scheduler-settings roadmap step.
 
 Application variables:
@@ -382,7 +418,7 @@ Application variables:
 | FOOTBALL_RESULTS_SCHEDULER_LOOP_SECONDS | `30` | Pause between scheduler cycles |
 | FOOTBALL_RESULTS_SCHEDULER_CLAIM_LIMIT | `5` | Max queued jobs and due seasons claimed per cycle (each limit applies separately) |
 | FOOTBALL_RESULTS_API_KEYS | empty | Comma-separated API keys; required for write endpoints and job status |
-| FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN | empty | football-data.org token (needed for Premier League) |
+| FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN | empty | football-data.org token (needed for football-data competitions such as the Premier League) |
 | FOOTBALL_RESULTS_FOOTBALL_DATA_MIN_REQUEST_INTERVAL_SECONDS | `6` (from YAML) | Optional environment override for the football-data.org throttle (free tier: 10 req/min) |
 | FOOTBALL_RESULTS_NINETY_MINUT_MIN_REQUEST_INTERVAL_SECONDS | `2` (from YAML) | Optional environment override for the minimum delay between requests to each 90minut host; set to `0` to disable |
 | FOOTBALL_RESULTS_NINETY_MINUT_DETAIL_CACHE_MAX_ENTRIES | `512` | Maximum successful 90minut detail responses kept in the process-local LRU cache; set to `0` to disable |
@@ -509,13 +545,10 @@ Configuration behaviour:
 
 ### Pluggable data providers
 
-- Formalise the existing `CompetitionScraper` protocol as a provider interface:
-  `fetch_matches(competition, season)`, optional `fetch_match_details(match)`,
-  `discover_seasons(competition)`, and a declared capability list (e.g. which statistics it can
-  supply).
+- The provider interface (`scrape`, `discover_seasons`, declared capabilities) is documented in
+  [docs/PROVIDERS.md](docs/PROVIDERS.md); next, use discovery for automatic rollover.
 - Register providers by name (entry points or a simple registry module) so a new source is one new
   module plus configuration.
-- Generalise the football-data.org adapter to any competition code (`BL1`, `SA`, `PD`, `CL`, ...).
 - Candidate additional sources: official league sites, other open football APIs, and a
   generic CSV/JSON URL provider for custom feeds.
 - Allow a fallback provider per competition when the primary source fails repeatedly.
@@ -553,7 +586,7 @@ The current adaptive scheduler is the foundation; planned improvements:
 ### Suggested implementation order
 
 1. Move the registry to a validated config file (no behaviour change).
-2. Generalise the football-data.org adapter to any competition code.
+2. ~~Generalise the football-data.org adapter to any competition code.~~ (done)
 3. Make scheduler thresholds configurable per competition.
 4. Add fixtures and standings endpoints.
 5. Add admin/status endpoints with API-key authentication and metrics.

@@ -7,7 +7,7 @@ from importlib.metadata import version
 from fastapi import Depends, FastAPI, HTTPException, Path, Query, Response
 from fastapi.security import APIKeyHeader
 
-from app.competitions import source_from_url
+from app.competitions import provider_competition_code, source_from_url
 from app.config import load_config, settings
 from app.database import session_factory
 from app.models import (
@@ -19,6 +19,7 @@ from app.models import (
     ScrapeJobStatus,
 )
 from app.repository import ActiveScrapeJobConflict, PostgresResultRepository
+from app.seasons import SEASON_PATTERN, validate_season
 
 store = PostgresResultRepository(session_factory)
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -80,7 +81,7 @@ async def get_competitions() -> list[CompetitionSummary]:
 @app.get("/api/v1/results", response_model=ResultsResponse)
 async def get_results(
     competition: str | None = None,
-    season: str | None = Query(default=None, pattern=r"^\d{4}-\d{4}$"),
+    season: str | None = Query(default=None, pattern=SEASON_PATTERN),
     round_number: int | None = Query(default=None, alias="round", ge=1),
     stage: str | None = None,
     team: str | None = None,
@@ -161,6 +162,10 @@ async def fetch_historical_results(
             status_code=422,
             detail="Use /api/v1/results/refresh for the current season",
         )
+    try:
+        validate_season(request.season, competition.season_format)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     if request.source_url is not None:
         try:
             source = source_from_url(request.season, request.source_url)
@@ -180,6 +185,19 @@ async def fetch_historical_results(
             status_code=422,
             detail=(
                 f"No source configured for {competition.slug} {request.season}; provide source_url"
+            ),
+        )
+    configured_codes = {
+        code
+        for item in competition.seasons.values()
+        if (code := provider_competition_code(item)) is not None
+    }
+    source_code = provider_competition_code(source)
+    if configured_codes and source_code is not None and source_code not in configured_codes:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Provider competition code {source_code} is not configured for {competition.slug}"
             ),
         )
     if not request.force_refresh and await store.is_cached(
