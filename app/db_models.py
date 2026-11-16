@@ -84,6 +84,35 @@ class CompetitionSeasonRow(Base):
     )
 
 
+class TeamRow(Base):
+    __tablename__ = "team"
+    __table_args__ = (UniqueConstraint("slug", name="uq_team_slug"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    slug: Mapped[str] = mapped_column(String(200))
+    name: Mapped[str] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    aliases: Mapped[list["TeamAliasRow"]] = relationship(
+        back_populates="team",
+        cascade="all, delete-orphan",
+    )
+
+
+class TeamAliasRow(Base):
+    __tablename__ = "team_alias"
+
+    normalized_alias: Mapped[str] = mapped_column(String(250), primary_key=True)
+    alias: Mapped[str] = mapped_column(String(200))
+    team_id: Mapped[int] = mapped_column(
+        ForeignKey("team.id", ondelete="CASCADE", name="fk_team_alias_team_id_team"),
+        index=True,
+    )
+
+    team: Mapped[TeamRow] = relationship(back_populates="aliases")
+
+
 class MatchRow(Base):
     __tablename__ = "match_result"
     __table_args__ = (
@@ -92,10 +121,17 @@ class MatchRow(Base):
             "source_key",
             name="uq_match_result_source_key",
         ),
+        UniqueConstraint(
+            "competition_season_id",
+            "provider_match_id",
+            name="uq_match_result_provider_match_id",
+        ),
         Index("ix_match_result_season_round", "competition_season_id", "round"),
         Index("ix_match_result_played_at", "played_at"),
         Index("ix_match_result_home_team", "home_team"),
         Index("ix_match_result_away_team", "away_team"),
+        Index("ix_match_result_home_team_id", "home_team_id"),
+        Index("ix_match_result_away_team_id", "away_team_id"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -104,6 +140,13 @@ class MatchRow(Base):
         index=True,
     )
     source_key: Mapped[str] = mapped_column(String(64))
+    provider_match_id: Mapped[str | None] = mapped_column(String(100))
+    home_team_id: Mapped[int] = mapped_column(
+        ForeignKey("team.id", name="fk_match_result_home_team_id_team")
+    )
+    away_team_id: Mapped[int] = mapped_column(
+        ForeignKey("team.id", name="fk_match_result_away_team_id_team")
+    )
     source_url: Mapped[str] = mapped_column(Text)
     stage: Mapped[str] = mapped_column(String(250))
     round: Mapped[int | None] = mapped_column(Integer)
@@ -131,6 +174,8 @@ class MatchRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
     competition_season: Mapped[CompetitionSeasonRow] = relationship(back_populates="matches")
+    home_team_row: Mapped[TeamRow] = relationship(foreign_keys=[home_team_id])
+    away_team_row: Mapped[TeamRow] = relationship(foreign_keys=[away_team_id])
 
 
 class ScrapeRunRow(Base):

@@ -1,10 +1,12 @@
 import hashlib
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import exists, func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import aliased, selectinload
 
 from app.db_models import (
     CompetitionRow,
@@ -12,6 +14,8 @@ from app.db_models import (
     MatchRow,
     SchedulerHeartbeatRow,
     ScrapeRunRow,
+    TeamAliasRow,
+    TeamRow,
 )
 from app.models import (
     Competition,
@@ -28,12 +32,21 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
-def _source_key(match: ScrapedMatch) -> str:
-    identity = (
-        f"{match.season}|{match.stage}|{match.home_team}|{match.away_team}|"
-        f"{match.played_at.isoformat()}"
-    )
-    return hashlib.sha256(identity.encode()).hexdigest()
+def _source_key(match: ScrapedMatch, home_team_id: int, away_team_id: int) -> str:
+    return f"{match.season}|{match.round}|{home_team_id}|{away_team_id}"
+
+
+def _normalize_team_alias(name: str) -> str:
+    return " ".join(name.lower().split())
+
+
+def _team_slug(name: str) -> str:
+    normalized = name.lower().translate(str.maketrans("ąćęłńóśźż", "acelnoszz"))
+    return re.sub(r"[^a-z0-9]+", "-", normalized).strip("-") or "team"
+
+
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
 
 
 @dataclass(frozen=True)
@@ -216,11 +229,21 @@ class PostgresResultRepository:
         stage: str | None = None,
         team: str | None = None,
     ) -> tuple[list[MatchResult], datetime | None]:
+        home_team = aliased(TeamRow)
+        away_team = aliased(TeamRow)
         query = (
-            select(MatchRow, CompetitionRow.slug, CompetitionSeasonRow.season)
+            select(
+                MatchRow,
+                CompetitionRow.slug,
+                CompetitionSeasonRow.season,
+                home_team.slug,
+                away_team.slug,
+            )
             .select_from(MatchRow)
             .join(CompetitionSeasonRow, MatchRow.competition_season_id == CompetitionSeasonRow.id)
             .join(CompetitionRow, CompetitionSeasonRow.competition_id == CompetitionRow.id)
+            .join(home_team, MatchRow.home_team_id == home_team.id)
+            .join(away_team, MatchRow.away_team_id == away_team.id)
             .where(MatchRow.status == "finished", CompetitionRow.is_enabled.is_(True))
             .order_by(MatchRow.played_at, MatchRow.id)
         )
@@ -231,10 +254,27 @@ class PostgresResultRepository:
         if round_number:
             query = query.where(MatchRow.round == round_number)
         if stage:
-            query = query.where(MatchRow.stage.ilike(f"%{stage}%"))
+            pattern = f"%{_escape_like(stage)}%"
+            query = query.where(MatchRow.stage.ilike(pattern, escape="\\"))
         if team:
+            pattern = f"%{_escape_like(team)}%"
             query = query.where(
-                or_(MatchRow.home_team.ilike(f"%{team}%"), MatchRow.away_team.ilike(f"%{team}%"))
+                or_(
+                    MatchRow.home_team.ilike(pattern, escape="\\"),
+                    MatchRow.away_team.ilike(pattern, escape="\\"),
+                    exists(
+                        select(1).where(
+                            TeamAliasRow.team_id == MatchRow.home_team_id,
+                            TeamAliasRow.alias.ilike(pattern, escape="\\"),
+                        )
+                    ),
+                    exists(
+                        select(1).where(
+                            TeamAliasRow.team_id == MatchRow.away_team_id,
+                            TeamAliasRow.alias.ilike(pattern, escape="\\"),
+                        )
+                    ),
+                )
             )
         async with self.sessions() as session:
             rows = (await session.execute(query)).all()
@@ -253,10 +293,13 @@ class PostgresResultRepository:
             MatchResult(
                 competition=slug,
                 season=season_name,
+                id=row.id,
                 stage=row.stage,
                 round=row.round,
                 home_team=row.home_team,
                 away_team=row.away_team,
+                home_team_slug=home_slug,
+                away_team_slug=away_slug,
                 home_score=row.home_score,
                 away_score=row.away_score,
                 home_goals=row.home_goals,
@@ -276,7 +319,7 @@ class PostgresResultRepository:
                 played_at=row.played_at,
                 source_url=row.source_url,
             )
-            for row, slug, season_name in rows
+            for row, slug, season_name, home_slug, away_slug in rows
             if row.home_score is not None and row.away_score is not None
         ]
         return results, refreshed_at
@@ -441,44 +484,80 @@ class PostgresResultRepository:
                 run = await session.get(ScrapeRunRow, run_id)
                 if run is None or run.competition_season_id != season.id or run.status != "running":
                     raise ValueError(f"Scrape job {run_id} is not running for {source.season}")
-            await session.execute(
-                delete(MatchRow).where(MatchRow.competition_season_id == season.id)
-            )
             now = _now()
-            session.add_all(
-                [
-                    MatchRow(
-                        competition_season_id=season.id,
-                        source_key=_source_key(match),
-                        source_url=match.source_url,
-                        stage=match.stage,
-                        round=match.round,
-                        home_team=match.home_team,
-                        away_team=match.away_team,
-                        status=match.status,
-                        home_score=match.home_score,
-                        away_score=match.away_score,
-                        home_goals=match.home_goals,
-                        away_goals=match.away_goals,
-                        home_goals_first_half=match.home_goals_first_half,
-                        away_goals_first_half=match.away_goals_first_half,
-                        home_goals_second_half=match.home_goals_second_half,
-                        away_goals_second_half=match.away_goals_second_half,
-                        home_corners=match.home_corners,
-                        away_corners=match.away_corners,
-                        home_cards=match.home_cards,
-                        away_cards=match.away_cards,
-                        home_fouls=match.home_fouls,
-                        away_fouls=match.away_fouls,
-                        first_team_to_score=match.first_team_to_score,
-                        first_goal_minute=match.first_goal_minute,
-                        played_at=match.played_at,
-                        created_at=now,
-                        updated_at=now,
+            previous = list(
+                (
+                    await session.scalars(
+                        select(MatchRow).where(MatchRow.competition_season_id == season.id)
                     )
-                    for match in fresh
-                ]
+                ).all()
             )
+            by_key = {match.source_key: match for match in previous}
+            by_provider_id = {
+                match.provider_match_id: match
+                for match in previous
+                if match.provider_match_id is not None
+            }
+            retained_ids: set[int] = set()
+            team_ids: dict[str, int] = {}
+            additions: list[MatchRow] = []
+            for match in fresh:
+                home_team_id = await self._ensure_team(session, match.home_team, team_ids, now)
+                away_team_id = await self._ensure_team(session, match.away_team, team_ids, now)
+                source_key = _source_key(match, home_team_id, away_team_id)
+                existing = (
+                    by_provider_id.get(match.provider_match_id)
+                    if match.provider_match_id is not None
+                    else None
+                )
+                existing = existing or by_key.get(source_key)
+                values = {
+                    "source_key": source_key,
+                    "provider_match_id": match.provider_match_id
+                    or (None if existing is None else existing.provider_match_id),
+                    "home_team_id": home_team_id,
+                    "away_team_id": away_team_id,
+                    "source_url": match.source_url,
+                    "stage": match.stage,
+                    "round": match.round,
+                    "home_team": match.home_team,
+                    "away_team": match.away_team,
+                    "status": match.status,
+                    "home_score": match.home_score,
+                    "away_score": match.away_score,
+                    "home_goals": match.home_goals,
+                    "away_goals": match.away_goals,
+                    "home_goals_first_half": match.home_goals_first_half,
+                    "away_goals_first_half": match.away_goals_first_half,
+                    "home_goals_second_half": match.home_goals_second_half,
+                    "away_goals_second_half": match.away_goals_second_half,
+                    "home_corners": match.home_corners,
+                    "away_corners": match.away_corners,
+                    "home_cards": match.home_cards,
+                    "away_cards": match.away_cards,
+                    "home_fouls": match.home_fouls,
+                    "away_fouls": match.away_fouls,
+                    "first_team_to_score": match.first_team_to_score,
+                    "first_goal_minute": match.first_goal_minute,
+                    "played_at": match.played_at,
+                    "updated_at": now,
+                }
+                if existing is None:
+                    additions.append(
+                        MatchRow(
+                            competition_season_id=season.id,
+                            **values,
+                            created_at=now,
+                        )
+                    )
+                else:
+                    for field, value in values.items():
+                        setattr(existing, field, value)
+                    retained_ids.add(existing.id)
+            session.add_all(additions)
+            for stale_match in previous:
+                if stale_match.id not in retained_ids:
+                    await session.delete(stale_match)
             season.fetched_at = season.last_checked_at = season.last_successful_check_at = now
             season.consecutive_failures, season.updated_at = 0, now
             if season.is_current and season.automatic_refresh_enabled:
@@ -489,6 +568,67 @@ class PostgresResultRepository:
                 )
             run.status, run.completed_at, run.matches_found = "completed", now, len(fresh)
         return now
+
+    @staticmethod
+    async def _ensure_team(
+        session: AsyncSession,
+        name: str,
+        team_ids: dict[str, int],
+        now: datetime,
+    ) -> int:
+        normalized_alias = _normalize_team_alias(name)
+        if not normalized_alias:
+            raise ValueError("A scraped team name cannot be empty")
+        known_id = team_ids.get(normalized_alias)
+        if known_id is not None:
+            return known_id
+        alias = await session.get(TeamAliasRow, normalized_alias)
+        if alias is not None:
+            team_ids[normalized_alias] = alias.team_id
+            return alias.team_id
+
+        slug = _team_slug(name)
+        existing_team = await session.scalar(select(TeamRow).where(TeamRow.slug == slug))
+        if (
+            existing_team is not None
+            and _normalize_team_alias(existing_team.name) != normalized_alias
+        ):
+            suffix = hashlib.sha256(normalized_alias.encode()).hexdigest()[:10]
+            slug = f"{slug[:189]}-{suffix}"
+        insert_team = (
+            insert(TeamRow)
+            .values(
+                slug=slug,
+                name=name.strip(),
+                created_at=now,
+                updated_at=now,
+            )
+            .on_conflict_do_nothing(index_elements=[TeamRow.slug])
+            .returning(TeamRow.id)
+        )
+        team_id = await session.scalar(insert_team)
+        if team_id is None:
+            existing_alias = await session.get(TeamAliasRow, normalized_alias)
+            if existing_alias is not None:
+                team_id = existing_alias.team_id
+            else:
+                existing_team = await session.scalar(select(TeamRow).where(TeamRow.slug == slug))
+                if existing_team is None:
+                    raise RuntimeError(f"Unable to create team for alias {name!r}")
+                if _normalize_team_alias(existing_team.name) != normalized_alias:
+                    raise RuntimeError(f"Team slug collision for {name!r}")
+                team_id = existing_team.id
+
+        await session.execute(
+            insert(TeamAliasRow)
+            .values(normalized_alias=normalized_alias, alias=name.strip(), team_id=team_id)
+            .on_conflict_do_nothing(index_elements=[TeamAliasRow.normalized_alias])
+        )
+        alias = await session.get(TeamAliasRow, normalized_alias)
+        if alias is None:
+            raise RuntimeError(f"Unable to create team alias for {name!r}")
+        team_ids[normalized_alias] = alias.team_id
+        return alias.team_id
 
     async def record_scrape_failure(
         self,

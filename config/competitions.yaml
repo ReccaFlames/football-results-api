@@ -1,0 +1,66 @@
+defaults:
+  schedule:
+    policy: adaptive
+    pre_match_check_minutes: 30
+    match_duration_minutes:
+      league: 105
+      cup: 135
+    result_poll_minutes: [5, 15, 60]
+    idle_interval: 1d
+    failure_backoff_minutes: [5, 15, 30, 60]
+
+providers:
+  90minut:
+    min_request_interval_seconds: 2
+  football-data:
+    min_request_interval_seconds: 6
+
+competitions:
+  - slug: ekstraklasa
+    name: PKO BP Ekstraklasa
+    country: Poland
+    format: league
+    provider: 90minut
+    current_season: 2026-2027
+    seasons:
+      "2025-2026":
+        source_url: http://www.90minut.pl/liga/1/liga14072.html
+      "2026-2027":
+        source_url: http://www.90minut.pl/liga/1/liga14675.html
+
+  - slug: pierwsza-liga
+    name: Betclic I liga
+    country: Poland
+    format: league
+    provider: 90minut
+    current_season: 2026-2027
+    seasons:
+      "2025-2026":
+        source_url: http://www.90minut.pl/liga/1/liga14073.html
+      "2026-2027":
+        source_url: http://www.90minut.pl/liga/1/liga14676.html
+
+  - slug: europa-league
+    name: UEFA Europa League
+    format: cup
+    provider: 90minut
+    current_season: 2026-2027
+    seasons:
+      "2025-2026":
+        source_url: http://www.90minut.pl/liga/1/liga14078.html
+      "2026-2027":
+        source_url: http://www.90minut.pl/liga/1/liga14681.html
+
+  - slug: premier-league
+    name: Premier League
+    country: England
+    format: league
+    provider: football-data
+    current_season: 2026-2027
+    seasons:
+      "2024-2025":
+        source_url: https://api.football-data.org/v4/competitions/PL/matches?season=2024
+      "2025-2026":
+        source_url: https://api.football-data.org/v4/competitions/PL/matches?season=2025
+      "2026-2027":
+        source_url: https://api.football-data.org/v4/competitions/PL/matches?season=2026

@@ -141,6 +141,7 @@ def parse_ninety_minut_matches(
             if score_link
             else source.source_url
         )
+        provider_id = re.search(r"[?&]id_mecz=(\d+)", match_url)
         key = (stage, home_team, away_team, played_at)
         if key in seen:
             continue
@@ -160,6 +161,7 @@ def parse_ninety_minut_matches(
                 away_goals=away_score,
                 played_at=played_at,
                 source_url=match_url,
+                provider_match_id=None if provider_id is None else provider_id.group(1),
             )
         )
     return matches
@@ -442,6 +444,7 @@ def parse_football_data_matches(
                 first_goal_minute=first_goal_minute,
                 played_at=played_at,
                 source_url=match_url,
+                provider_match_id=str(match_id) if isinstance(match_id, int) else None,
             )
         )
     return matches

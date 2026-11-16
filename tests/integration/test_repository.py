@@ -5,7 +5,13 @@ import pytest
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.db_models import CompetitionRow, CompetitionSeasonRow, MatchRow, ScrapeRunRow
+from app.db_models import (
+    CompetitionRow,
+    CompetitionSeasonRow,
+    MatchRow,
+    ScrapeRunRow,
+    TeamAliasRow,
+)
 from app.models import Competition, ScrapedMatch, SeasonSource
 from app.repository import ActiveScrapeJobConflict, PostgresResultRepository
 
@@ -269,6 +275,74 @@ async def test_replace_competition_replaces_previous_snapshot(
     results, _ = await repository.get_results(competition="test-league")
     assert [(item.home_team, item.away_team) for item in results] == [("E", "F")]
     assert [run.status for run in await scrape_runs(sessions)] == ["completed", "completed"]
+
+
+async def test_match_ids_survive_provider_id_upserts(
+    repository: PostgresResultRepository,
+) -> None:
+    competition = league()
+    season = competition.seasons["2026-2027"]
+    await repository.seed_competitions({"test-league": competition})
+    original = match("Legia", "Lech", datetime.now(UTC) - timedelta(days=1), (2, 1))
+    original.provider_match_id = "provider-123"
+    await repository.replace_competition(competition, season, [original])
+    first, _ = await repository.get_results(competition="test-league")
+
+    updated = original.model_copy(
+        update={
+            "stage": "Rescheduled fixture",
+            "round": 2,
+            "played_at": original.played_at + timedelta(days=2),
+        }
+    )
+    await repository.replace_competition(competition, season, [updated])
+    second, _ = await repository.get_results(competition="test-league")
+
+    assert len(first) == len(second) == 1
+    assert second[0].id == first[0].id
+
+
+async def test_fallback_match_identity_aliases_and_escaped_search(
+    repository: PostgresResultRepository,
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    competition = league()
+    season = competition.seasons["2026-2027"]
+    await repository.seed_competitions({"test-league": competition})
+    kickoff = datetime.now(UTC) - timedelta(days=2)
+    first = match("River % United", "Harbor_United", kickoff, (1, 0), round_number=1)
+    first.stage = "Cup_A"
+    second = match(
+        "River X United", "Southside", kickoff + timedelta(days=1), (2, 0), round_number=2
+    )
+    second.stage = "Cup A"
+    await repository.replace_competition(competition, season, [first, second])
+    before, _ = await repository.get_results(competition="test-league")
+    first_result = next(item for item in before if item.home_team == "River % United")
+
+    async with sessions.begin() as session:
+        home_id = await session.scalar(
+            select(MatchRow.home_team_id).where(MatchRow.id == first_result.id)
+        )
+        session.add(
+            TeamAliasRow(
+                normalized_alias="alternate river",
+                alias="Alternate River",
+                team_id=home_id,
+            )
+        )
+
+    moved = first.model_copy(update={"played_at": first.played_at + timedelta(days=5)})
+    await repository.replace_competition(competition, season, [moved, second])
+    after, _ = await repository.get_results(competition="test-league")
+    moved_result = next(item for item in after if item.home_team == "River % United")
+
+    assert moved_result.id == first_result.id
+    assert moved_result.home_team_slug == "river-united"
+    assert (await repository.get_results(team="%"))[0] == [moved_result]
+    assert (await repository.get_results(team="_"))[0] == [moved_result]
+    assert (await repository.get_results(team="Alternate"))[0] == [moved_result]
+    assert (await repository.get_results(stage="Cup_"))[0] == [moved_result]
 
 
 async def test_unregistered_historical_season_is_persisted_without_scheduling(

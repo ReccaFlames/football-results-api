@@ -10,7 +10,10 @@ from sqlalchemy.pool import NullPool
 from app.repository import PostgresResultRepository
 from tests.integration.support import run_alembic
 
-TABLES = "competition, competition_season, match_result, scrape_run, scheduler_heartbeat"
+TABLES = (
+    "team_alias, team, competition, competition_season, match_result, scrape_run, "
+    "scheduler_heartbeat"
+)
 
 
 @pytest.fixture(scope="session")

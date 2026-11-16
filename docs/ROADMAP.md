@@ -145,11 +145,11 @@ How to use this list:
   - [x] Seed only on startup or when the file changes, not every scheduler cycle
   - [x] Competitions removed from the file are disabled, not deleted
   - [x] Remove the hard-coded registry from `app/competitions.py`
-- [ ] **6. Stable data model**
-  - [ ] Upsert matches by provider match ID, or a key that ignores kickoff time
-  - [ ] Expose a stable match `id` in the API
-  - [ ] `team` table with canonical slugs and aliases; matches reference team IDs
-  - [ ] Escape `%` and `_` in team/stage search
+- [x] **6. Stable data model**
+  - [x] Upsert matches by provider match ID, or a key that ignores kickoff time
+  - [x] Expose a stable match `id` in the API
+  - [x] `team` table with canonical slugs and aliases; matches reference team IDs
+  - [x] Escape `%` and `_` in team/stage search
 - [ ] **7. Generic seasons and providers**
   - [ ] Allow calendar-year seasons (`2026`) alongside `2026-2027`
   - [ ] Season-to-date mapping per competition (no hard-coded July start)

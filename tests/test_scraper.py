@@ -96,6 +96,12 @@ def test_parses_actual_90minut_league_markup() -> None:
     assert results[0].home_goals_first_half is None
     assert results[0].played_at.isoformat() == "2026-07-25T17:30:00+02:00"
     assert results[0].source_url.endswith("/mecz.php?id_mecz=2113280")
+    parsed = parse_matches(
+        page_with_rows("Kolejka 1 - 25-26 lipca", result_row()),
+        competition,
+        current_source("ekstraklasa"),
+    )[0]
+    assert parsed.provider_match_id == "2113280"
 
 
 def test_parses_named_europa_league_stage() -> None:

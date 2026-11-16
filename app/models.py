@@ -32,12 +32,15 @@ class CompetitionSummary(BaseModel):
 
 
 class MatchResult(BaseModel):
+    id: int | None = None
     competition: str
     season: str
     stage: str = "Unknown stage"
     round: int | None = Field(default=None, ge=1)
     home_team: str
     away_team: str
+    home_team_slug: str | None = None
+    away_team_slug: str | None = None
     home_score: int = Field(ge=0)
     away_score: int = Field(ge=0)
     home_goals: int | None = Field(default=None, ge=0)
@@ -84,6 +87,7 @@ class ScrapedMatch(BaseModel):
     first_goal_minute: str | None = None
     played_at: datetime
     source_url: str
+    provider_match_id: str | None = None
 
     def as_result(self) -> MatchResult | None:
         if self.status != "finished" or self.home_score is None or self.away_score is None:

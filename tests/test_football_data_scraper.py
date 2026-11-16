@@ -52,6 +52,7 @@ def test_parses_finished_match() -> None:
     assert parsed.stage == "Matchweek 2"
     assert parsed.played_at.isoformat() == "2026-08-30T15:30:00+00:00"
     assert parsed.source_url == "https://api.football-data.org/v4/matches/537963"
+    assert parsed.provider_match_id == "537963"
     assert parsed.home_goals == 2
     assert parsed.away_goals == 1
     assert parsed.home_goals_first_half == 1

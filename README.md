@@ -22,7 +22,7 @@ league-data API**. This README describes both:
 | Scheduling | Adaptive per-season scheduler driven by fixture times (built-in rules) | Same engine, with policy thresholds configurable per competition |
 | Configuration | Environment variables plus validated YAML for leagues, sources, providers, and schedule defaults | Env vars for infrastructure + one validated config file for leagues, sources, and schedules |
 | Observability | `/health` (DB + scheduler heartbeat), `scrape_run` table, logs; CI with PostgreSQL integration tests | Scheduler/scrape status endpoints, metrics, alerting on stale data |
-| API | Read results, manual refresh, historical fetch | Plus fixtures, standings, teams, and authenticated admin endpoints |
+| API | Read finished results with stable match IDs, manual refresh, historical fetch | Plus fixtures, standings, teams, and authenticated admin endpoints |
 
 ## Current state
 
@@ -45,14 +45,17 @@ Scheduler (app.scheduler) ──┬──▶ ScraperRegistry ──▶ sources
   for names, sources, and the current season; seasons added through the historical fetch endpoint
   remain in the database alongside them. Removed competitions are disabled and retained in the
   database, including their matches.
-- A refresh replaces one competition-season atomically.
+- A refresh reconciles one competition-season atomically, retaining match IDs by provider match ID
+  or a team/stage key that ignores kickoff-time changes.
+- Teams have canonical slugs and normalized aliases; match rows reference team records while
+  preserving provider display names.
 - A separate adaptive scheduler process refreshes only current seasons and sleeps between fixtures
   (`app/scheduler.py`, rules in `app/scheduling.py`).
 - Season sources persist their provider so additional websites can be added without changing the
   scheduler.
 
-Database tables: competition, competition_season, match_result, scrape_run, scheduler_heartbeat,
-and alembic_version.
+Database tables: competition, competition_season, team, team_alias, match_result, scrape_run,
+scheduler_heartbeat, and alembic_version.
 
 ### Supported competitions
 
@@ -188,7 +191,7 @@ go through Alembic.
 | --- | --- | --- |
 | GET | `/health` | Database connectivity and scheduler heartbeat (`ok`, `stale`, or `not_started`) |
 | GET | `/api/v1/competitions` | Competitions with available/fetched seasons and scheduler state; `current_season` is `null` when none is designated |
-| GET | `/api/v1/results` | Finished matches; filters: `competition`, `season`, `round`, `stage`, `team` |
+| GET | `/api/v1/results` | Finished matches with stable `id` and canonical team slugs; filters: `competition`, `season`, `round`, `stage`, `team` |
 | POST | `/api/v1/results/refresh` | Queue a current-season refresh (`202 Accepted`; requires `X-API-Key`) |
 | POST | `/api/v1/results/history/fetch` | Queue a non-current-season fetch (`202 Accepted`; requires `X-API-Key`); cached results return immediately |
 | GET | `/api/v1/jobs/{job_id}` | Get queued, running, completed, or failed scrape-job status (`X-API-Key` required) |
@@ -214,8 +217,8 @@ curl -X POST http://localhost:8000/api/v1/results/refresh \
 
 The response is `202 Accepted` with a `Location` header and a `status_url`. Poll that URL, using
 the same API key, until the job completes. The scheduler must be running to process queued jobs.
-Each refresh replaces the full season; query `/api/v1/results` with `round` to limit displayed
-results.
+Each refresh reconciles the full season while retaining IDs for known matches; query
+`/api/v1/results` with `round` to limit displayed results.
 
 Queue a fetch of a configured historical season:
 
