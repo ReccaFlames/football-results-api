@@ -5,7 +5,6 @@ from pathlib import Path
 import pytest
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
-from pydantic import ValidationError
 
 import app.main as main_module
 from app.competitions import competition_summary, source_from_url
@@ -16,13 +15,12 @@ from app.models import (
     FreshnessSource,
     Match,
     MatchResult,
-    MessageError,
-    ParameterError,
-    RequestValidationErrorResponse,
+    Problem,
     ScrapedMatch,
     ScrapeJobStatus,
     Team,
 )
+from app.ratelimit import FixedWindowRateLimiter
 
 AUTH_HEADERS = {"X-API-Key": "test-api-key"}
 COMPETITIONS = load_config().to_competitions()
@@ -207,6 +205,11 @@ def configured_api_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(main_module.settings, "api_keys", "test-api-key")
 
 
+@pytest.fixture(autouse=True)
+def fresh_rate_limiter(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(main_module, "rate_limiter", FixedWindowRateLimiter())
+
+
 def client_with_empty_store(_tmp_path: Path) -> tuple[TestClient, FakeRepository]:
     repository = FakeRepository()
     main_module.store = repository
@@ -264,14 +267,14 @@ def test_refresh_rejects_removed_round_response_filters(tmp_path: Path) -> None:
         headers=AUTH_HEADERS,
     )
     assert response.status_code == 422
-    assert response.json()["detail"][0]["type"] == "extra_forbidden"
+    assert response.json()["errors"][0]["type"] == "extra_forbidden"
 
 
 def test_refresh_requires_competition(tmp_path: Path) -> None:
     client, _ = client_with_empty_store(tmp_path)
     response = client.post("/api/v1/results/refresh", json={}, headers=AUTH_HEADERS)
     assert response.status_code == 422
-    assert response.json()["detail"][0]["loc"] == ["body", "competition"]
+    assert response.json()["errors"][0]["loc"] == ["body", "competition"]
 
 
 def test_refresh_rejects_historical_season(tmp_path: Path) -> None:
@@ -599,13 +602,13 @@ def test_matches_reject_invalid_filters_with_valid_values(tmp_path: Path) -> Non
     client, _ = client_with_matches(tmp_path)
     status = client.get("/api/v1/matches?status=finished,live")
     assert status.status_code == 422
-    assert status.json()["detail"]["invalid"] == ["live"]
-    assert status.json()["detail"]["valid_values"] == ["finished", "scheduled", "inactive"]
+    assert status.json()["invalid"] == ["live"]
+    assert status.json()["valid_values"] == ["finished", "scheduled", "inactive"]
     assert client.get("/api/v1/matches?date_from=yesterday").status_code == 422
     assert client.get("/api/v1/matches?competition=la-liga").status_code == 404
     season = client.get("/api/v1/matches?competition=ekstraklasa&season=2019-2020")
     assert season.status_code == 404
-    assert season.json()["detail"]["valid_values"] == ["2026-2027", "2025-2026"]
+    assert season.json()["valid_values"] == ["2026-2027", "2025-2026"]
     assert client.get("/api/v1/matches?limit=201").status_code == 422
 
 
@@ -628,7 +631,7 @@ def test_matches_cursor_pagination(tmp_path: Path) -> None:
     assert ids(client.get(f"/api/v1/matches?limit=3&cursor={first}")) == [3, 4, 5]
     other = client.get(f"/api/v1/matches?limit=2&status=finished&cursor={first}")
     assert other.status_code == 400
-    assert "different filters" in other.json()["detail"]["message"]
+    assert "different filters" in other.json()["detail"]
     assert client.get("/api/v1/matches?cursor=not-a-cursor").status_code == 400
 
 
@@ -638,8 +641,8 @@ def test_matches_fields_select_compact_items(tmp_path: Path) -> None:
     assert response.json()["data"] == [{"id": 1, "home_team_slug": "wisla-plock", "away_goals": 0}]
     invalid = client.get("/api/v1/matches?fields=id,score")
     assert invalid.status_code == 422
-    assert invalid.json()["detail"]["invalid"] == ["score"]
-    assert "kickoff_at" in invalid.json()["detail"]["valid_values"]
+    assert invalid.json()["invalid"] == ["score"]
+    assert "kickoff_at" in invalid.json()["valid_values"]
 
 
 def test_freshness_is_reported_per_competition_season(tmp_path: Path) -> None:
@@ -724,7 +727,7 @@ def test_cup_standings_require_a_stage(tmp_path: Path) -> None:
     ]
     missing = client.get("/api/v1/standings?competition=europa-league")
     assert missing.status_code == 422
-    assert missing.json()["detail"]["valid_values"] == ["Grupa A", "Grupa B"]
+    assert missing.json()["valid_values"] == ["Grupa A", "Grupa B"]
     group = client.get("/api/v1/standings?competition=europa-league&stage=grupa%20b").json()
     assert [row["team_slug"] for row in group["data"]] == ["c", "d"]
     assert group["stage"] == "grupa b"
@@ -757,26 +760,18 @@ def test_teams_list_aliases_with_cursor_pagination(tmp_path: Path) -> None:
     assert [t["slug"] for t in client.get("/api/v1/teams?q=Warszawa").json()["data"]] == ["legia"]
 
 
-ERROR_MODELS = {
-    model.__name__: model
-    for model in (MessageError, ParameterError, RequestValidationErrorResponse)
-}
+PROBLEM_MEDIA_TYPE = "application/problem+json"
 
 
-def documented_error_models(operation: dict, status_code: int) -> list[type]:
-    schema = operation["responses"][str(status_code)]["content"]["application/json"]["schema"]
-    refs = [item["$ref"] for item in schema.get("anyOf", [schema])]
-    return [ERROR_MODELS[ref.rsplit("/", 1)[-1]] for ref in refs]
-
-
-def matches_one_of(models: list[type], body: object) -> bool:
-    for model in models:
-        try:
-            model.model_validate(body)
-        except ValidationError:
-            continue
-        return True
-    return False
+def assert_problem(response, status_code: int, problem_type: str) -> dict:
+    assert response.status_code == status_code, response.text
+    assert response.headers["content-type"] == PROBLEM_MEDIA_TYPE
+    assert response.headers["cache-control"] == "no-store"
+    body = response.json()
+    Problem.model_validate(body)
+    assert body["status"] == status_code
+    assert body["type"] == f"/problems/{problem_type}"
+    return body
 
 
 def test_every_operation_has_a_unique_snake_case_operation_id_and_tag() -> None:
@@ -808,18 +803,32 @@ def test_openapi_documents_response_schemas_and_error_examples() -> None:
     assert history["202"]["content"]["application/json"]["schema"]["$ref"].endswith("JobAccepted")
     assert paths["/api/v1/results"]["get"]["deprecated"] is True
 
-    for path in paths.values():
+    problem_schema = app.openapi()["components"]["schemas"]["Problem"]
+    problem_types = set(problem_schema["properties"]["type"]["enum"])
+    for path_name, path in paths.items():
         for operation in path.values():
-            for code, response in operation["responses"].items():
+            responses = operation["responses"]
+            if path_name != "/health":
+                assert "429" in responses, operation["operationId"]
+                assert "Retry-After" in responses["429"]["headers"]
+            for code, response in responses.items():
                 if int(code) < 400:
                     continue
-                examples = response["content"]["application/json"]["examples"]
-                models = documented_error_models(operation, int(code))
-                for name, example in examples.items():
-                    assert matches_one_of(models, example["value"]), (
-                        operation["operationId"],
-                        name,
-                    )
+                content = response["content"]
+                assert list(content) == [PROBLEM_MEDIA_TYPE], (operation["operationId"], code)
+                assert content[PROBLEM_MEDIA_TYPE]["schema"] == {
+                    "$ref": "#/components/schemas/Problem"
+                }
+                for name, example in content[PROBLEM_MEDIA_TYPE]["examples"].items():
+                    Problem.model_validate(example["value"])
+                    assert example["value"]["status"] == int(code), (operation["operationId"], name)
+                    assert example["value"]["type"] in problem_types
+    for path in ["/api/v1/matches", "/api/v1/standings", "/api/v1/teams", "/api/v1/competitions"]:
+        responses = paths[path]["get"]["responses"]
+        assert {"ETag", "Cache-Control", "RateLimit", "RateLimit-Policy"} <= set(
+            responses["200"]["headers"]
+        )
+        assert "content" not in responses["304"]
 
 
 def test_error_bodies_match_the_documented_error_models(
@@ -863,10 +872,170 @@ def test_error_bodies_match_the_documented_error_models(
         )
         operation = paths[route.path_format][method]
         assert str(response.status_code) in operation["responses"], (url, response.status_code)
-        models = documented_error_models(operation, response.status_code)
-        assert matches_one_of(models, response.json()), (url, response.json())
+        problem = assert_problem(response, response.status_code, response.json()["type"][10:])
+        assert problem["instance"] == url.split("?")[0]
+        assert PROBLEM_MEDIA_TYPE in operation["responses"][str(response.status_code)]["content"]
 
     monkeypatch.setattr(main_module.settings, "api_keys", "")
     disabled = client.post("/api/v1/results/refresh", json={"competition": "ekstraklasa"})
-    assert disabled.status_code == 503
-    MessageError.model_validate(disabled.json())
+    assert_problem(disabled, 503, "writes-disabled")
+
+
+def test_errors_are_problem_details_with_hints(tmp_path: Path) -> None:
+    client, _ = client_with_matches(tmp_path)
+    unknown = assert_problem(
+        client.get("/api/v1/matches?competition=la-liga"), 404, "unknown-competition"
+    )
+    assert unknown["title"] == "Unknown competition"
+    assert unknown["detail"] == "Unknown competition: la-liga"
+    assert unknown["instance"] == "/api/v1/matches"
+    assert unknown["parameter"] == "competition"
+    assert "ekstraklasa" in unknown["valid_values"]
+    assert unknown["hint"]
+
+    validation = assert_problem(client.get("/api/v1/matches?limit=0"), 422, "validation-error")
+    assert validation["parameter"] == "limit"
+    assert validation["detail"].startswith("limit: ")
+    assert validation["errors"] == [
+        {
+            "loc": ["query", "limit"],
+            "msg": "Input should be greater than or equal to 1",
+            "type": "greater_than_equal",
+        }
+    ]
+    assert "detail" not in validation["errors"][0]
+
+    unauthorized = client.get("/api/v1/jobs/1")
+    assert_problem(unauthorized, 401, "unauthorized")
+    assert unauthorized.headers["www-authenticate"] == "ApiKey"
+    assert_problem(client.get("/api/v1/nope"), 404, "not-found")
+    assert_problem(client.delete("/api/v1/matches"), 405, "method-not-allowed")
+
+
+def test_unexpected_errors_are_problem_details(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, repository = client_with_matches(tmp_path)
+
+    async def broken(*_args, **_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(repository, "list_competitions", broken)
+    response = TestClient(app, raise_server_exceptions=False).get("/api/v1/competitions")
+    body = assert_problem(response, 500, "internal-error")
+    assert "boom" not in body["detail"]
+    assert client.get("/health").status_code == 200
+
+
+def test_rate_limit_headers_and_429(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _ = client_with_matches(tmp_path)
+    monkeypatch.setattr(main_module.settings, "rate_limit_read_per_minute", 2)
+    first = client.get("/api/v1/competitions")
+    assert first.headers["ratelimit-policy"] == '"read";q=2;w=60'
+    assert first.headers["ratelimit"] == '"read";r=1;t=60'
+    assert client.get("/api/v1/matches?competition=la-liga").status_code == 404
+
+    limited = client.get("/api/v1/competitions")
+    body = assert_problem(limited, 429, "rate-limited")
+    assert limited.headers["retry-after"] == "60"
+    assert limited.headers["ratelimit"] == '"read";r=0;t=60'
+    assert body["hint"] == "Retry after 60 seconds."
+
+    health = client.get("/health")
+    assert health.status_code == 200 and "ratelimit" not in health.headers
+    assert client.get("/openapi.json").status_code == 200
+    # Writes have their own policy, and a valid API key its own bucket.
+    write = client.post("/api/v1/results/refresh", json={"competition": "ekstraklasa"})
+    assert write.headers["ratelimit-policy"] == '"write";q=10;w=60'
+    keyed = client.get("/api/v1/competitions", headers=AUTH_HEADERS)
+    assert keyed.status_code == 200
+    invalid_key = client.get("/api/v1/competitions", headers={"X-API-Key": "made-up"})
+    assert invalid_key.status_code == 429
+
+    monkeypatch.setattr(main_module.settings, "rate_limit_enabled", False)
+    unlimited = client.get("/api/v1/competitions")
+    assert unlimited.status_code == 200 and "ratelimit" not in unlimited.headers
+
+
+def test_forwarded_for_is_used_only_behind_trusted_proxies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _ = client_with_matches(tmp_path)
+    monkeypatch.setattr(main_module.settings, "rate_limit_read_per_minute", 1)
+    spoofed = {"X-Forwarded-For": "203.0.113.7"}
+    assert client.get("/api/v1/competitions", headers=spoofed).status_code == 200
+    assert client.get("/api/v1/competitions", headers=spoofed).status_code == 429
+
+    trusted = TestClient(app, client=("10.0.0.2", 50000))
+    monkeypatch.setattr(main_module.settings, "trusted_proxies", "10.0.0.0/8")
+    for address in ["203.0.113.7", "203.0.113.8"]:
+        response = trusted.get("/api/v1/competitions", headers={"X-Forwarded-For": address})
+        assert response.status_code == 200, address
+
+
+def test_read_endpoints_return_etag_and_304(tmp_path: Path) -> None:
+    client, _ = client_with_matches(tmp_path)
+    for url in [
+        "/api/v1/competitions",
+        "/api/v1/matches?limit=2",
+        "/api/v1/standings?competition=ekstraklasa",
+        "/api/v1/teams",
+        "/api/v1/results",
+    ]:
+        response = client.get(url)
+        etag = response.headers["etag"]
+        assert re.fullmatch(r'W/"[0-9a-f]{32}"', etag), url
+        assert response.headers["cache-control"] == "public, max-age=60", url
+        assert client.get(url).headers["etag"] == etag
+
+        not_modified = client.get(url, headers={"If-None-Match": f'"other", {etag[2:]}'})
+        assert not_modified.status_code == 304, url
+        assert not_modified.content == b""
+        assert not_modified.headers["etag"] == etag
+        assert not_modified.headers["cache-control"] == "public, max-age=60"
+        assert "ratelimit" in not_modified.headers
+        assert client.get(url, headers={"If-None-Match": 'W/"other"'}).status_code == 200
+
+    compact_etag = client.get("/api/v1/matches?limit=2&fields=id").headers["etag"]
+    assert compact_etag != client.get("/api/v1/matches?limit=2").headers["etag"]
+
+
+def test_cache_control_follows_freshness_and_never_caches_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, repository = client_with_matches(tmp_path)
+
+    def freshness(next_update_at: datetime | None) -> Freshness:
+        return Freshness(
+            competition="ekstraklasa",
+            season="2026-2027",
+            data_as_of=datetime.now(UTC),
+            next_update_at=next_update_at,
+            automatic_refresh=next_update_at is not None,
+            scheduler_state="idle",
+            source=FreshnessSource(provider="90minut", url="http://www.90minut.pl/liga/1/l.html"),
+        )
+
+    url = "/api/v1/matches?competition=ekstraklasa"
+    repository.freshness = [freshness(datetime.now(UTC) + timedelta(seconds=30))]
+    max_age = int(client.get(url).headers["cache-control"].removeprefix("public, max-age="))
+    assert 25 <= max_age <= 30
+    repository.freshness = [freshness(datetime.now(UTC) - timedelta(minutes=5))]
+    assert client.get(url).headers["cache-control"] == "public, no-cache"
+    repository.freshness = [freshness(None)]
+    standings = client.get("/api/v1/standings?competition=ekstraklasa")
+    assert standings.headers["cache-control"] == "public, max-age=60"
+    monkeypatch.setattr(main_module.settings, "cache_max_age_seconds", 0)
+    assert client.get("/api/v1/teams").headers["cache-control"] == "public, no-cache"
+
+    queued = client.post(
+        "/api/v1/results/refresh", json={"competition": "ekstraklasa"}, headers=AUTH_HEADERS
+    )
+    assert queued.status_code == 202
+    for response in [
+        queued,
+        client.get(queued.json()["status_url"], headers=AUTH_HEADERS),
+        client.get("/health"),
+    ]:
+        assert response.headers["cache-control"] == "no-store"
+        assert "etag" not in response.headers

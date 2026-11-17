@@ -1,17 +1,26 @@
 import secrets
-from collections.abc import AsyncIterator, Callable
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 from importlib.metadata import version
 from typing import Annotated, Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Path, Query, Response
+from fastapi import Depends, FastAPI, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
 
 from app import api_docs as docs
+from app.caching import (
+    CACHEABLE_OPERATIONS,
+    cache_control,
+    etag_for,
+    if_none_match,
+    max_age_seconds,
+)
 from app.competitions import provider_competition_code, source_from_url
-from app.config import load_config, settings
+from app.config import load_config, parse_networks, settings
 from app.contract import (
     DEFAULT_LIMIT,
     ContractError,
@@ -28,44 +37,64 @@ from app.database import session_factory
 from app.models import (
     Competition,
     CompetitionSummary,
+    Freshness,
     HealthStatus,
     HistoricalFetchRequest,
     JobAccepted,
     Match,
     MatchesResponse,
     MatchQuery,
-    MessageError,
     Pagination,
-    ParameterError,
     RefreshRequest,
-    RequestValidationErrorResponse,
     ResultsResponse,
     ScrapeJobStatus,
     StandingRow,
     StandingsResponse,
     TeamsResponse,
 )
+from app.problems import ProblemError, install_problem_handlers, problem_response
+from app.ratelimit import (
+    EXEMPT_PATHS,
+    READ_METHODS,
+    FixedWindowRateLimiter,
+    RateLimitPolicy,
+    api_key_client,
+    client_ip,
+)
 from app.repository import ActiveScrapeJobConflict, PostgresResultRepository
 from app.seasons import SEASON_PATTERN, validate_season
 from app.standings import compute_standings
 
 store = PostgresResultRepository(session_factory)
+rate_limiter = FixedWindowRateLimiter()
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
-async def require_api_key(api_key: str | None = Depends(api_key_header)) -> None:
-    configured_keys = tuple(key.strip() for key in settings.api_keys.split(",") if key.strip())
-    if not configured_keys:
-        raise HTTPException(status_code=503, detail="Write endpoints are disabled")
-    supplied_key = api_key or ""
+def _configured_api_keys() -> tuple[str, ...]:
+    return tuple(key.strip() for key in settings.api_keys.split(",") if key.strip())
+
+
+def _is_valid_api_key(supplied_key: str, configured_keys: tuple[str, ...]) -> bool:
     authenticated = False
     for configured_key in configured_keys:
         authenticated = secrets.compare_digest(supplied_key, configured_key) | authenticated
-    if not authenticated:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid or missing API key",
+    return authenticated
+
+
+async def require_api_key(api_key: str | None = Depends(api_key_header)) -> None:
+    configured_keys = _configured_api_keys()
+    if not configured_keys:
+        raise ProblemError(
+            "writes-disabled",
+            "Write endpoints are disabled",
+            hint="The operator must set FOOTBALL_RESULTS_API_KEYS.",
+        )
+    if not _is_valid_api_key(api_key or "", configured_keys):
+        raise ProblemError(
+            "unauthorized",
+            "Invalid or missing API key",
             headers={"WWW-Authenticate": "ApiKey"},
+            hint="Send a configured API key in the X-API-Key header.",
         )
 
 
@@ -79,23 +108,43 @@ def _contract[T](parse: Callable[[], T]) -> T:
     try:
         return parse()
     except ContractError as error:
-        raise HTTPException(status_code=error.status_code, detail=error.detail) from error
+        extensions = {key: value for key, value in error.detail.items() if key != "message"}
+        raise ProblemError(error.problem_type, error.detail["message"], **extensions) from error
+
+
+async def _unknown_competition(slug: str) -> ProblemError:
+    return ProblemError(
+        "unknown-competition",
+        f"Unknown competition: {slug}",
+        parameter="competition",
+        invalid=[slug],
+        valid_values=sorted(item.slug for item in await store.list_competitions()),
+        hint="Use a slug from list_competitions.",
+    )
 
 
 async def _require_season(slug: str, season: str | None) -> Competition:
     competition = await store.get_competition(slug)
     if competition is None:
-        raise HTTPException(status_code=404, detail=f"Unknown competition: {slug}")
+        raise await _unknown_competition(slug)
     if season is not None and season not in competition.seasons:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "message": f"Unknown season {season} for {competition.slug}",
-                "parameter": "season",
-                "valid_values": sorted(competition.seasons, reverse=True),
-            },
+        raise ProblemError(
+            "unknown-season",
+            f"Unknown season {season} for {competition.slug}",
+            parameter="season",
+            invalid=[season],
+            valid_values=sorted(competition.seasons, reverse=True),
         )
     return competition
+
+
+def _freshness_cache_control(freshness: list[Freshness]) -> dict[str, str]:
+    max_age = max_age_seconds(
+        (item.next_update_at for item in freshness),
+        datetime.now(UTC),
+        settings.cache_max_age_seconds,
+    )
+    return {"Cache-Control": cache_control(max_age)}
 
 
 @asynccontextmanager
@@ -112,6 +161,71 @@ app = FastAPI(
     openapi_tags=docs.OPENAPI_TAGS,
     lifespan=lifespan,
 )
+install_problem_handlers(app)
+docs.install_openapi(app)
+
+
+_trusted_proxies = lru_cache(maxsize=8)(parse_networks)
+
+
+def _rate_limit_client(request: Request) -> str:
+    api_key = request.headers.get("X-API-Key")
+    configured_keys = _configured_api_keys()
+    if api_key and configured_keys and _is_valid_api_key(api_key, configured_keys):
+        return api_key_client(api_key)
+    peer = request.client.host if request.client else None
+    forwarded = request.headers.getlist("X-Forwarded-For")
+    return "ip:" + client_ip(peer, forwarded, _trusted_proxies(settings.trusted_proxies))
+
+
+def _rate_limit_policy(method: str) -> RateLimitPolicy:
+    if method in READ_METHODS:
+        return RateLimitPolicy("read", settings.rate_limit_read_per_minute, 60)
+    return RateLimitPolicy("write", settings.rate_limit_write_per_minute, 60)
+
+
+@app.middleware("http")
+async def rate_limit_and_cache(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
+    rate_headers: dict[str, str] = {}
+    if settings.rate_limit_enabled and request.url.path not in EXEMPT_PATHS:
+        decision = rate_limiter.hit(
+            _rate_limit_policy(request.method), _rate_limit_client(request), time.monotonic()
+        )
+        rate_headers = decision.headers()
+        if not decision.allowed:
+            policy = decision.policy
+            return problem_response(
+                request,
+                "rate-limited",
+                f"Rate limit exceeded: {policy.quota} {policy.name} requests per "
+                f"{policy.window_seconds} seconds",
+                headers={**rate_headers, "Retry-After": str(decision.reset_seconds)},
+                hint=f"Retry after {decision.reset_seconds} seconds.",
+            )
+
+    response = await call_next(request)
+    response.headers.update(rate_headers)
+    route = request.scope.get("route")
+    operation_id = getattr(route, "operation_id", None)
+    if response.status_code >= 400 or (
+        operation_id is not None and operation_id not in CACHEABLE_OPERATIONS
+    ):
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    if operation_id is None or request.method != "GET" or response.status_code != 200:
+        return response
+
+    body = b"".join([chunk async for chunk in response.body_iterator])  # type: ignore[attr-defined]
+    etag = etag_for(body)
+    headers = {key: value for key, value in response.headers.items() if key != "content-length"}
+    headers["ETag"] = etag
+    headers.setdefault("cache-control", cache_control(settings.cache_max_age_seconds))
+    if if_none_match(request.headers.get("If-None-Match"), etag):
+        headers.pop("content-type", None)
+        return Response(status_code=304, headers=headers)
+    return Response(content=body, status_code=200, headers=headers)
 
 
 @app.get(
@@ -125,18 +239,20 @@ app = FastAPI(
     ),
     response_model=HealthStatus,
     responses={
+        200: {"description": "Successful Response", "headers": docs.NO_STORE_HEADER},
         503: docs.error(
             "The database is unreachable",
-            MessageError,
-            database=docs.example("Database down", "Database unavailable"),
-        )
+            database=docs.example(
+                "Database down", "service-unavailable", "Database unavailable", "/health"
+            ),
+        ),
     },
 )
 async def health() -> dict[str, str]:
     try:
         await store.health()
     except Exception as error:
-        raise HTTPException(status_code=503, detail="Database unavailable") from error
+        raise ProblemError("service-unavailable", "Database unavailable") from error
     heartbeat = await store.latest_scheduler_heartbeat()
     scheduler_status = "not_started"
     if heartbeat is not None:
@@ -155,6 +271,7 @@ async def health() -> dict[str, str]:
         "seasons, the season format, and scheduler state. Not paginated."
     ),
     response_model=list[CompetitionSummary],
+    responses=docs.cached_read("/api/v1/competitions"),
 )
 async def get_competitions() -> list[CompetitionSummary]:
     return await store.list_competitions()
@@ -172,12 +289,12 @@ async def get_competitions() -> list[CompetitionSummary]:
     deprecated=True,
     response_model=ResultsResponse,
     responses={
-        404: docs.error(
-            "Unknown competition",
-            MessageError,
-            unknown_competition=docs.UNKNOWN_COMPETITION_EXAMPLE,
+        **docs.cached_read("/api/v1/results"),
+        404: docs.unknown_competition("/api/v1/results"),
+        422: docs.request_validation(
+            "/api/v1/results",
+            docs.minimum_validation_example("/api/v1/results", "query", "round"),
         ),
-        422: docs.REQUEST_VALIDATION,
     },
 )
 async def get_results(
@@ -188,7 +305,7 @@ async def get_results(
     team: docs.TeamFilter = None,
 ) -> ResultsResponse:
     if competition and await store.get_competition(competition) is None:
-        raise HTTPException(status_code=404, detail=f"Unknown competition: {competition}")
+        raise await _unknown_competition(competition)
     results, refreshed_at = await store.get_results(
         competition=competition,
         season=season,
@@ -218,32 +335,32 @@ async def get_results(
     ),
     response_model=MatchesResponse,
     responses={
-        400: docs.INVALID_CURSOR,
-        404: docs.UNKNOWN_COMPETITION_OR_SEASON,
+        **docs.cached_read("/api/v1/matches"),
+        400: docs.invalid_cursor("/api/v1/matches"),
+        404: docs.unknown_competition_or_season("/api/v1/matches"),
         422: docs.error(
-            "Invalid `fields`, `status`, or date (with `invalid` and `valid_values` or "
-            "`examples`), or request validation failed",
-            ParameterError | RequestValidationErrorResponse,
-            unknown_fields=docs.unknown_fields_example(list(Match.model_fields)),
+            "Invalid `fields`, `status`, or date (`invalid-parameter` with `invalid` and "
+            "`valid_values` or `examples`), or request validation failed (`validation-error`)",
+            unknown_fields=docs.unknown_fields_example("/api/v1/matches", list(Match.model_fields)),
             unknown_status=docs.example(
                 "Unknown status",
-                {
-                    "message": "Unknown match status",
-                    "parameter": "status",
-                    "invalid": ["played"],
-                    "valid_values": ["finished", "scheduled", "inactive"],
-                },
+                "invalid-parameter",
+                "Unknown match status",
+                "/api/v1/matches",
+                parameter="status",
+                invalid=["played"],
+                valid_values=["finished", "scheduled", "inactive"],
             ),
             invalid_date=docs.example(
                 "Invalid date",
-                {
-                    "message": "date_from must be an ISO 8601 date or datetime",
-                    "parameter": "date_from",
-                    "invalid": ["01.08.2026"],
-                    "examples": ["2026-08-01", "2026-08-01T18:00:00+02:00"],
-                },
+                "invalid-parameter",
+                "date_from must be an ISO 8601 date or datetime",
+                "/api/v1/matches",
+                parameter="date_from",
+                invalid=["01.08.2026"],
+                examples=["2026-08-01", "2026-08-01T18:00:00+02:00"],
             ),
-            validation=docs.VALIDATION_EXAMPLE,
+            validation=docs.limit_validation_example("/api/v1/matches"),
         ),
     },
 )
@@ -325,7 +442,8 @@ async def get_matches(
             "data": [compact(item, selected) for item in page],
             "pagination": {"limit": limit, "next_cursor": next_cursor},
             "freshness": [item.model_dump(mode="json") for item in freshness],
-        }
+        },
+        headers=_freshness_cache_control(freshness),
     )
 
 
@@ -342,25 +460,25 @@ async def get_matches(
     ),
     response_model=StandingsResponse,
     responses={
-        404: docs.UNKNOWN_COMPETITION_OR_SEASON,
+        **docs.cached_read("/api/v1/standings"),
+        404: docs.unknown_competition_or_season("/api/v1/standings"),
         422: docs.error(
             "Invalid `fields`, a cup without `stage`, or a competition without a current "
-            "season (each with `valid_values`), or request validation failed",
-            ParameterError | RequestValidationErrorResponse,
-            unknown_fields=docs.unknown_fields_example(list(StandingRow.model_fields)),
+            "season (`invalid-parameter`, each with `valid_values`), or request validation "
+            "failed (`validation-error`)",
+            unknown_fields=docs.unknown_fields_example(
+                "/api/v1/standings", list(StandingRow.model_fields)
+            ),
             stage_required=docs.example(
                 "Cup needs a stage",
-                {
-                    "message": (
-                        "Standings for a cup competition need a stage (for example a group)"
-                    ),
-                    "parameter": "stage",
-                    "valid_values": ["Faza ligowa", "Runda eliminacyjna"],
-                },
+                "invalid-parameter",
+                "Standings for a cup competition need a stage (for example a group)",
+                "/api/v1/standings",
+                parameter="stage",
+                valid_values=["Faza ligowa", "Runda eliminacyjna"],
             ),
-            validation=docs.example(
-                "Missing competition",
-                [{"loc": ["query", "competition"], "msg": "Field required", "type": "missing"}],
+            validation=docs.validation_example(
+                "/api/v1/standings", ["query", "competition"], "Field required", "missing"
             ),
         ),
     },
@@ -400,23 +518,19 @@ async def get_standings(
     found = await _require_season(competition, season)
     season = season or found.current_season
     if season is None:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "message": f"{found.slug} has no current season; pass season",
-                "parameter": "season",
-                "valid_values": sorted(found.seasons, reverse=True),
-            },
+        raise ProblemError(
+            "invalid-parameter",
+            f"{found.slug} has no current season; pass season",
+            parameter="season",
+            valid_values=sorted(found.seasons, reverse=True),
         )
     stage = stage.strip() if stage else None
     if found.format == "cup" and not stage:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "message": "Standings for a cup competition need a stage (for example a group)",
-                "parameter": "stage",
-                "valid_values": await store.list_stages(found.slug, season),
-            },
+        raise ProblemError(
+            "invalid-parameter",
+            "Standings for a cup competition need a stage (for example a group)",
+            parameter="stage",
+            valid_values=await store.list_stages(found.slug, season),
         )
     matches = await store.find_matches(
         MatchQuery(competition=found.slug, season=season, statuses=("finished",), stage=stage)
@@ -429,7 +543,8 @@ async def get_standings(
             "stage": stage,
             "data": [compact(row, selected) for row in compute_standings(matches)],
             "freshness": [item.model_dump(mode="json") for item in freshness],
-        }
+        },
+        headers=_freshness_cache_control(freshness),
     )
 
 
@@ -445,9 +560,10 @@ async def get_standings(
     ),
     response_model=TeamsResponse,
     responses={
-        400: docs.INVALID_CURSOR,
-        404: docs.UNKNOWN_COMPETITION_OR_SEASON,
-        422: docs.REQUEST_VALIDATION,
+        **docs.cached_read("/api/v1/teams"),
+        400: docs.invalid_cursor("/api/v1/teams"),
+        404: docs.unknown_competition_or_season("/api/v1/teams"),
+        422: docs.request_validation("/api/v1/teams"),
     },
 )
 async def get_teams(
@@ -491,49 +607,60 @@ async def get_teams(
     status_code=202,
     dependencies=[Depends(require_api_key)],
     responses={
-        202: {"description": "The refresh is queued", "headers": docs.LOCATION_HEADER},
-        **docs.AUTH_ERRORS,
-        404: docs.error(
-            "Unknown competition",
-            MessageError,
-            unknown_competition=docs.UNKNOWN_COMPETITION_EXAMPLE,
-        ),
-        409: docs.JOB_CONFLICT,
+        202: {
+            "description": "The refresh is queued",
+            "headers": docs.LOCATION_HEADER | docs.NO_STORE_HEADER | docs.RATE_LIMIT_HEADERS,
+        },
+        **docs.auth_errors("/api/v1/results/refresh"),
+        404: docs.unknown_competition("/api/v1/results/refresh"),
+        409: docs.job_conflict("/api/v1/results/refresh"),
         422: docs.error(
-            "Not the current season, no current season configured, or request validation failed",
-            MessageError | RequestValidationErrorResponse,
+            "Not the current season or no current season configured (`invalid-request`), or "
+            "request validation failed (`validation-error`)",
             not_current=docs.example(
                 "Historical season",
+                "invalid-request",
                 "Refresh supports only the current season 2026-2027; "
                 "use /api/v1/results/history/fetch for historical seasons",
+                "/api/v1/results/refresh",
+                parameter="season",
+                invalid=["2025-2026"],
+                valid_values=["2026-2027"],
+                hint="Use fetch_historical_season for other seasons.",
             ),
-            validation=docs.example(
-                "Missing competition",
-                [{"loc": ["body", "competition"], "msg": "Field required", "type": "missing"}],
+            validation=docs.validation_example(
+                "/api/v1/results/refresh", ["body", "competition"], "Field required", "missing"
             ),
         ),
+        429: docs.rate_limited("/api/v1/results/refresh", "write"),
     },
 )
 async def refresh_results(request: RefreshRequest, response: Response) -> JobAccepted:
     competition = await store.get_competition(request.competition)
     if competition is None:
-        raise HTTPException(status_code=404, detail=f"Unknown competition: {request.competition}")
+        raise await _unknown_competition(request.competition)
     if competition.current_season is None:
-        raise HTTPException(status_code=422, detail="No current season is configured")
+        raise ProblemError(
+            "invalid-request",
+            "No current season is configured",
+            hint="Use fetch_historical_season with an explicit season.",
+        )
     season = request.season or competition.current_season
     if season != competition.current_season:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"Refresh supports only the current season {competition.current_season}; "
-                "use /api/v1/results/history/fetch for historical seasons"
-            ),
+        raise ProblemError(
+            "invalid-request",
+            f"Refresh supports only the current season {competition.current_season}; "
+            "use /api/v1/results/history/fetch for historical seasons",
+            parameter="season",
+            invalid=[season],
+            valid_values=[competition.current_season],
+            hint="Use fetch_historical_season for other seasons.",
         )
     source = competition.seasons[competition.current_season]
     try:
         job_id, status = await store.enqueue_scrape(competition, source)
     except ActiveScrapeJobConflict as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
+        raise ProblemError("job-conflict", str(error)) from error
     return _job_accepted(response, job_id, status)
 
 
@@ -549,11 +676,26 @@ async def refresh_results(request: RefreshRequest, response: Response) -> JobAcc
     response_model=ScrapeJobStatus,
     dependencies=[Depends(require_api_key)],
     responses={
-        **docs.AUTH_ERRORS,
+        200: {
+            "description": "Successful Response",
+            "headers": docs.NO_STORE_HEADER | docs.RATE_LIMIT_HEADERS,
+        },
+        **docs.auth_errors("/api/v1/jobs/42"),
         404: docs.error(
-            "Unknown job", MessageError, unknown_job=docs.example("Unknown job", "Unknown job: 42")
+            "Unknown job",
+            unknown_job=docs.example(
+                "Unknown job",
+                "unknown-job",
+                "Unknown job: 42",
+                "/api/v1/jobs/42",
+                parameter="job_id",
+                invalid=["42"],
+            ),
         ),
-        422: docs.REQUEST_VALIDATION,
+        422: docs.request_validation(
+            "/api/v1/jobs/0", docs.minimum_validation_example("/api/v1/jobs/0", "path", "job_id")
+        ),
+        429: docs.rate_limited("/api/v1/jobs/42", "read"),
     },
 )
 async def get_job_status(
@@ -561,7 +703,9 @@ async def get_job_status(
 ) -> ScrapeJobStatus:
     job = await store.get_scrape_job(job_id)
     if job is None:
-        raise HTTPException(status_code=404, detail=f"Unknown job: {job_id}")
+        raise ProblemError(
+            "unknown-job", f"Unknown job: {job_id}", parameter="job_id", invalid=[str(job_id)]
+        )
     return job
 
 
@@ -580,41 +724,47 @@ async def get_job_status(
     status_code=202,
     dependencies=[Depends(require_api_key)],
     responses={
-        200: {"model": ResultsResponse, "description": "The season is already stored"},
+        200: {
+            "model": ResultsResponse,
+            "description": "The season is already stored",
+            "headers": docs.NO_STORE_HEADER | docs.RATE_LIMIT_HEADERS,
+        },
         202: {
             "model": JobAccepted,
             "description": "The fetch is queued",
-            "headers": docs.LOCATION_HEADER,
+            "headers": docs.LOCATION_HEADER | docs.NO_STORE_HEADER | docs.RATE_LIMIT_HEADERS,
         },
-        **docs.AUTH_ERRORS,
-        404: docs.error(
-            "Unknown competition",
-            MessageError,
-            unknown_competition=docs.UNKNOWN_COMPETITION_EXAMPLE,
-        ),
-        409: docs.JOB_CONFLICT,
+        **docs.auth_errors("/api/v1/results/history/fetch"),
+        404: docs.unknown_competition("/api/v1/results/history/fetch"),
+        409: docs.job_conflict("/api/v1/results/history/fetch"),
         422: docs.error(
-            "The season or source is not acceptable for this competition, or request "
-            "validation failed",
-            MessageError | RequestValidationErrorResponse,
+            "The season or source is not acceptable for this competition (`invalid-request`), "
+            "or request validation failed (`validation-error`)",
             missing_source=docs.example(
                 "No source",
+                "invalid-request",
                 "No source configured for ekstraklasa 2019-2020; provide source_url",
+                "/api/v1/results/history/fetch",
+                parameter="source_url",
+                hint="Pass a 90minut or football-data.org season URL as source_url.",
             ),
             current_season=docs.example(
-                "Current season", "Use /api/v1/results/refresh for the current season"
+                "Current season",
+                "invalid-request",
+                "Use /api/v1/results/refresh for the current season",
+                "/api/v1/results/history/fetch",
+                parameter="season",
+                invalid=["2026-2027"],
+                hint="Use request_refresh for the current season.",
             ),
-            validation=docs.example(
-                "Bad season format",
-                [
-                    {
-                        "loc": ["body", "season"],
-                        "msg": f"String should match pattern '{SEASON_PATTERN}'",
-                        "type": "string_pattern_mismatch",
-                    }
-                ],
+            validation=docs.validation_example(
+                "/api/v1/results/history/fetch",
+                ["body", "season"],
+                f"String should match pattern '{SEASON_PATTERN}'",
+                "string_pattern_mismatch",
             ),
         ),
+        429: docs.rate_limited("/api/v1/results/history/fetch", "write"),
     },
 )
 async def fetch_historical_results(
@@ -622,36 +772,43 @@ async def fetch_historical_results(
 ) -> JobAccepted | ResultsResponse:
     competition = await store.get_competition(request.competition)
     if competition is None:
-        raise HTTPException(status_code=404, detail=f"Unknown competition: {request.competition}")
+        raise await _unknown_competition(request.competition)
     if request.season == competition.current_season:
-        raise HTTPException(
-            status_code=422,
-            detail="Use /api/v1/results/refresh for the current season",
+        raise ProblemError(
+            "invalid-request",
+            "Use /api/v1/results/refresh for the current season",
+            parameter="season",
+            invalid=[request.season],
+            hint="Use request_refresh for the current season.",
         )
     try:
         validate_season(request.season, competition.season_format)
     except ValueError as error:
-        raise HTTPException(status_code=422, detail=str(error)) from error
+        raise ProblemError(
+            "invalid-request", str(error), parameter="season", invalid=[request.season]
+        ) from error
     if request.source_url is not None:
         try:
             source = source_from_url(request.season, request.source_url)
         except ValueError as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
+            raise ProblemError("invalid-request", str(error), parameter="source_url") from error
     else:
         source = competition.seasons.get(request.season)
-    if source is not None and source.provider not in {
-        item.provider for item in competition.seasons.values()
-    }:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Provider {source.provider} is not configured for {competition.slug}",
+    configured_providers = sorted({item.provider for item in competition.seasons.values()})
+    if source is not None and source.provider not in configured_providers:
+        raise ProblemError(
+            "invalid-request",
+            f"Provider {source.provider} is not configured for {competition.slug}",
+            parameter="source_url",
+            invalid=[source.provider],
+            valid_values=configured_providers,
         )
     if source is None:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"No source configured for {competition.slug} {request.season}; provide source_url"
-            ),
+        raise ProblemError(
+            "invalid-request",
+            f"No source configured for {competition.slug} {request.season}; provide source_url",
+            parameter="source_url",
+            hint="Pass a season URL of a provider configured for this competition as source_url.",
         )
     configured_codes = {
         code
@@ -660,11 +817,12 @@ async def fetch_historical_results(
     }
     source_code = provider_competition_code(source)
     if configured_codes and source_code is not None and source_code not in configured_codes:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"Provider competition code {source_code} is not configured for {competition.slug}"
-            ),
+        raise ProblemError(
+            "invalid-request",
+            f"Provider competition code {source_code} is not configured for {competition.slug}",
+            parameter="source_url",
+            invalid=[source_code],
+            valid_values=sorted(configured_codes),
         )
     if not request.force_refresh and await store.is_cached(
         competition.slug,
@@ -685,5 +843,5 @@ async def fetch_historical_results(
     try:
         job_id, status = await store.enqueue_scrape(competition, source)
     except ActiveScrapeJobConflict as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
+        raise ProblemError("job-conflict", str(error)) from error
     return _job_accepted(response, job_id, status)

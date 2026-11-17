@@ -3,6 +3,7 @@ import hashlib
 import sys
 from datetime import timedelta
 from importlib.metadata import version
+from ipaddress import IPv4Network, IPv6Network, ip_network
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -52,6 +53,24 @@ class Settings(BaseSettings):
     football_data_min_request_interval_seconds: float | None = Field(default=None, ge=0)
     ninety_minut_min_request_interval_seconds: float | None = Field(default=None, ge=0)
     ninety_minut_detail_cache_max_entries: int = Field(default=512, ge=0)
+    rate_limit_enabled: bool = True
+    rate_limit_read_per_minute: int = Field(default=120, ge=1)
+    rate_limit_write_per_minute: int = Field(default=10, ge=1)
+    trusted_proxies: str = ""
+    cache_max_age_seconds: int = Field(default=60, ge=0)
+
+    @field_validator("trusted_proxies")
+    @classmethod
+    def _validate_trusted_proxies(cls, value: str) -> str:
+        parse_networks(value)
+        return value
+
+
+def parse_networks(value: str) -> tuple[IPv4Network | IPv6Network, ...]:
+    """Parse comma-separated IP addresses or CIDR networks (``FOOTBALL_RESULTS_TRUSTED_PROXIES``)."""
+    return tuple(
+        ip_network(item.strip(), strict=False) for item in value.split(",") if item.strip()
+    )
 
 
 settings = Settings()

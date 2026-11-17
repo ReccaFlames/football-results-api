@@ -174,10 +174,10 @@ How to use this list:
   - [x] Tags and summaries that say when to use each endpoint
   - [x] Parameter descriptions and examples
   - [x] Documented error responses
-- [ ] **11. Errors, rate limits and caching**
-  - [ ] RFC 9457 `application/problem+json` with `hint` and `valid_values`
-  - [ ] Rate limiting with `RateLimit` and `Retry-After` headers
-  - [ ] `ETag` / `Cache-Control` on read endpoints
+- [x] **11. Errors, rate limits and caching**
+  - [x] RFC 9457 `application/problem+json` with `hint` and `valid_values`
+  - [x] Rate limiting with `RateLimit` and `Retry-After` headers
+  - [x] `ETag` / `Cache-Control` on read endpoints
 - [ ] **12. `/llms.txt` and `/agents` page**
   - [ ] Generated from the OpenAPI spec and competition config
   - [ ] Purpose, base URL, auth, top 5 tasks with curl and CLI examples

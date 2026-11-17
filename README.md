@@ -7,7 +7,7 @@ scheduler, and serves them over a REST API.
 The repository started as an Ekstraklasa-only scraper and is evolving into a **generic, configurable
 league-data API**. This README describes both:
 
-- **[Current state](#current-state)** – what is implemented and works today (version 0.12.1).
+- **[Current state](#current-state)** – what is implemented and works today (version 0.13.0).
 - **[Target state](#target-state-and-roadmap)** – where the project is heading and what is still
   missing.
 
@@ -23,7 +23,7 @@ league-data API**. This README describes both:
 | Scheduling | Adaptive per-season scheduler driven by fixture times; thresholds from `defaults.schedule` with per-competition overrides | Plus cron-style overrides and global provider quotas |
 | Configuration | Environment variables plus validated YAML for leagues, sources, providers, and schedule defaults | Env vars for infrastructure + one validated config file for leagues, sources, and schedules |
 | Observability | `/health` (DB + scheduler heartbeat), `scrape_run` table, logs; CI with PostgreSQL integration tests | Scheduler/scrape status endpoints, metrics, alerting on stale data |
-| API | Matches of every status with filters, cursor pagination, `fields=` and per-season freshness; computed standings; teams with aliases; manual refresh and historical fetch | Plus authenticated admin endpoints |
+| API | Matches of every status with filters, cursor pagination, `fields=` and per-season freshness; computed standings; teams with aliases; manual refresh and historical fetch; RFC 9457 errors, rate limits, and `ETag` caching | Plus authenticated admin endpoints |
 
 ## Current state
 
@@ -256,13 +256,67 @@ The OpenAPI document is the source for the agent-facing surfaces (llms.txt, CLI,
   description that says when to use it. Tags group tasks: `Competitions` (competitions, teams),
   `Matches`, `Standings`, `Data refresh` (refresh, history fetch, jobs; API key), and `System`.
 - Query parameters have descriptions and examples. `/api/v1/results` is marked `deprecated`.
-- Error responses are documented per status with examples. Bodies currently have three shapes:
-  - `MessageError`: `{"detail": "Unknown competition: la-liga"}`.
-  - `ParameterError`: `{"detail": {"message", "parameter", "invalid"?, "valid_values"?,
-    "hint"?, "examples"?}}` for cursor (`400`), unknown season (`404`), and `fields`, `status`,
-    date, and cup `stage` errors (`422`).
-  - `RequestValidationErrorResponse`: FastAPI's `{"detail": [{"loc", "msg", "type", ...}]}` for
-    `422` type, range, pattern, or missing-value errors.
+- Error responses are documented per status as `application/problem+json` with examples, all
+  using the `Problem` schema (see [Errors](#errors-rate-limits-and-caching)). Every rate-limited
+  operation documents `429`; cacheable reads document `304` and the `ETag`, `Cache-Control`, and
+  `RateLimit` response headers.
+
+### Errors, rate limits, and caching
+
+**Errors** are [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem details with content
+type `application/problem+json` and `Cache-Control: no-store`:
+
+~~~json
+{
+  "type": "/problems/unknown-season",
+  "title": "Unknown season",
+  "status": 404,
+  "detail": "Unknown season 1999-2000 for ekstraklasa",
+  "instance": "/api/v1/matches",
+  "parameter": "season",
+  "invalid": ["1999-2000"],
+  "valid_values": ["2026-2027", "2025-2026"]
+}
+~~~
+
+- `type` is a stable relative URI; branch on it rather than on `detail`. Types: `invalid-cursor`
+  (400), `unauthorized` (401), `unknown-competition`, `unknown-season`, `unknown-job`,
+  `not-found` (404), `method-not-allowed` (405), `job-conflict` (409), `invalid-parameter`
+  (`fields`, `status`, dates, cup `stage`), `validation-error` (type, range, pattern, or missing
+  values), `invalid-request` (write-endpoint rules) (all 422), `rate-limited` (429),
+  `internal-error` (500), `writes-disabled` and `service-unavailable` (503).
+- `detail` is always a human-readable string; `instance` is the request path.
+- Optional extension members: `parameter` (what to fix), `invalid`, `valid_values`, `hint`,
+  `examples`, and `errors` (`[{loc, msg, type}]` for `validation-error`).
+- Compatibility (0.13.0): errors whose `detail` used to be a string keep the same text in
+  `detail`. Structured details moved to top-level members: `detail.valid_values` is now
+  `valid_values`, and FastAPI's `detail[]` list is now `errors`.
+
+**Rate limits** are counted per client in fixed 60-second windows: `GET` requests use the `read`
+policy (120 per minute by default), other methods the `write` policy (10 per minute). The client is
+the API key when a valid `X-API-Key` is sent, otherwise the IP address. `/health`, `/docs`,
+`/redoc`, and `/openapi.json` are exempt. Responses carry the
+[draft-ietf-httpapi-ratelimit-headers-11](https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/)
+fields; a `429` adds `Retry-After`:
+
+~~~text
+RateLimit-Policy: "read";q=120;w=60
+RateLimit: "read";r=87;t=42
+~~~
+
+Counters are kept in memory by each API process; with several workers or replicas each enforces
+its own quota. Behind a reverse proxy, set `FOOTBALL_RESULTS_TRUSTED_PROXIES` so that the
+`X-Forwarded-For` client address is used; otherwise all clients share the proxy's quota.
+
+**Caching:** `list_competitions`, `list_matches`, `get_standings`, `list_teams`, and `list_results`
+return a weak `ETag` (a hash of the body) and `Cache-Control: public, max-age=N`. `N` is the time
+until the earliest `freshness.next_update_at`, capped at `FOOTBALL_RESULTS_CACHE_MAX_AGE_SECONDS`
+(60), or `no-cache` when an update is due. Send the ETag back in `If-None-Match` to get
+`304 Not Modified` without a body. Health, job status, and write responses use `no-store`.
+
+~~~bash
+curl -i 'http://localhost:8000/api/v1/standings?competition=ekstraklasa' -H 'If-None-Match: W/"<etag>"'
+~~~
 
 ### Examples
 
@@ -392,8 +446,8 @@ List endpoints share one envelope:
   competitions require `stage`; without it the `422` response lists the season's stages.
 - **Teams** return `{slug, name, aliases}` ordered by slug, limited to teams that play in enabled
   competitions (or the given competition-season).
-- Unknown competitions return `404`, as do unknown seasons of a given competition (with
-  `valid_values`).
+- Unknown competitions return `404`, as do unknown seasons of a given competition; both list the
+  accepted slugs or seasons in `valid_values`.
 
 ~~~bash
 curl 'http://localhost:8000/api/v1/matches?competition=ekstraklasa&status=scheduled&date_from=2026-08-01&date_to=2026-08-31'
@@ -457,7 +511,10 @@ Both containers use restart: unless-stopped. PostgreSQL data is stored in the po
 volume. Port 5432 remains bound to localhost.
 
 When using Caddy or nginx, set API_BIND_ADDRESS=127.0.0.1 and expose only the reverse proxy's
-HTTP/HTTPS ports through the Ubuntu firewall.
+HTTP/HTTPS ports through the Ubuntu firewall. Also set `FOOTBALL_RESULTS_TRUSTED_PROXIES` to the address the
+proxy connects from as seen by the API container (for a proxy on the host, the Docker network
+gateway, for example `172.16.0.0/12`), and make the proxy set `X-Forwarded-For`. Otherwise every
+client shares one rate-limit quota.
 
 ### Backups
 
@@ -575,6 +632,11 @@ Application variables:
 | FOOTBALL_RESULTS_FOOTBALL_DATA_MIN_REQUEST_INTERVAL_SECONDS | `6` (from YAML) | Optional environment override for the football-data.org throttle (free tier: 10 req/min) |
 | FOOTBALL_RESULTS_NINETY_MINUT_MIN_REQUEST_INTERVAL_SECONDS | `2` (from YAML) | Optional environment override for the minimum delay between requests to each 90minut host; set to `0` to disable |
 | FOOTBALL_RESULTS_NINETY_MINUT_DETAIL_CACHE_MAX_ENTRIES | `512` | Maximum successful 90minut detail responses kept in the process-local LRU cache; set to `0` to disable |
+| FOOTBALL_RESULTS_RATE_LIMIT_ENABLED | `true` | Per-client API rate limiting; set to `false` to disable |
+| FOOTBALL_RESULTS_RATE_LIMIT_READ_PER_MINUTE | `120` | `GET` requests per client per minute |
+| FOOTBALL_RESULTS_RATE_LIMIT_WRITE_PER_MINUTE | `10` | `POST` (and other non-read) requests per client per minute |
+| FOOTBALL_RESULTS_TRUSTED_PROXIES | empty | Comma-separated proxy IPs or CIDRs whose `X-Forwarded-For` is trusted for the client address |
+| FOOTBALL_RESULTS_CACHE_MAX_AGE_SECONDS | `60` | Maximum `Cache-Control` `max-age` of read responses; `0` sends `no-cache` |
 
 Deployment variables (Docker Compose):
 
@@ -730,7 +792,7 @@ The current adaptive scheduler is the foundation; planned improvements:
 
 - ~~Fixtures endpoint for scheduled matches.~~ (done: `/api/v1/matches`)
 - ~~League tables/standings computed from stored results.~~ (done: `/api/v1/standings`)
-- ~~Team resources and pagination~~ (done: `/api/v1/teams`, cursors); `ETag` caching headers.
+- ~~Team resources and pagination~~ (done: `/api/v1/teams`, cursors); ~~`ETag` caching headers~~ (done).
 - Head-to-head tie-breakers and point deductions for standings.
 - Admin endpoints (protected by an API key) to list scheduler state, view recent `scrape_run`
   entries, trigger refreshes, and enable/disable competitions.

@@ -18,11 +18,15 @@ CURSOR_VERSION = 1
 
 
 class ContractError(ValueError):
-    """A request parameter is invalid; ``detail`` is returned to the client."""
+    """A request parameter is invalid.
 
-    def __init__(self, status_code: int, detail: dict[str, Any]) -> None:
+    ``problem_type`` is a slug of ``PROBLEM_TYPES``; ``detail`` holds ``message`` plus problem
+    extension members (``parameter``, ``invalid``, ``valid_values``, ``hint``, ``examples``).
+    """
+
+    def __init__(self, problem_type: str, detail: dict[str, Any]) -> None:
         super().__init__(detail["message"])
-        self.status_code = status_code
+        self.problem_type = problem_type
         self.detail = detail
 
 
@@ -41,7 +45,7 @@ def parse_fields(
     invalid = [item for item in requested if item not in valid]
     if invalid or not requested:
         raise ContractError(
-            422,
+            "invalid-parameter",
             {
                 "message": "Unknown fields requested" if invalid else "fields must not be empty",
                 "parameter": "fields",
@@ -59,7 +63,7 @@ def parse_statuses(value: str | None) -> tuple[str, ...]:
     invalid = [item for item in requested if item not in MATCH_STATUSES]
     if invalid or not requested:
         raise ContractError(
-            422,
+            "invalid-parameter",
             {
                 "message": "Unknown match status",
                 "parameter": "status",
@@ -86,7 +90,7 @@ def parse_date_bound(value: str | None, parameter: str, *, upper: bool) -> datet
         moment = datetime.fromisoformat(value)
     except ValueError as error:
         raise ContractError(
-            422,
+            "invalid-parameter",
             {
                 "message": f"{parameter} must be an ISO 8601 date or datetime",
                 "parameter": parameter,
@@ -111,7 +115,7 @@ def encode_cursor(key: list[Any], filters_hash: str) -> str:
 
 def _invalid_cursor() -> ContractError:
     return ContractError(
-        400,
+        "invalid-cursor",
         {
             "message": "Invalid cursor",
             "parameter": "cursor",
@@ -132,7 +136,7 @@ def decode_cursor(token: str, filters_hash: str, length: int) -> list[Any]:
         raise _invalid_cursor()
     if payload.get("f") != filters_hash:
         raise ContractError(
-            400,
+            "invalid-cursor",
             {
                 "message": "The cursor belongs to a request with different filters or order",
                 "parameter": "cursor",

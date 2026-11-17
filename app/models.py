@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -311,46 +311,53 @@ class HealthStatus(BaseModel):
     scheduler: Literal["ok", "stale", "not_started"]
 
 
-# Error bodies (documentation only). These describe the current HTTPException payloads;
-# RFC 9457 problem details replace them in roadmap step 11.
+# Error bodies: RFC 9457 problem details (app/problems.py builds them).
+
+PROBLEM_TYPES: dict[str, tuple[int, str]] = {
+    "invalid-cursor": (400, "Invalid cursor"),
+    "unauthorized": (401, "Unauthorized"),
+    "unknown-competition": (404, "Unknown competition"),
+    "unknown-season": (404, "Unknown season"),
+    "unknown-job": (404, "Unknown job"),
+    "not-found": (404, "Not found"),
+    "method-not-allowed": (405, "Method not allowed"),
+    "job-conflict": (409, "Job conflict"),
+    "invalid-parameter": (422, "Invalid parameter"),
+    "validation-error": (422, "Request validation failed"),
+    "invalid-request": (422, "Invalid request"),
+    "rate-limited": (429, "Too many requests"),
+    "internal-error": (500, "Internal server error"),
+    "writes-disabled": (503, "Write endpoints disabled"),
+    "service-unavailable": (503, "Service unavailable"),
+}
+PROBLEM_TYPE_URIS = tuple(f"/problems/{slug}" for slug in PROBLEM_TYPES)
 
 
-class MessageError(BaseModel):
-    """An error with a plain-text message."""
+class ValidationIssue(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    loc: list[str | int] = Field(description='Location, for example `["query", "limit"]`')
+    msg: str
+    type: str
+
+
+class Problem(BaseModel):
+    """RFC 9457 problem details; extension members are omitted when not relevant."""
 
     model_config = ConfigDict(extra="forbid")
 
-    detail: str = Field(examples=["Unknown competition: la-liga"])
-
-
-class ParameterErrorDetail(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    message: str
-    parameter: str = Field(description="The request parameter to correct")
+    type: Literal[*PROBLEM_TYPE_URIS, "about:blank"] = Field(  # type: ignore[valid-type]
+        description="Stable problem type URI (relative); branch on this, not on `detail`"
+    )
+    title: str = Field(description="Short summary of the problem type")
+    status: int = Field(description="HTTP status code")
+    detail: str = Field(description="Explanation of this occurrence")
+    instance: str = Field(description="Request path")
+    parameter: str | None = Field(default=None, description="The request parameter to correct")
     invalid: list[str] | None = Field(default=None, description="The rejected values")
     valid_values: list[str] | None = Field(default=None, description="Values that are accepted")
     hint: str | None = Field(default=None, description="How to correct the request")
     examples: list[str] | None = Field(default=None, description="Accepted value examples")
-
-
-class ParameterError(BaseModel):
-    """An error about one request parameter; optional keys are omitted when not relevant."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    detail: ParameterErrorDetail
-
-
-class RequestValidationIssue(BaseModel):
-    loc: list[str | int]
-    msg: str
-    type: str
-    input: Any = None
-    ctx: dict[str, Any] | None = None
-
-
-class RequestValidationErrorResponse(BaseModel):
-    """FastAPI request validation failure (wrong type, pattern, range, or missing value)."""
-
-    detail: list[RequestValidationIssue]
+    errors: list[ValidationIssue] | None = Field(
+        default=None, description="Every request validation failure (`validation-error` only)"
+    )
