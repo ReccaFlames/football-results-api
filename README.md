@@ -23,7 +23,7 @@ league-data API**. This README describes both:
 | Scheduling | Adaptive per-season scheduler driven by fixture times; thresholds from `defaults.schedule` with per-competition overrides | Plus cron-style overrides and global provider quotas |
 | Configuration | Environment variables plus validated YAML for leagues, sources, providers, and schedule defaults | Env vars for infrastructure + one validated config file for leagues, sources, and schedules |
 | Observability | `/health` (DB + scheduler heartbeat), `scrape_run` table, logs; CI with PostgreSQL integration tests | Scheduler/scrape status endpoints, metrics, alerting on stale data |
-| API | Read finished results with stable match IDs, manual refresh, historical fetch | Plus fixtures, standings, teams, and authenticated admin endpoints |
+| API | Matches of every status with filters, cursor pagination, `fields=` and per-season freshness; computed standings; teams with aliases; manual refresh and historical fetch | Plus authenticated admin endpoints |
 
 ## Current state
 
@@ -80,7 +80,16 @@ scheduler_heartbeat, and alembic_version.
 - Season discovery is implemented for football-data.org only; new 90minut seasons must be added to
   the YAML by hand (rollover to them is then automatic).
 - 90minut source URLs must match `http(s)://(www.)90minut.pl/liga/1/ligaNNNNN.html`.
-- Only finished matches are exposed; scheduled fixtures are stored but not served.
+- Standings use points (3/1/0), then goal difference, goals for, wins, and team name. Head-to-head
+  records and point deductions are not applied, so leagues that rank on head-to-head first (such
+  as Ekstraklasa) can differ from the official table when teams are level on points.
+- Cup standings need a `stage` (for example a group) and only count matches whose stage contains
+  it; knockout rounds produce a table but it has little meaning.
+- `inactive` covers postponed, suspended, and cancelled matches; the API does not distinguish them.
+- Team identity is by normalized display name: two spellings of one club are separate teams until
+  an alias row links them.
+- Cursors are keyset positions on (kickoff time, match ID). A match whose kickoff changes while a
+  client pages through results can be skipped or repeated; match IDs themselves never change.
 - Refresh and history-fetch requests require an API key; write endpoints return `503` until at
   least one key is configured.
 - 90minut league and match-detail requests are throttled per host (2 seconds by default).
@@ -166,8 +175,8 @@ seeded during application startup.
 
 ## Adaptive refresh policy
 
-The scraper stores scheduled fixtures internally, while GET /api/v1/results continues to expose
-only finished matches. For each current season the worker calculates next_check_at. The thresholds
+The scraper stores every fixture; GET /api/v1/matches serves all statuses, while GET
+/api/v1/results continues to expose only finished matches. For each current season the worker calculates next_check_at. The thresholds
 come from `defaults.schedule` in `config/competitions.yaml` and can be overridden per competition
 (see [Schedule settings](#schedule-settings)); the shipped defaults are:
 
@@ -229,7 +238,10 @@ go through Alembic.
 | --- | --- | --- |
 | GET | `/health` | Database connectivity and scheduler heartbeat (`ok`, `stale`, or `not_started`) |
 | GET | `/api/v1/competitions` | Competitions with `season_format`, `season_start_month`, available/fetched seasons, and scheduler state; `current_season` is `null` when none is designated |
-| GET | `/api/v1/results` | Finished matches with stable `id` and canonical team slugs; filters: `competition`, `season`, `round`, `stage`, `team` |
+| GET | `/api/v1/matches` | Finished, scheduled, and inactive matches with cursor pagination, `fields=`, and per-season freshness; filters: `competition`, `season`, `status`, `date_from`, `date_to`, `team`, `round`, `stage`, `order` |
+| GET | `/api/v1/standings` | League table computed from stored finished matches for one competition-season (`stage` required for cups) |
+| GET | `/api/v1/teams` | Teams with canonical slugs and aliases; filters: `competition`, `season`, `q`; cursor pagination |
+| GET | `/api/v1/results` | Finished matches with stable `id` and canonical team slugs; filters: `competition`, `season`, `round`, `stage`, `team` (kept unchanged for backward compatibility; prefer `/matches`) |
 | POST | `/api/v1/results/refresh` | Queue a current-season refresh (`202 Accepted`; requires `X-API-Key`) |
 | POST | `/api/v1/results/history/fetch` | Queue a non-current-season fetch (`202 Accepted`; requires `X-API-Key`); cached results return immediately |
 | GET | `/api/v1/jobs/{job_id}` | Get queued, running, completed, or failed scrape-job status (`X-API-Key` required) |
@@ -308,6 +320,73 @@ curl 'http://localhost:8000/api/v1/results?competition=pierwsza-liga&round=3'
 curl 'http://localhost:8000/api/v1/results?competition=europa-league&stage=eliminacyjna'
 curl 'http://localhost:8000/api/v1/results?competition=premier-league&round=2'
 curl 'http://localhost:8000/api/v1/results?team=Wisła'
+~~~
+
+### Matches, standings, and teams (API v1.1)
+
+List endpoints share one envelope:
+
+~~~json
+{
+  "data": [{"id": 412, "competition": "ekstraklasa", "season": "2026-2027", "status": "finished", "...": "..."}],
+  "pagination": {"limit": 50, "next_cursor": "eyJ2IjoxLC..."},
+  "freshness": [
+    {
+      "competition": "ekstraklasa",
+      "season": "2026-2027",
+      "data_as_of": "2026-08-01T20:05:12Z",
+      "next_update_at": "2026-08-02T20:05:12Z",
+      "automatic_refresh": true,
+      "scheduler_state": "idle",
+      "source": {"provider": "90minut", "url": "http://www.90minut.pl/liga/1/liga14675.html"}
+    }
+  ]
+}
+~~~
+
+- **Match fields:** `id`, `competition`, `season`, `stage`, `round`, `status` (`finished`,
+  `scheduled`, or `inactive` for postponed/suspended/cancelled), `kickoff_at`, `home_team`,
+  `away_team` (source display names), `home_team_slug`, `away_team_slug`, the goal and statistics
+  fields listed under [Match statistics](#match-statistics), `first_team_to_score`,
+  `first_goal_minute`, and `source_url`. Every key is always present; unknown values are `null`
+  (scheduled and inactive matches have null goals). `home_score`/`away_score` exist only in
+  `/results`.
+- **Filters:** `status` is comma-separated (default: all). `date_from` and `date_to` take an ISO
+  date or datetime and are inclusive; a date covers the whole UTC day, and naive datetimes are UTC.
+  `team` is a canonical slug (exactly that team) or otherwise a case-insensitive substring of any
+  team name or slug, so `wisla` also finds `Wisła`. `stage` is a case-insensitive substring.
+  `order` is `asc` (default) or `desc` by kickoff; matches without a kickoff sort last.
+- **Pagination:** `limit` defaults to 50 (maximum 200). Pass `pagination.next_cursor` back as
+  `cursor` with the same filters (the page size may change); `next_cursor` is `null` on the last
+  page. Cursors are opaque; one used with other filters or order returns `400`.
+- **`fields=`:** a comma-separated list of item fields for compact responses, for example
+  `fields=kickoff_at,home_team_slug,away_team_slug,home_goals,away_goals`. `id` (matches) and
+  `team_slug` (standings) are always included. Unknown names return `422` with `invalid` and
+  `valid_values`.
+- **Freshness** is reported per competition-season, never as a maximum across competitions:
+  `data_as_of` is the last successful import (`null` if never fetched); `next_update_at` is the
+  next scheduled check for the current season (`null` when the season is not refreshed
+  automatically). `/matches` lists every season within its `competition`/`season` filter;
+  `/standings` lists the one season it used.
+- **Standings** (`competition` required; `season` defaults to the current one) return
+  `{competition, season, stage, data, freshness}` with rows of `position`, `team_slug`,
+  `team_name`, `played`, `won`, `drawn`, `lost`, `goals_for`, `goals_against`, `goal_difference`,
+  `points`, and `form` (up to five latest results, newest first, e.g. `WDLWW`). Only finished
+  matches count. Ties are broken by goal difference, goals for, wins, then team name. Cup
+  competitions require `stage`; without it the `422` response lists the season's stages.
+- **Teams** return `{slug, name, aliases}` ordered by slug, limited to teams that play in enabled
+  competitions (or the given competition-season).
+- Unknown competitions return `404`, as do unknown seasons of a given competition (with
+  `valid_values`).
+
+~~~bash
+curl 'http://localhost:8000/api/v1/matches?competition=ekstraklasa&status=scheduled&date_from=2026-08-01&date_to=2026-08-31'
+curl 'http://localhost:8000/api/v1/matches?team=legia&status=finished&order=desc&limit=5&fields=kickoff_at,home_team,away_team,home_goals,away_goals'
+curl 'http://localhost:8000/api/v1/matches?competition=premier-league&round=2&cursor=<next_cursor>'
+curl 'http://localhost:8000/api/v1/standings?competition=ekstraklasa'
+curl 'http://localhost:8000/api/v1/standings?competition=europa-league&stage=Faza%20ligowa&fields=points,form'
+curl 'http://localhost:8000/api/v1/teams?competition=premier-league&season=2026-2027'
+curl 'http://localhost:8000/api/v1/teams?q=wisla'
 ~~~
 
 ### Match statistics
@@ -633,9 +712,10 @@ The current adaptive scheduler is the foundation; planned improvements:
 
 ### API
 
-- Fixtures endpoint for scheduled matches (data is already stored).
-- League tables/standings computed from stored results.
-- Team and season resources, pagination, and `ETag` caching headers.
+- ~~Fixtures endpoint for scheduled matches.~~ (done: `/api/v1/matches`)
+- ~~League tables/standings computed from stored results.~~ (done: `/api/v1/standings`)
+- ~~Team resources and pagination~~ (done: `/api/v1/teams`, cursors); `ETag` caching headers.
+- Head-to-head tie-breakers and point deductions for standings.
 - Admin endpoints (protected by an API key) to list scheduler state, view recent `scrape_run`
   entries, trigger refreshes, and enable/disable competitions.
 - Keep `/api/v1` backward compatible; breaking changes go to `/api/v2`.
@@ -652,7 +732,7 @@ The current adaptive scheduler is the foundation; planned improvements:
 1. Move the registry to a validated config file (no behaviour change).
 2. ~~Generalise the football-data.org adapter to any competition code.~~ (done)
 3. ~~Make scheduler thresholds configurable per competition.~~ (done)
-4. Add fixtures and standings endpoints.
+4. ~~Add fixtures and standings endpoints.~~ (done)
 5. Add admin/status endpoints with API-key authentication and metrics.
 6. ~~Automatic season discovery and rollover.~~ (done)
 7. Additional providers and fallback sources.

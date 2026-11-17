@@ -1,25 +1,49 @@
 import secrets
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
+from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Path, Query, Response
+from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
 
 from app.competitions import provider_competition_code, source_from_url
 from app.config import load_config, settings
+from app.contract import (
+    DEFAULT_LIMIT,
+    MAX_LIMIT,
+    ContractError,
+    compact,
+    encode_cursor,
+    filter_hash,
+    match_keyset,
+    parse_date_bound,
+    parse_fields,
+    parse_statuses,
+    slug_keyset,
+)
 from app.database import session_factory
 from app.models import (
+    Competition,
     CompetitionSummary,
     HistoricalFetchRequest,
     JobAccepted,
+    Match,
+    MatchesResponse,
+    MatchQuery,
+    Pagination,
     RefreshRequest,
     ResultsResponse,
     ScrapeJobStatus,
+    StandingRow,
+    StandingsResponse,
+    TeamsResponse,
 )
 from app.repository import ActiveScrapeJobConflict, PostgresResultRepository
 from app.seasons import SEASON_PATTERN, validate_season
+from app.standings import compute_standings
 
 store = PostgresResultRepository(session_factory)
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -45,6 +69,29 @@ def _job_accepted(response: Response, job_id: int, status: str) -> JobAccepted:
     status_url = f"/api/v1/jobs/{job_id}"
     response.headers["Location"] = status_url
     return JobAccepted(job_id=job_id, status=status, status_url=status_url)
+
+
+def _contract[T](parse: Callable[[], T]) -> T:
+    try:
+        return parse()
+    except ContractError as error:
+        raise HTTPException(status_code=error.status_code, detail=error.detail) from error
+
+
+async def _require_season(slug: str, season: str | None) -> Competition:
+    competition = await store.get_competition(slug)
+    if competition is None:
+        raise HTTPException(status_code=404, detail=f"Unknown competition: {slug}")
+    if season is not None and season not in competition.seasons:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "message": f"Unknown season {season} for {competition.slug}",
+                "parameter": "season",
+                "valid_values": sorted(competition.seasons, reverse=True),
+            },
+        )
+    return competition
 
 
 @asynccontextmanager
@@ -101,6 +148,129 @@ async def get_results(
         refreshed_at=refreshed_at,
         stale=refreshed_at is None,
     )
+
+
+@app.get("/api/v1/matches", response_model=MatchesResponse)
+async def get_matches(
+    competition: str | None = None,
+    season: str | None = Query(default=None, pattern=SEASON_PATTERN),
+    status: str | None = Query(
+        default=None, description="Comma-separated: finished, scheduled, inactive"
+    ),
+    date_from: str | None = Query(default=None, description="ISO date or datetime, inclusive"),
+    date_to: str | None = Query(default=None, description="ISO date or datetime, inclusive"),
+    team: str | None = Query(default=None, description="Canonical team slug, or name substring"),
+    round_number: int | None = Query(default=None, alias="round", ge=1),
+    stage: str | None = None,
+    order: Literal["asc", "desc"] = "asc",
+    limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    cursor: str | None = None,
+    fields: str | None = Query(default=None, description="Comma-separated Match fields"),
+) -> Response:
+    selected = _contract(lambda: parse_fields(fields, Match, always=("id",)))
+    statuses = _contract(lambda: parse_statuses(status))
+    kickoff_from = _contract(lambda: parse_date_bound(date_from, "date_from", upper=False))
+    kickoff_until = _contract(lambda: parse_date_bound(date_to, "date_to", upper=True))
+    if competition:
+        await _require_season(competition, season)
+    query = MatchQuery(
+        competition=competition.casefold() if competition else None,
+        season=season,
+        statuses=statuses,
+        kickoff_from=kickoff_from,
+        kickoff_until=kickoff_until,
+        team=(team.strip() or None) if team else None,
+        round=round_number,
+        stage=stage,
+        descending=order == "desc",
+    )
+    digest = filter_hash(query.model_dump(mode="json", exclude={"after"}))
+    if cursor is not None:
+        after = _contract(lambda: match_keyset(cursor, digest))
+        query = query.model_copy(update={"after": after})
+    matches = await store.find_matches(query, limit + 1)
+    page = matches[:limit]
+    next_cursor = None
+    if len(matches) > limit:
+        last = page[-1]
+        kickoff = None if last.kickoff_at is None else last.kickoff_at.isoformat()
+        next_cursor = encode_cursor([kickoff, last.id], digest)
+    freshness = await store.get_freshness(query.competition, season)
+    return JSONResponse(
+        {
+            "data": [compact(item, selected) for item in page],
+            "pagination": {"limit": limit, "next_cursor": next_cursor},
+            "freshness": [item.model_dump(mode="json") for item in freshness],
+        }
+    )
+
+
+@app.get("/api/v1/standings", response_model=StandingsResponse)
+async def get_standings(
+    competition: str,
+    season: str | None = Query(default=None, pattern=SEASON_PATTERN),
+    stage: str | None = Query(
+        default=None, description="Stage substring; required for cup competitions"
+    ),
+    fields: str | None = Query(default=None, description="Comma-separated StandingRow fields"),
+) -> Response:
+    selected = _contract(lambda: parse_fields(fields, StandingRow, always=("team_slug",)))
+    found = await _require_season(competition, season)
+    season = season or found.current_season
+    if season is None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": f"{found.slug} has no current season; pass season",
+                "parameter": "season",
+                "valid_values": sorted(found.seasons, reverse=True),
+            },
+        )
+    stage = stage.strip() if stage else None
+    if found.format == "cup" and not stage:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Standings for a cup competition need a stage (for example a group)",
+                "parameter": "stage",
+                "valid_values": await store.list_stages(found.slug, season),
+            },
+        )
+    matches = await store.find_matches(
+        MatchQuery(competition=found.slug, season=season, statuses=("finished",), stage=stage)
+    )
+    freshness = await store.get_freshness(found.slug, season)
+    return JSONResponse(
+        {
+            "competition": found.slug,
+            "season": season,
+            "stage": stage,
+            "data": [compact(row, selected) for row in compute_standings(matches)],
+            "freshness": [item.model_dump(mode="json") for item in freshness],
+        }
+    )
+
+
+@app.get("/api/v1/teams", response_model=TeamsResponse)
+async def get_teams(
+    competition: str | None = None,
+    season: str | None = Query(default=None, pattern=SEASON_PATTERN),
+    q: str | None = Query(default=None, description="Canonical team slug, or name substring"),
+    limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    cursor: str | None = None,
+) -> TeamsResponse:
+    if competition:
+        await _require_season(competition, season)
+    competition = competition.casefold() if competition else None
+    q = (q.strip() or None) if q else None
+    digest = filter_hash({"competition": competition, "season": season, "q": q})
+    after_slug = None
+    if cursor is not None:
+        after_slug = _contract(lambda: slug_keyset(cursor, digest))
+    teams = await store.list_teams(competition, season, q, limit + 1, after_slug)
+    page = teams[:limit]
+    next_cursor = encode_cursor([page[-1].slug], digest) if len(teams) > limit else None
+    return TeamsResponse(data=page, pagination=Pagination(limit=limit, next_cursor=next_cursor))
 
 
 @app.post(

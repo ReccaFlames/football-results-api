@@ -12,8 +12,9 @@ The app never calls `create_all`; Alembic in `migrations/` owns the schema. The 
 
 1. Edit ORM models in `app/db_models.py`.
 2. Mirror field changes in Pydantic models (`app/models.py`) and the mapping code in
-   `app/repository.py` (`replace_competition`, `get_results`, seeding) — columns are copied
-   explicitly, field by field.
+   `app/repository.py` (`replace_competition`, `get_results`, `_match_model` for `/matches`,
+   seeding) — columns are copied explicitly, field by field. A new match column also needs a field
+   on `Match` so `/matches` and `fields=` expose it.
 3. Generate against a running database at `head`:
 
    ~~~bash

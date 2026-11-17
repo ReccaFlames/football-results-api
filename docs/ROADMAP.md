@@ -161,14 +161,14 @@ How to use this list:
 
 ### Phase 2: Agent-first API surface
 
-- [ ] **9. API contract v1.1**
-  - [ ] `GET /api/v1/matches` (status, date range, team, round/stage filters)
-  - [ ] `GET /api/v1/standings`
-  - [ ] `GET /api/v1/teams`
-  - [ ] Cursor pagination with a default `limit`
-  - [ ] `fields=` parameter for compact responses
-  - [ ] Freshness metadata: `data_as_of`, `next_update_at`, `source`
-  - [ ] `/results` kept for backward compatibility
+- [x] **9. API contract v1.1**
+  - [x] `GET /api/v1/matches` (status, date range, team, round/stage filters)
+  - [x] `GET /api/v1/standings`
+  - [x] `GET /api/v1/teams`
+  - [x] Cursor pagination with a default `limit`
+  - [x] `fields=` parameter for compact responses
+  - [x] Freshness metadata: `data_as_of`, `next_update_at`, `source`
+  - [x] `/results` kept for backward compatibility
 - [ ] **10. OpenAPI polish**
   - [ ] Explicit `operation_id` on every endpoint
   - [ ] Tags and summaries that say when to use each endpoint

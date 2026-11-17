@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -124,6 +125,118 @@ class ScrapedMatch(BaseModel):
             played_at=self.played_at,
             source_url=self.source_url,
         )
+
+
+MatchStatus = Literal["finished", "scheduled", "inactive"]
+MATCH_STATUSES: tuple[str, ...] = ("finished", "scheduled", "inactive")
+
+
+class Match(BaseModel):
+    """A fixture of any status (API v1.1). Unknown values are null, never 0."""
+
+    id: int
+    competition: str
+    season: str
+    stage: str
+    round: int | None = None
+    status: MatchStatus
+    kickoff_at: datetime | None = None
+    home_team: str
+    away_team: str
+    home_team_slug: str
+    away_team_slug: str
+    home_goals: int | None = None
+    away_goals: int | None = None
+    home_goals_first_half: int | None = None
+    away_goals_first_half: int | None = None
+    home_goals_second_half: int | None = None
+    away_goals_second_half: int | None = None
+    home_cards: int | None = None
+    away_cards: int | None = None
+    home_corners: int | None = None
+    away_corners: int | None = None
+    home_fouls: int | None = None
+    away_fouls: int | None = None
+    first_team_to_score: str | None = None
+    first_goal_minute: str | None = None
+    source_url: str
+
+
+class MatchQuery(BaseModel):
+    """Repository filters for ``find_matches``; ``after`` is the keyset (kickoff_at, id)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    competition: str | None = None
+    season: str | None = None
+    statuses: tuple[str, ...] = ()
+    kickoff_from: datetime | None = None
+    kickoff_until: datetime | None = None  # exclusive
+    team: str | None = None
+    round: int | None = None
+    stage: str | None = None
+    descending: bool = False
+    after: tuple[datetime | None, int] | None = None
+
+
+class FreshnessSource(BaseModel):
+    provider: str
+    url: str
+
+
+class Freshness(BaseModel):
+    competition: str
+    season: str
+    data_as_of: datetime | None
+    next_update_at: datetime | None
+    automatic_refresh: bool
+    scheduler_state: str | None
+    source: FreshnessSource
+
+
+class Pagination(BaseModel):
+    limit: int
+    next_cursor: str | None
+
+
+class MatchesResponse(BaseModel):
+    data: list[Match]
+    pagination: Pagination
+    freshness: list[Freshness]
+
+
+class StandingRow(BaseModel):
+    position: int
+    team_slug: str
+    team_name: str
+    played: int
+    won: int
+    drawn: int
+    lost: int
+    goals_for: int
+    goals_against: int
+    goal_difference: int
+    points: int
+    form: str
+
+
+class StandingsResponse(BaseModel):
+    competition: str
+    season: str
+    stage: str | None
+    data: list[StandingRow]
+    freshness: list[Freshness]
+
+
+class Team(BaseModel):
+    slug: str
+    name: str
+    aliases: list[str]
+
+
+class TeamsResponse(BaseModel):
+    data: list[Team]
+    pagination: Pagination
 
 
 class ResultsResponse(BaseModel):

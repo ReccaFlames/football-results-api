@@ -12,9 +12,10 @@ from app.db_models import (
     ScrapeRunRow,
     TeamAliasRow,
 )
-from app.models import Competition, ScrapedMatch, SeasonSource
+from app.models import Competition, MatchQuery, ScrapedMatch, SeasonSource
 from app.repository import ActiveScrapeJobConflict, PostgresResultRepository
 from app.scheduling import SchedulePolicy
+from app.standings import compute_standings
 
 
 def source(season: str, league_id: int) -> SeasonSource:
@@ -732,3 +733,186 @@ async def test_failure_backoff_uses_the_competition_policy(
 
     row = await season_row(sessions, "test-league", "2026-2027")
     assert close_to(row.next_check_at, before + timedelta(minutes=2))
+
+
+KICKOFF = datetime(2026, 8, 1, 18, 0, tzinfo=UTC)
+
+
+def v11_fixtures() -> list[ScrapedMatch]:
+    return [
+        match("Wisła Kraków", "Legia", KICKOFF, (2, 1)),
+        match("Lech", "Wisła Płock", KICKOFF, (0, 0)),
+        match("Legia", "Lech", KICKOFF + timedelta(days=7), round_number=2),
+        match(
+            "Wisła Płock", "Wisła Kraków", KICKOFF + timedelta(days=7), round_number=2
+        ).model_copy(update={"status": "inactive"}),
+    ]
+
+
+async def stored_v11_fixtures(repository: PostgresResultRepository) -> dict[str, int]:
+    competition = league()
+    await repository.seed_competitions({competition.slug: competition})
+    await repository.replace_competition(
+        competition, competition.seasons["2026-2027"], v11_fixtures()
+    )
+    matches = await repository.find_matches(MatchQuery())
+    return {f"{item.home_team_slug}:{item.away_team_slug}": item.id for item in matches}
+
+
+async def match_ids(repository: PostgresResultRepository, **filters) -> list[int]:
+    return [item.id for item in await repository.find_matches(MatchQuery(**filters))]
+
+
+async def test_find_matches_filters_every_status(
+    repository: PostgresResultRepository,
+) -> None:
+    by_teams = await stored_v11_fixtures(repository)
+    krakow_legia, lech_plock, legia_lech, plock_krakow = by_teams.values()
+    assert list(by_teams) == [
+        "wisla-krakow:legia",
+        "lech:wisla-plock",
+        "legia:lech",
+        "wisla-plock:wisla-krakow",
+    ]
+    matches = await repository.find_matches(MatchQuery(statuses=("scheduled", "inactive")))
+    assert [item.status for item in matches] == ["scheduled", "inactive"]
+    assert matches[0].home_goals is None and matches[0].home_cards is None
+    assert matches[0].kickoff_at == KICKOFF + timedelta(days=7)
+
+    assert await match_ids(repository, statuses=("finished",)) == [krakow_legia, lech_plock]
+    assert await match_ids(
+        repository, kickoff_from=KICKOFF + timedelta(days=1), descending=True
+    ) == [plock_krakow, legia_lech]
+    assert await match_ids(repository, kickoff_until=KICKOFF + timedelta(seconds=1)) == [
+        krakow_legia,
+        lech_plock,
+    ]
+    assert await match_ids(repository, round=2, stage="KOLEJKA 2") == [legia_lech, plock_krakow]
+    assert await match_ids(repository, competition="TEST-LEAGUE", season="2025-2026") == []
+
+
+async def test_find_matches_team_filter_uses_slugs_and_aliases(
+    repository: PostgresResultRepository, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    by_teams = await stored_v11_fixtures(repository)
+    krakow_legia, lech_plock, legia_lech, plock_krakow = by_teams.values()
+    # An exact canonical slug selects that team only, not every slug containing it.
+    assert await match_ids(repository, team="wisla-krakow") == [krakow_legia, plock_krakow]
+    # Otherwise the filter is a substring of an alias or of the slugified query.
+    assert await match_ids(repository, team="wisla") == [krakow_legia, lech_plock, plock_krakow]
+    assert await match_ids(repository, team="WISŁA P") == [lech_plock, plock_krakow]
+    assert await match_ids(repository, team="%") == []
+    async with sessions.begin() as session:
+        legia = await session.get(TeamAliasRow, "legia")
+        assert legia is not None
+        session.add(
+            TeamAliasRow(
+                normalized_alias="legia warszawa", alias="Legia Warszawa", team_id=legia.team_id
+            )
+        )
+    assert await match_ids(repository, team="Warszawa") == [krakow_legia, legia_lech]
+
+    teams = await repository.list_teams(q="warszawa")
+    assert [(team.slug, team.name, team.aliases) for team in teams] == [
+        ("legia", "Legia", ["Legia", "Legia Warszawa"])
+    ]
+
+
+async def test_match_cursor_keyset_survives_a_refresh(
+    repository: PostgresResultRepository,
+) -> None:
+    by_teams = await stored_v11_fixtures(repository)
+    all_ids = list(by_teams.values())
+    # Equal kickoff times are ordered by id, in both directions.
+    assert await match_ids(repository) == all_ids
+    assert await match_ids(repository, descending=True) == all_ids[::-1]
+
+    first_page = await repository.find_matches(MatchQuery(), limit=2)
+    last = first_page[-1]
+    competition = league()
+    await repository.replace_competition(
+        competition, competition.seasons["2026-2027"], v11_fixtures()
+    )
+    after = (last.kickoff_at, last.id)
+    assert await match_ids(repository, after=after) == all_ids[2:]
+    tail = await repository.find_matches(MatchQuery(descending=True, after=after))
+    assert [item.id for item in tail] == all_ids[:1]
+    # Matches without a kickoff sort last; a null-kickoff keyset must still be accepted.
+    assert await match_ids(repository, after=(None, 0)) == []
+    assert await match_ids(repository, descending=True, after=(None, 0)) == all_ids[::-1]
+
+
+async def test_standings_from_stored_finished_results(
+    repository: PostgresResultRepository,
+) -> None:
+    competition = league()
+    await repository.seed_competitions({competition.slug: competition})
+    await repository.replace_competition(
+        competition,
+        competition.seasons["2026-2027"],
+        [
+            *v11_fixtures(),
+            match("Legia", "Lech", KICKOFF + timedelta(days=3), (3, 0), round_number=3),
+        ],
+    )
+    await repository.replace_competition(
+        competition,
+        competition.seasons["2025-2026"],
+        [match("Lech", "Legia", KICKOFF - timedelta(days=365), (5, 0), season="2025-2026")],
+    )
+    finished = await repository.find_matches(
+        MatchQuery(competition="test-league", season="2026-2027", statuses=("finished",))
+    )
+    table = [
+        (row.team_slug, row.played, row.points, row.goals_for, row.goals_against, row.form)
+        for row in compute_standings(finished)
+    ]
+    # Legia and Wisła Kraków both have 3 points; Legia has the better goal difference.
+    assert table == [
+        ("legia", 2, 3, 4, 2, "WL"),
+        ("wisla-krakow", 1, 3, 2, 1, "W"),
+        ("wisla-plock", 1, 1, 0, 0, "D"),
+        ("lech", 2, 1, 0, 3, "LD"),
+    ]
+    assert await repository.list_stages("test-league", "2026-2027") == [
+        "Kolejka 1",
+        "Kolejka 3",
+        "Kolejka 2",
+    ]
+
+
+async def test_freshness_and_teams_are_scoped_per_competition_season(
+    repository: PostgresResultRepository,
+) -> None:
+    competitions = {"test-league": league(), "test-cup": cup()}
+    await repository.seed_competitions(competitions)
+    competition = competitions["test-league"]
+    await repository.replace_competition(
+        competition, competition.seasons["2026-2027"], v11_fixtures()
+    )
+    freshness = await repository.get_freshness("test-league")
+    assert [(item.competition, item.season) for item in freshness] == [
+        ("test-league", "2026-2027"),
+        ("test-league", "2025-2026"),
+    ]
+    current, historical = freshness
+    assert current.data_as_of is not None and current.next_update_at is not None
+    assert current.automatic_refresh and current.scheduler_state != "disabled"
+    assert current.source.provider == "90minut"
+    assert current.source.url == "http://www.90minut.pl/liga/1/liga2.html"
+    assert historical.data_as_of is None and historical.next_update_at is None
+    assert not historical.automatic_refresh
+    cup_freshness = await repository.get_freshness("test-cup", "2026-2027")
+    assert [(item.competition, item.data_as_of) for item in cup_freshness] == [("test-cup", None)]
+    assert len(await repository.get_freshness()) == 3
+
+    assert [team.slug for team in await repository.list_teams("test-league")] == [
+        "lech",
+        "legia",
+        "wisla-krakow",
+        "wisla-plock",
+    ]
+    assert await repository.list_teams("test-league", "2025-2026") == []
+    assert await repository.list_teams("test-cup") == []
+    page = await repository.list_teams(limit=2, after_slug="legia")
+    assert [team.slug for team in page] == ["wisla-krakow", "wisla-plock"]

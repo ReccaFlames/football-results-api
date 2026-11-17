@@ -26,7 +26,8 @@ async def discover_seasons(self, competition: Competition) -> list[SeasonSource]
   Inactive matches must not be returned as scheduled, or the scheduler will poll aggressively.
 - `played_at`: timezone-aware kickoff. If the source omits the year, use
   `app.seasons.season_year_for_month(season, month, competition.season_start_month)`.
-- `round` for leagues; descriptive `stage` for cups.
+- `round` for leagues; descriptive `stage` for cups, including the group name for group stages
+  (cup standings filter by a `stage` substring).
 - `home_goals`/`away_goals` equal full-time score; statistics outside `capabilities.statistics`
   stay `None` — never `0`.
 - `first_goal_minute` as a string, stoppage time as `"45+2"`.

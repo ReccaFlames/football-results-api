@@ -3,7 +3,18 @@ import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import exists, func, or_, select, update
+from sqlalchemy import (
+    DateTime,
+    Select,
+    cast,
+    exists,
+    func,
+    literal,
+    or_,
+    select,
+    tuple_,
+    update,
+)
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased, selectinload
@@ -21,10 +32,15 @@ from app.db_models import (
 from app.models import (
     Competition,
     CompetitionSummary,
+    Freshness,
+    FreshnessSource,
+    Match,
+    MatchQuery,
     MatchResult,
     ScrapedMatch,
     ScrapeJobStatus,
     SeasonSource,
+    Team,
 )
 from app.scheduling import (
     DEFAULT_POLICY,
@@ -50,12 +66,77 @@ def _normalize_team_alias(name: str) -> str:
 
 
 def _team_slug(name: str) -> str:
+    return _search_slug(name) or "team"
+
+
+def _search_slug(name: str) -> str:
     normalized = name.lower().translate(str.maketrans("ąćęłńóśźż", "acelnoszz"))
-    return re.sub(r"[^a-z0-9]+", "-", normalized).strip("-") or "team"
+    return re.sub(r"[^a-z0-9]+", "-", normalized).strip("-")
 
 
 def _escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+
+
+# Matches without a kickoff time sort after all others in ascending order.
+_KICKOFF_SORT_KEY = func.coalesce(
+    MatchRow.played_at, cast(literal("infinity"), DateTime(timezone=True))
+)
+
+
+async def _matching_team_ids(session: AsyncSession, team: str) -> Select[tuple[int]]:
+    """Teams for a ``team`` filter: an exact canonical slug, else alias or slug substring."""
+    needle = team.strip()
+    exact = await session.scalar(select(TeamRow.id).where(TeamRow.slug == needle.casefold()))
+    if exact is not None:
+        return select(TeamRow.id).where(TeamRow.id == exact)
+    pattern = f"%{_escape_like(needle)}%"
+    conditions = [
+        exists(
+            select(1).where(
+                TeamAliasRow.team_id == TeamRow.id,
+                TeamAliasRow.alias.ilike(pattern, escape="\\"),
+            )
+        )
+    ]
+    # Slugs are ASCII, so "wisla" also finds "Wisła"; they contain no LIKE wildcards.
+    slug = _search_slug(needle)
+    if slug:
+        conditions.append(TeamRow.slug.like(f"%{slug}%"))
+    return select(TeamRow.id).where(or_(*conditions))
+
+
+def _match_model(
+    row: MatchRow, competition: str, season: str, home_slug: str, away_slug: str
+) -> Match:
+    return Match(
+        id=row.id,
+        competition=competition,
+        season=season,
+        stage=row.stage,
+        round=row.round,
+        status=row.status,
+        kickoff_at=row.played_at,
+        home_team=row.home_team,
+        away_team=row.away_team,
+        home_team_slug=home_slug,
+        away_team_slug=away_slug,
+        home_goals=row.home_goals,
+        away_goals=row.away_goals,
+        home_goals_first_half=row.home_goals_first_half,
+        away_goals_first_half=row.away_goals_first_half,
+        home_goals_second_half=row.home_goals_second_half,
+        away_goals_second_half=row.away_goals_second_half,
+        home_cards=row.home_cards,
+        away_cards=row.away_cards,
+        home_corners=row.home_corners,
+        away_corners=row.away_corners,
+        home_fouls=row.home_fouls,
+        away_fouls=row.away_fouls,
+        first_team_to_score=row.first_team_to_score,
+        first_goal_minute=row.first_goal_minute,
+        source_url=row.source_url,
+    )
 
 
 @dataclass(frozen=True)
@@ -375,6 +456,155 @@ class PostgresResultRepository:
             if row.home_score is not None and row.away_score is not None
         ]
         return results, refreshed_at
+
+    @staticmethod
+    def _scoped_matches(competition: str | None, season: str | None) -> Select:
+        query = (
+            select(MatchRow)
+            .join(CompetitionSeasonRow, MatchRow.competition_season_id == CompetitionSeasonRow.id)
+            .join(CompetitionRow, CompetitionSeasonRow.competition_id == CompetitionRow.id)
+            .where(CompetitionRow.is_enabled.is_(True))
+        )
+        if competition:
+            query = query.where(CompetitionRow.slug == competition.casefold())
+        if season:
+            query = query.where(CompetitionSeasonRow.season == season)
+        return query
+
+    async def find_matches(self, query: MatchQuery, limit: int | None = None) -> list[Match]:
+        """Matches of any status ordered by (kickoff, id), after the ``query.after`` keyset."""
+        home_team = aliased(TeamRow)
+        away_team = aliased(TeamRow)
+        statement = (
+            self._scoped_matches(query.competition, query.season)
+            .add_columns(
+                CompetitionRow.slug,
+                CompetitionSeasonRow.season,
+                home_team.slug,
+                away_team.slug,
+            )
+            .join(home_team, MatchRow.home_team_id == home_team.id)
+            .join(away_team, MatchRow.away_team_id == away_team.id)
+        )
+        if query.statuses:
+            statement = statement.where(MatchRow.status.in_(query.statuses))
+        if query.kickoff_from is not None:
+            statement = statement.where(MatchRow.played_at >= query.kickoff_from)
+        if query.kickoff_until is not None:
+            statement = statement.where(MatchRow.played_at < query.kickoff_until)
+        if query.round is not None:
+            statement = statement.where(MatchRow.round == query.round)
+        if query.stage:
+            pattern = f"%{_escape_like(query.stage)}%"
+            statement = statement.where(MatchRow.stage.ilike(pattern, escape="\\"))
+        if query.after is not None:
+            kickoff, match_id = query.after
+            bound = (
+                cast(literal("infinity"), DateTime(timezone=True))
+                if kickoff is None
+                else literal(kickoff, DateTime(timezone=True))
+            )
+            key = tuple_(_KICKOFF_SORT_KEY, MatchRow.id)
+            after = tuple_(bound, literal(match_id))
+            statement = statement.where(key < after if query.descending else key > after)
+        if query.descending:
+            statement = statement.order_by(_KICKOFF_SORT_KEY.desc(), MatchRow.id.desc())
+        else:
+            statement = statement.order_by(_KICKOFF_SORT_KEY, MatchRow.id)
+        if limit is not None:
+            statement = statement.limit(limit)
+        async with self.sessions() as session:
+            if query.team:
+                team_ids = await _matching_team_ids(session, query.team)
+                statement = statement.where(
+                    or_(MatchRow.home_team_id.in_(team_ids), MatchRow.away_team_id.in_(team_ids))
+                )
+            rows = (await session.execute(statement)).all()
+        return [_match_model(*row) for row in rows]
+
+    async def list_stages(self, competition: str, season: str) -> list[str]:
+        """Distinct stage names of a competition-season, in order of their first kickoff."""
+        scoped = self._scoped_matches(competition, season).subquery()
+        statement = (
+            select(scoped.c.stage)
+            .group_by(scoped.c.stage)
+            .order_by(func.min(scoped.c.played_at), scoped.c.stage)
+        )
+        async with self.sessions() as session:
+            return list((await session.scalars(statement)).all())
+
+    async def get_freshness(
+        self, competition: str | None = None, season: str | None = None
+    ) -> list[Freshness]:
+        """Freshness per competition-season of enabled competitions within the given scope."""
+        statement = (
+            select(CompetitionSeasonRow, CompetitionRow.slug)
+            .join(CompetitionRow, CompetitionSeasonRow.competition_id == CompetitionRow.id)
+            .where(CompetitionRow.is_enabled.is_(True))
+            .order_by(CompetitionRow.slug, CompetitionSeasonRow.season.desc())
+        )
+        if competition:
+            statement = statement.where(CompetitionRow.slug == competition.casefold())
+        if season:
+            statement = statement.where(CompetitionSeasonRow.season == season)
+        async with self.sessions() as session:
+            rows = (await session.execute(statement)).all()
+        return [
+            Freshness(
+                competition=slug,
+                season=row.season,
+                data_as_of=row.fetched_at,
+                next_update_at=(
+                    row.next_check_at if row.is_current and row.automatic_refresh_enabled else None
+                ),
+                automatic_refresh=row.is_current and row.automatic_refresh_enabled,
+                scheduler_state=row.scheduler_state,
+                source=FreshnessSource(provider=row.provider, url=row.source_url),
+            )
+            for row, slug in rows
+        ]
+
+    async def list_teams(
+        self,
+        competition: str | None = None,
+        season: str | None = None,
+        q: str | None = None,
+        limit: int | None = None,
+        after_slug: str | None = None,
+    ) -> list[Team]:
+        """Teams that play in enabled competitions (optionally one competition-season)."""
+        scoped = (
+            self._scoped_matches(competition, season)
+            .with_only_columns(MatchRow.home_team_id, MatchRow.away_team_id)
+            .subquery()
+        )
+        statement = (
+            select(TeamRow)
+            .where(
+                or_(
+                    TeamRow.id.in_(select(scoped.c.home_team_id)),
+                    TeamRow.id.in_(select(scoped.c.away_team_id)),
+                )
+            )
+            .options(selectinload(TeamRow.aliases))
+            .order_by(TeamRow.slug)
+        )
+        if after_slug is not None:
+            statement = statement.where(TeamRow.slug > after_slug)
+        if limit is not None:
+            statement = statement.limit(limit)
+        async with self.sessions() as session:
+            if q:
+                statement = statement.where(TeamRow.id.in_(await _matching_team_ids(session, q)))
+            rows = (await session.scalars(statement)).all()
+            return [
+                Team(
+                    slug=row.slug,
+                    name=row.name,
+                    aliases=sorted({alias.alias for alias in row.aliases}),
+                )
+                for row in rows
+            ]
 
     async def is_cached(self, competition: str, season: str) -> bool:
         async with self.sessions() as session:

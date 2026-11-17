@@ -16,6 +16,8 @@ API.
 | Path | Responsibility |
 | --- | --- |
 | `app/main.py` | FastAPI app and all HTTP endpoints; module-level `store` singleton |
+| `app/contract.py` | API v1.1 request rules: opaque cursors, `fields=`, status and date parsing, limits |
+| `app/standings.py` | Pure league-table calculation and tie-breakers from finished matches |
 | `app/scheduler.py` | Scheduler loop (`python -m app.scheduler`): seed → heartbeat → season checks (discovery/rollover) → claim due seasons → scrape → persist |
 | `app/scheduling.py` | Pure rules driven by `SchedulePolicy`: `calculate_next_check`, `failure_backoff`, `rollover_target` |
 | `app/scraper.py` | Provider adapters (`NinetyMinutScraper`, `FootballDataScraper`), parsers, `ScraperRegistry` |
@@ -71,9 +73,16 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
   keeps a newer season the scheduler rolled over to. Discovered seasons are never overwritten or
   removed by reseeding; `manual` makes `current_season` exact. Pass `auto_rollover_slugs()` to
   every `seed_competitions` call (API startup and scheduler).
-- A refresh deletes and re-inserts all matches of one competition-season in one transaction.
-  Database match IDs are therefore not stable; `source_key` is a hash of season/stage/teams/kickoff.
-- `MatchResult` (API) exposes only finished matches; `ScrapedMatch` (internal) also has scheduled ones.
+- A refresh reconciles all matches of one competition-season in one transaction and keeps match IDs
+  (matched by `provider_match_id`, else a season/round/team key that ignores kickoff time).
+  Cursors and clients rely on these IDs; never renumber or re-insert existing matches.
+- `MatchResult` (`/results`, frozen for backward compatibility) exposes only finished matches.
+  `Match` (`/matches`, API v1.1) has every status (`finished`, `scheduled`, `inactive`) and uses
+  `kickoff_at`; `ScrapedMatch` is the internal provider record.
+- API v1.1 list endpoints return `{data, pagination, freshness}`. Cursors are opaque keysets on
+  `(kickoff_at, id)` (teams: slug) bound to a hash of the filters; `fields=` validates against the
+  item model. Freshness is per competition-season, never a maximum across competitions. Later
+  surfaces (OpenAPI, llms.txt, CLI, skill, MCP) copy this contract, so change it deliberately.
 - Statistics that a provider cannot supply must stay `null` — never default to `0`.
 - 90minut pages are ISO-8859-2 and use Polish month names with Europe/Warsaw time.
 - football-data.org is throttled (`FOOTBALL_DATA_MIN_REQUEST_INTERVAL_SECONDS`, default 6s) and

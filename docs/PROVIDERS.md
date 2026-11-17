@@ -55,6 +55,8 @@ Return **all** fixtures of one competition-season, finished and unplayed.
   `app.seasons.season_year_for_month(season, month, competition.season_start_month)`; never assume
   a July start.
 - `round` for league rounds; a descriptive `stage` for cup rounds and groups.
+  `/api/v1/standings` selects cup matches by a `stage` substring, so group-stage fixtures must
+  include the group name (for example `Group A`).
 - `home_goals`/`away_goals` equal the full-time score. Unknown statistics stay `None`, never `0`.
 - `first_goal_minute` is a string; stoppage time uses `"45+2"`.
 - `source_url`: the most specific URL available (match page if possible).

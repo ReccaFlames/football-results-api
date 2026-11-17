@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -8,7 +8,15 @@ import app.main as main_module
 from app.competitions import competition_summary, source_from_url
 from app.config import load_config
 from app.main import app
-from app.models import MatchResult, ScrapedMatch, ScrapeJobStatus
+from app.models import (
+    Freshness,
+    FreshnessSource,
+    Match,
+    MatchResult,
+    ScrapedMatch,
+    ScrapeJobStatus,
+    Team,
+)
 
 AUTH_HEADERS = {"X-API-Key": "test-api-key"}
 COMPETITIONS = load_config().to_competitions()
@@ -24,6 +32,8 @@ class FakeRepository:
         self.refreshed_at: datetime | None = None
         self.jobs: dict[int, ScrapeJobStatus] = {}
         self.active_jobs: dict[tuple[str, str], int] = {}
+        self.matches: list[Match] = []
+        self.freshness: list[Freshness] = []
 
     async def health(self) -> None:
         return None
@@ -68,6 +78,76 @@ class FakeRepository:
                 if query in item.home_team.casefold() or query in item.away_team.casefold()
             ]
         return results, self.refreshed_at
+
+    async def find_matches(self, query, limit=None):
+        def key(item: Match) -> tuple[datetime, int]:
+            return item.kickoff_at or datetime.max.replace(tzinfo=UTC), item.id
+
+        def plays(item: Match) -> bool:
+            needle = query.team.casefold()
+            slugs = {item.home_team_slug, item.away_team_slug}
+            if any(needle == match.home_team_slug for match in self.matches) or any(
+                needle == match.away_team_slug for match in self.matches
+            ):
+                return needle in slugs
+            names = (item.home_team, item.away_team, *slugs)
+            return any(needle in name.casefold() for name in names)
+
+        items = [
+            item
+            for item in self.matches
+            if (not query.competition or item.competition == query.competition)
+            and (not query.season or item.season == query.season)
+            and (not query.statuses or item.status in query.statuses)
+            and (query.kickoff_from is None or item.kickoff_at >= query.kickoff_from)
+            and (query.kickoff_until is None or item.kickoff_at < query.kickoff_until)
+            and (query.round is None or item.round == query.round)
+            and (not query.stage or query.stage.casefold() in item.stage.casefold())
+            and (not query.team or plays(item))
+        ]
+        items.sort(key=key, reverse=query.descending)
+        if query.after is not None:
+            after = (query.after[0] or datetime.max.replace(tzinfo=UTC), query.after[1])
+            items = [
+                item
+                for item in items
+                if (key(item) < after if query.descending else key(item) > after)
+            ]
+        return items if limit is None else items[:limit]
+
+    async def list_stages(self, competition, season):
+        return list(
+            dict.fromkeys(
+                item.stage
+                for item in self.matches
+                if item.competition == competition and item.season == season
+            )
+        )
+
+    async def get_freshness(self, competition=None, season=None):
+        return [
+            item
+            for item in self.freshness
+            if (not competition or item.competition == competition)
+            and (not season or item.season == season)
+        ]
+
+    async def list_teams(self, competition=None, season=None, q=None, limit=None, after_slug=None):
+        teams: dict[str, set[str]] = {}
+        for item in self.matches:
+            if (competition and item.competition != competition) or (
+                season and item.season != season
+            ):
+                continue
+            teams.setdefault(item.home_team_slug, set()).add(item.home_team)
+            teams.setdefault(item.away_team_slug, set()).add(item.away_team)
+        result = [
+            Team(slug=slug, name=min(aliases), aliases=sorted(aliases))
+            for slug, aliases in sorted(teams.items())
+            if (after_slug is None or slug > after_slug)
+            and (not q or q == slug or any(q.casefold() in a.casefold() for a in aliases))
+        ]
+        return result if limit is None else result[:limit]
 
     async def is_cached(self, competition: str, season: str) -> bool:
         return season in self.fetched.get(competition, set())
@@ -427,3 +507,245 @@ def test_historical_source_rejects_another_football_data_competition(tmp_path: P
     )
     assert response.status_code == 422
     assert "code BL1 is not configured" in response.json()["detail"]
+
+
+KICKOFF = datetime(2026, 8, 1, 18, 0, tzinfo=UTC)
+
+
+def slug(name: str) -> str:
+    return name.casefold().translate(str.maketrans("łó ", "lo-"))
+
+
+def fixture(
+    match_id: int,
+    home: str,
+    away: str,
+    goals: tuple[int, int] | None = None,
+    *,
+    days: int = 0,
+    status: str | None = None,
+    competition: str = "ekstraklasa",
+    season: str = "2026-2027",
+    stage: str | None = None,
+    round_number: int = 1,
+) -> Match:
+    home_goals, away_goals = goals if goals else (None, None)
+    return Match(
+        id=match_id,
+        competition=competition,
+        season=season,
+        stage=stage or f"Kolejka {round_number}",
+        round=round_number,
+        status=status or ("finished" if goals else "scheduled"),
+        kickoff_at=KICKOFF + timedelta(days=days),
+        home_team=home,
+        away_team=away,
+        home_team_slug=slug(home),
+        away_team_slug=slug(away),
+        home_goals=home_goals,
+        away_goals=away_goals,
+        source_url="http://www.90minut.pl/mecz.php?id_mecz=1",
+    )
+
+
+def client_with_matches(tmp_path: Path) -> tuple[TestClient, FakeRepository]:
+    client, repository = client_with_empty_store(tmp_path)
+    repository.matches = [
+        fixture(1, "Wisła Płock", "Legia", (2, 0), days=0),
+        fixture(2, "Lech", "Wisła Kraków", (1, 1), days=0),
+        fixture(3, "Legia", "Lech", (0, 1), days=7, round_number=2),
+        fixture(4, "Wisła Kraków", "Wisła Płock", days=14, round_number=3),
+        fixture(5, "Lech", "Wisła Płock", days=14, round_number=3, status="inactive"),
+    ]
+    return client, repository
+
+
+def ids(response) -> list[int]:
+    assert response.status_code == 200, response.json()
+    return [item["id"] for item in response.json()["data"]]
+
+
+def test_matches_include_every_status_with_null_scores_for_fixtures(tmp_path: Path) -> None:
+    client, _ = client_with_matches(tmp_path)
+    data = client.get("/api/v1/matches").json()["data"]
+    assert [item["id"] for item in data] == [1, 2, 3, 4, 5]
+    scheduled, inactive = data[3], data[4]
+    assert (scheduled["status"], inactive["status"]) == ("scheduled", "inactive")
+    assert scheduled["home_goals"] is None and scheduled["home_cards"] is None
+    assert data[0]["kickoff_at"] == "2026-08-01T18:00:00Z"
+    assert "home_score" not in data[0] and "played_at" not in data[0]
+
+
+def test_matches_filters(tmp_path: Path) -> None:
+    client, _ = client_with_matches(tmp_path)
+    assert ids(client.get("/api/v1/matches?status=scheduled,inactive")) == [4, 5]
+    assert ids(client.get("/api/v1/matches?date_from=2026-08-08&date_to=2026-08-08")) == [3]
+    assert ids(client.get("/api/v1/matches?date_to=2026-08-01T18:00:00Z")) == [1, 2]
+    assert ids(client.get("/api/v1/matches?round=3&order=desc")) == [5, 4]
+    assert ids(client.get("/api/v1/matches?stage=kolejka%202")) == [3]
+    # An exact slug selects one team; anything else is a name substring.
+    assert ids(client.get("/api/v1/matches?team=wisla-plock")) == [1, 4, 5]
+    assert ids(client.get("/api/v1/matches?team=Wisła")) == [1, 2, 4, 5]
+    assert ids(client.get("/api/v1/matches?competition=premier-league")) == []
+
+
+def test_matches_reject_invalid_filters_with_valid_values(tmp_path: Path) -> None:
+    client, _ = client_with_matches(tmp_path)
+    status = client.get("/api/v1/matches?status=finished,live")
+    assert status.status_code == 422
+    assert status.json()["detail"]["invalid"] == ["live"]
+    assert status.json()["detail"]["valid_values"] == ["finished", "scheduled", "inactive"]
+    assert client.get("/api/v1/matches?date_from=yesterday").status_code == 422
+    assert client.get("/api/v1/matches?competition=la-liga").status_code == 404
+    season = client.get("/api/v1/matches?competition=ekstraklasa&season=2019-2020")
+    assert season.status_code == 404
+    assert season.json()["detail"]["valid_values"] == ["2026-2027", "2025-2026"]
+    assert client.get("/api/v1/matches?limit=201").status_code == 422
+
+
+def test_matches_cursor_pagination(tmp_path: Path) -> None:
+    client, _ = client_with_matches(tmp_path)
+    seen: list[int] = []
+    url = "/api/v1/matches?order=desc&limit=2"
+    cursor = None
+    for _ in range(5):
+        response = client.get(url + (f"&cursor={cursor}" if cursor else ""))
+        assert response.json()["pagination"]["limit"] == 2
+        seen += ids(response)
+        cursor = response.json()["pagination"]["next_cursor"]
+        if cursor is None:
+            break
+    assert seen == [5, 4, 3, 2, 1]
+
+    first = client.get("/api/v1/matches?limit=2").json()["pagination"]["next_cursor"]
+    # The page size may change; the filters may not.
+    assert ids(client.get(f"/api/v1/matches?limit=3&cursor={first}")) == [3, 4, 5]
+    other = client.get(f"/api/v1/matches?limit=2&status=finished&cursor={first}")
+    assert other.status_code == 400
+    assert "different filters" in other.json()["detail"]["message"]
+    assert client.get("/api/v1/matches?cursor=not-a-cursor").status_code == 400
+
+
+def test_matches_fields_select_compact_items(tmp_path: Path) -> None:
+    client, _ = client_with_matches(tmp_path)
+    response = client.get("/api/v1/matches?fields=home_team_slug,away_goals&limit=1")
+    assert response.json()["data"] == [{"id": 1, "home_team_slug": "wisla-plock", "away_goals": 0}]
+    invalid = client.get("/api/v1/matches?fields=id,score")
+    assert invalid.status_code == 422
+    assert invalid.json()["detail"]["invalid"] == ["score"]
+    assert "kickoff_at" in invalid.json()["detail"]["valid_values"]
+
+
+def test_freshness_is_reported_per_competition_season(tmp_path: Path) -> None:
+    client, repository = client_with_matches(tmp_path)
+    fetched = datetime(2026, 8, 1, 20, 0, tzinfo=UTC)
+    repository.freshness = [
+        Freshness(
+            competition="ekstraklasa",
+            season="2026-2027",
+            data_as_of=fetched,
+            next_update_at=fetched + timedelta(days=1),
+            automatic_refresh=True,
+            scheduler_state="idle",
+            source=FreshnessSource(provider="90minut", url="http://www.90minut.pl/liga/1/l.html"),
+        ),
+        Freshness(
+            competition="premier-league",
+            season="2026-2027",
+            data_as_of=fetched + timedelta(hours=5),
+            next_update_at=None,
+            automatic_refresh=False,
+            scheduler_state="disabled",
+            source=FreshnessSource(provider="football-data", url="https://example.invalid"),
+        ),
+    ]
+    freshness = client.get("/api/v1/matches?competition=ekstraklasa").json()["freshness"]
+    assert freshness == [
+        {
+            "competition": "ekstraklasa",
+            "season": "2026-2027",
+            "data_as_of": "2026-08-01T20:00:00Z",
+            "next_update_at": "2026-08-02T20:00:00Z",
+            "automatic_refresh": True,
+            "scheduler_state": "idle",
+            "source": {"provider": "90minut", "url": "http://www.90minut.pl/liga/1/l.html"},
+        }
+    ]
+    everything = client.get("/api/v1/matches").json()["freshness"]
+    assert [item["competition"] for item in everything] == ["ekstraklasa", "premier-league"]
+
+
+def test_standings_rank_by_points_goal_difference_goals_and_name(tmp_path: Path) -> None:
+    client, repository = client_with_empty_store(tmp_path)
+    repository.matches = [
+        fixture(1, "Alpha", "Delta", (3, 0)),
+        fixture(2, "Bravo", "Echo", (1, 0)),
+        fixture(3, "Charlie", "Foxtrot", (2, 1)),
+        fixture(4, "Delta", "Bravo", (0, 0), days=7),
+        fixture(5, "Echo", "Charlie", (0, 0), days=7),
+        fixture(6, "Foxtrot", "Alpha", (1, 1), days=7),
+        fixture(7, "Alpha", "Bravo", days=14),
+        fixture(8, "Hotel", "Golf", (0, 0), days=21),
+    ]
+    response = client.get("/api/v1/standings?competition=ekstraklasa")
+    assert response.status_code == 200
+    body = response.json()
+    assert (body["season"], body["stage"]) == ("2026-2027", None)
+    table = [(row["team_slug"], row["points"], row["goal_difference"]) for row in body["data"]]
+    # Charlie beats Bravo on goals for; Golf beats Hotel on name after a full tie.
+    assert table == [
+        ("alpha", 4, 3),
+        ("charlie", 4, 1),
+        ("bravo", 4, 1),
+        ("golf", 1, 0),
+        ("hotel", 1, 0),
+        ("foxtrot", 1, -1),
+        ("echo", 1, -1),
+        ("delta", 1, -3),
+    ]
+    assert [row["position"] for row in body["data"]] == list(range(1, 9))
+    alpha = body["data"][0]
+    assert (alpha["played"], alpha["won"], alpha["drawn"], alpha["form"]) == (2, 1, 1, "DW")
+    compact_rows = client.get("/api/v1/standings?competition=ekstraklasa&fields=points").json()
+    assert compact_rows["data"][0] == {"team_slug": "alpha", "points": 4}
+
+
+def test_cup_standings_require_a_stage(tmp_path: Path) -> None:
+    client, repository = client_with_empty_store(tmp_path)
+    repository.matches = [
+        fixture(1, "A", "B", (1, 0), competition="europa-league", stage="Grupa A"),
+        fixture(2, "C", "D", (1, 0), competition="europa-league", stage="Grupa B"),
+    ]
+    missing = client.get("/api/v1/standings?competition=europa-league")
+    assert missing.status_code == 422
+    assert missing.json()["detail"]["valid_values"] == ["Grupa A", "Grupa B"]
+    group = client.get("/api/v1/standings?competition=europa-league&stage=grupa%20b").json()
+    assert [row["team_slug"] for row in group["data"]] == ["c", "d"]
+    assert group["stage"] == "grupa b"
+
+
+def test_standings_validate_competition_and_season(tmp_path: Path) -> None:
+    client, _ = client_with_empty_store(tmp_path)
+    assert client.get("/api/v1/standings").status_code == 422
+    assert client.get("/api/v1/standings?competition=la-liga").status_code == 404
+    assert (
+        client.get("/api/v1/standings?competition=ekstraklasa&season=2019-2020").status_code == 404
+    )
+
+
+def test_teams_list_aliases_with_cursor_pagination(tmp_path: Path) -> None:
+    client, repository = client_with_matches(tmp_path)
+    repository.matches.append(
+        fixture(6, "Legia Warszawa", "Lech", (1, 0), days=21).model_copy(
+            update={"home_team_slug": "legia"}
+        )
+    )
+    first = client.get("/api/v1/teams?limit=2").json()
+    assert [team["slug"] for team in first["data"]] == ["lech", "legia"]
+    assert first["data"][1]["aliases"] == ["Legia", "Legia Warszawa"]
+    cursor = first["pagination"]["next_cursor"]
+    rest = client.get(f"/api/v1/teams?limit=10&cursor={cursor}").json()
+    assert [team["slug"] for team in rest["data"]] == ["wisla-krakow", "wisla-plock"]
+    assert rest["pagination"]["next_cursor"] is None
+    assert client.get(f"/api/v1/teams?q=lech&cursor={cursor}").status_code == 400
+    assert [t["slug"] for t in client.get("/api/v1/teams?q=Warszawa").json()["data"]] == ["legia"]
