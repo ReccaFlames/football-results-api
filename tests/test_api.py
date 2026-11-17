@@ -1,8 +1,11 @@
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 import app.main as main_module
 from app.competitions import competition_summary, source_from_url
@@ -13,6 +16,9 @@ from app.models import (
     FreshnessSource,
     Match,
     MatchResult,
+    MessageError,
+    ParameterError,
+    RequestValidationErrorResponse,
     ScrapedMatch,
     ScrapeJobStatus,
     Team,
@@ -749,3 +755,118 @@ def test_teams_list_aliases_with_cursor_pagination(tmp_path: Path) -> None:
     assert rest["pagination"]["next_cursor"] is None
     assert client.get(f"/api/v1/teams?q=lech&cursor={cursor}").status_code == 400
     assert [t["slug"] for t in client.get("/api/v1/teams?q=Warszawa").json()["data"]] == ["legia"]
+
+
+ERROR_MODELS = {
+    model.__name__: model
+    for model in (MessageError, ParameterError, RequestValidationErrorResponse)
+}
+
+
+def documented_error_models(operation: dict, status_code: int) -> list[type]:
+    schema = operation["responses"][str(status_code)]["content"]["application/json"]["schema"]
+    refs = [item["$ref"] for item in schema.get("anyOf", [schema])]
+    return [ERROR_MODELS[ref.rsplit("/", 1)[-1]] for ref in refs]
+
+
+def matches_one_of(models: list[type], body: object) -> bool:
+    for model in models:
+        try:
+            model.model_validate(body)
+        except ValidationError:
+            continue
+        return True
+    return False
+
+
+def test_every_operation_has_a_unique_snake_case_operation_id_and_tag() -> None:
+    routes = [route for route in app.routes if isinstance(route, APIRoute)]
+    assert routes
+    operation_ids = [route.operation_id for route in routes]
+    assert all(operation_ids), [route.path for route in routes if not route.operation_id]
+    assert len(set(operation_ids)) == len(operation_ids)
+    assert all(re.fullmatch(r"[a-z]+(_[a-z]+)*", item) for item in operation_ids)
+    declared_tags = {tag["name"] for tag in app.openapi()["tags"]}
+    for path in app.openapi()["paths"].values():
+        for operation in path.values():
+            assert operation["operationId"] in operation_ids
+            assert operation["summary"] and operation["description"]
+            assert len(operation["tags"]) == 1 and operation["tags"][0] in declared_tags
+
+
+def test_openapi_documents_response_schemas_and_error_examples() -> None:
+    paths = app.openapi()["paths"]
+    for path, model in [
+        ("/api/v1/matches", "MatchesResponse"),
+        ("/api/v1/standings", "StandingsResponse"),
+        ("/api/v1/teams", "TeamsResponse"),
+    ]:
+        schema = paths[path]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+        assert schema == {"$ref": f"#/components/schemas/{model}"}
+        assert all(p.get("description") for p in paths[path]["get"]["parameters"])
+    history = paths["/api/v1/results/history/fetch"]["post"]["responses"]
+    assert history["202"]["content"]["application/json"]["schema"]["$ref"].endswith("JobAccepted")
+    assert paths["/api/v1/results"]["get"]["deprecated"] is True
+
+    for path in paths.values():
+        for operation in path.values():
+            for code, response in operation["responses"].items():
+                if int(code) < 400:
+                    continue
+                examples = response["content"]["application/json"]["examples"]
+                models = documented_error_models(operation, int(code))
+                for name, example in examples.items():
+                    assert matches_one_of(models, example["value"]), (
+                        operation["operationId"],
+                        name,
+                    )
+
+
+def test_error_bodies_match_the_documented_error_models(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _ = client_with_matches(tmp_path)
+    cursor = client.get("/api/v1/matches?limit=1").json()["pagination"]["next_cursor"]
+    requests = [
+        ("get", "/api/v1/matches?cursor=nope", None, {}),
+        ("get", f"/api/v1/matches?status=finished&cursor={cursor}", None, {}),
+        ("get", "/api/v1/matches?competition=la-liga", None, {}),
+        ("get", "/api/v1/matches?competition=ekstraklasa&season=2019-2020", None, {}),
+        ("get", "/api/v1/matches?fields=score", None, {}),
+        ("get", "/api/v1/matches?status=live", None, {}),
+        ("get", "/api/v1/matches?date_to=soon", None, {}),
+        ("get", "/api/v1/matches?limit=0", None, {}),
+        ("get", "/api/v1/standings?competition=europa-league", None, {}),
+        ("get", "/api/v1/standings", None, {}),
+        ("get", f"/api/v1/teams?q=x&cursor={cursor}", None, {}),
+        ("get", "/api/v1/results?competition=la-liga", None, {}),
+        ("get", "/api/v1/jobs/999", None, AUTH_HEADERS),
+        ("get", "/api/v1/jobs/1", None, {}),
+        ("post", "/api/v1/results/refresh", {"competition": "la-liga"}, AUTH_HEADERS),
+        ("post", "/api/v1/results/refresh", {}, AUTH_HEADERS),
+        (
+            "post",
+            "/api/v1/results/history/fetch",
+            {"competition": "ekstraklasa", "season": "2019-2020"},
+            AUTH_HEADERS,
+        ),
+    ]
+    paths = app.openapi()["paths"]
+    for method, url, body, headers in requests:
+        response = client.request(method, url, json=body, headers=headers)
+        route = next(
+            route
+            for route in app.routes
+            if isinstance(route, APIRoute)
+            and method.upper() in route.methods
+            and route.path_regex.match(url.split("?")[0])
+        )
+        operation = paths[route.path_format][method]
+        assert str(response.status_code) in operation["responses"], (url, response.status_code)
+        models = documented_error_models(operation, response.status_code)
+        assert matches_one_of(models, response.json()), (url, response.json())
+
+    monkeypatch.setattr(main_module.settings, "api_keys", "")
+    disabled = client.post("/api/v1/results/refresh", json={"competition": "ekstraklasa"})
+    assert disabled.status_code == 503
+    MessageError.model_validate(disabled.json())

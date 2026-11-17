@@ -16,6 +16,7 @@ API.
 | Path | Responsibility |
 | --- | --- |
 | `app/main.py` | FastAPI app and all HTTP endpoints; module-level `store` singleton |
+| `app/api_docs.py` | OpenAPI metadata: tags, shared query parameters, documented error responses |
 | `app/contract.py` | API v1.1 request rules: opaque cursors, `fields=`, status and date parsing, limits |
 | `app/standings.py` | Pure league-table calculation and tie-breakers from finished matches |
 | `app/scheduler.py` | Scheduler loop (`python -m app.scheduler`): seed → heartbeat → season checks (discovery/rollover) → claim due seasons → scrape → persist |
@@ -83,6 +84,12 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
   `(kickoff_at, id)` (teams: slug) bound to a hash of the filters; `fields=` validates against the
   item model. Freshness is per competition-season, never a maximum across competitions. Later
   surfaces (OpenAPI, llms.txt, CLI, skill, MCP) copy this contract, so change it deliberately.
+- Every route declares a snake_case `operation_id`, one tag from `app/api_docs.py`, a `summary`,
+  a "when to use" `description`, parameter descriptions, and `responses=` for each error status it
+  can return (models in `app/models.py`, examples in `app/api_docs.py`). Operation IDs are public
+  names for the CLI, skill, and MCP; never rename one. `tests/test_api.py` checks that IDs are
+  unique and that real error bodies match the documented models. Routes that return
+  `JSONResponse` still declare `response_model` so the schema is documented.
 - Statistics that a provider cannot supply must stay `null` — never default to `0`.
 - 90minut pages are ISO-8859-2 and use Polish month names with Europe/Warsaw time.
 - football-data.org is throttled (`FOOTBALL_DATA_MIN_REQUEST_INTERVAL_SECONDS`, default 6s) and

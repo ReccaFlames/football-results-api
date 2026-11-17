@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -134,19 +134,21 @@ MATCH_STATUSES: tuple[str, ...] = ("finished", "scheduled", "inactive")
 class Match(BaseModel):
     """A fixture of any status (API v1.1). Unknown values are null, never 0."""
 
-    id: int
+    id: int = Field(description="Stable match ID; kept across refreshes")
     competition: str
     season: str
     stage: str
     round: int | None = None
-    status: MatchStatus
+    status: MatchStatus = Field(
+        description="finished, scheduled, or inactive (postponed, suspended, or cancelled)"
+    )
     kickoff_at: datetime | None = None
     home_team: str
     away_team: str
     home_team_slug: str
     away_team_slug: str
-    home_goals: int | None = None
-    away_goals: int | None = None
+    home_goals: int | None = Field(default=None, description="Full-time goals; null until finished")
+    away_goals: int | None = Field(default=None, description="Full-time goals; null until finished")
     home_goals_first_half: int | None = None
     away_goals_first_half: int | None = None
     home_goals_second_half: int | None = None
@@ -187,8 +189,12 @@ class FreshnessSource(BaseModel):
 class Freshness(BaseModel):
     competition: str
     season: str
-    data_as_of: datetime | None
-    next_update_at: datetime | None
+    data_as_of: datetime | None = Field(
+        description="Last successful import; null if the season was never fetched"
+    )
+    next_update_at: datetime | None = Field(
+        description="Next scheduled check; null when the season is not refreshed automatically"
+    )
     automatic_refresh: bool
     scheduler_state: str | None
     source: FreshnessSource
@@ -196,7 +202,9 @@ class Freshness(BaseModel):
 
 class Pagination(BaseModel):
     limit: int
-    next_cursor: str | None
+    next_cursor: str | None = Field(
+        description="Pass as cursor with the same filters for the next page; null on the last page"
+    )
 
 
 class MatchesResponse(BaseModel):
@@ -217,7 +225,7 @@ class StandingRow(BaseModel):
     goals_against: int
     goal_difference: int
     points: int
-    form: str
+    form: str = Field(description="Up to five latest results, newest first (W, D, L)")
 
 
 class StandingsResponse(BaseModel):
@@ -268,12 +276,81 @@ class ScrapeJobStatus(BaseModel):
 class RefreshRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    competition: str = Field(examples=["ekstraklasa"])
-    season: str | None = Field(default=None, pattern=SEASON_PATTERN)
+    competition: str = Field(description="Competition slug", examples=["ekstraklasa"])
+    season: str | None = Field(
+        default=None,
+        pattern=SEASON_PATTERN,
+        description="Must be the current season; omit to use it",
+        examples=["2026-2027"],
+    )
 
 
 class HistoricalFetchRequest(BaseModel):
-    competition: str
-    season: str = Field(pattern=SEASON_PATTERN)
-    source_url: str | None = None
-    force_refresh: bool = False
+    competition: str = Field(description="Competition slug", examples=["ekstraklasa"])
+    season: str = Field(
+        pattern=SEASON_PATTERN,
+        description="A non-current season in the competition's season format",
+        examples=["2025-2026"],
+    )
+    source_url: str | None = Field(
+        default=None,
+        description=(
+            "Source for a season that is not configured; must be an allowed URL of a provider "
+            "already configured for the competition"
+        ),
+        examples=["http://www.90minut.pl/liga/1/liga13482.html"],
+    )
+    force_refresh: bool = Field(
+        default=False, description="Queue a new fetch even when the season is already stored"
+    )
+
+
+class HealthStatus(BaseModel):
+    status: Literal["ok"]
+    database: Literal["ok"]
+    scheduler: Literal["ok", "stale", "not_started"]
+
+
+# Error bodies (documentation only). These describe the current HTTPException payloads;
+# RFC 9457 problem details replace them in roadmap step 11.
+
+
+class MessageError(BaseModel):
+    """An error with a plain-text message."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    detail: str = Field(examples=["Unknown competition: la-liga"])
+
+
+class ParameterErrorDetail(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    message: str
+    parameter: str = Field(description="The request parameter to correct")
+    invalid: list[str] | None = Field(default=None, description="The rejected values")
+    valid_values: list[str] | None = Field(default=None, description="Values that are accepted")
+    hint: str | None = Field(default=None, description="How to correct the request")
+    examples: list[str] | None = Field(default=None, description="Accepted value examples")
+
+
+class ParameterError(BaseModel):
+    """An error about one request parameter; optional keys are omitted when not relevant."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    detail: ParameterErrorDetail
+
+
+class RequestValidationIssue(BaseModel):
+    loc: list[str | int]
+    msg: str
+    type: str
+    input: Any = None
+    ctx: dict[str, Any] | None = None
+
+
+class RequestValidationErrorResponse(BaseModel):
+    """FastAPI request validation failure (wrong type, pattern, range, or missing value)."""
+
+    detail: list[RequestValidationIssue]

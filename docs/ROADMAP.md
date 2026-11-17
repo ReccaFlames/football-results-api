@@ -169,11 +169,11 @@ How to use this list:
   - [x] `fields=` parameter for compact responses
   - [x] Freshness metadata: `data_as_of`, `next_update_at`, `source`
   - [x] `/results` kept for backward compatibility
-- [ ] **10. OpenAPI polish**
-  - [ ] Explicit `operation_id` on every endpoint
-  - [ ] Tags and summaries that say when to use each endpoint
-  - [ ] Parameter descriptions and examples
-  - [ ] Documented error responses
+- [x] **10. OpenAPI polish**
+  - [x] Explicit `operation_id` on every endpoint
+  - [x] Tags and summaries that say when to use each endpoint
+  - [x] Parameter descriptions and examples
+  - [x] Documented error responses
 - [ ] **11. Errors, rate limits and caching**
   - [ ] RFC 9457 `application/problem+json` with `hint` and `valid_values`
   - [ ] Rate limiting with `RateLimit` and `Retry-After` headers

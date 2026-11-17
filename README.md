@@ -234,19 +234,35 @@ go through Alembic.
 
 ## API
 
-| Method | Path | Purpose |
-| --- | --- | --- |
-| GET | `/health` | Database connectivity and scheduler heartbeat (`ok`, `stale`, or `not_started`) |
-| GET | `/api/v1/competitions` | Competitions with `season_format`, `season_start_month`, available/fetched seasons, and scheduler state; `current_season` is `null` when none is designated |
-| GET | `/api/v1/matches` | Finished, scheduled, and inactive matches with cursor pagination, `fields=`, and per-season freshness; filters: `competition`, `season`, `status`, `date_from`, `date_to`, `team`, `round`, `stage`, `order` |
-| GET | `/api/v1/standings` | League table computed from stored finished matches for one competition-season (`stage` required for cups) |
-| GET | `/api/v1/teams` | Teams with canonical slugs and aliases; filters: `competition`, `season`, `q`; cursor pagination |
-| GET | `/api/v1/results` | Finished matches with stable `id` and canonical team slugs; filters: `competition`, `season`, `round`, `stage`, `team` (kept unchanged for backward compatibility; prefer `/matches`) |
-| POST | `/api/v1/results/refresh` | Queue a current-season refresh (`202 Accepted`; requires `X-API-Key`) |
-| POST | `/api/v1/results/history/fetch` | Queue a non-current-season fetch (`202 Accepted`; requires `X-API-Key`); cached results return immediately |
-| GET | `/api/v1/jobs/{job_id}` | Get queued, running, completed, or failed scrape-job status (`X-API-Key` required) |
+| Method | Path | Operation ID | Purpose |
+| --- | --- | --- | --- |
+| GET | `/health` | `get_health` | Database connectivity and scheduler heartbeat (`ok`, `stale`, or `not_started`) |
+| GET | `/api/v1/competitions` | `list_competitions` | Competitions with `season_format`, `season_start_month`, available/fetched seasons, and scheduler state; `current_season` is `null` when none is designated |
+| GET | `/api/v1/matches` | `list_matches` | Finished, scheduled, and inactive matches with cursor pagination, `fields=`, and per-season freshness; filters: `competition`, `season`, `status`, `date_from`, `date_to`, `team`, `round`, `stage`, `order` |
+| GET | `/api/v1/standings` | `get_standings` | League table computed from stored finished matches for one competition-season (`stage` required for cups) |
+| GET | `/api/v1/teams` | `list_teams` | Teams with canonical slugs and aliases; filters: `competition`, `season`, `q`; cursor pagination |
+| GET | `/api/v1/results` | `list_results` | Deprecated: finished matches with stable `id` and canonical team slugs; filters: `competition`, `season`, `round`, `stage`, `team` (kept unchanged for backward compatibility; use `/matches`) |
+| POST | `/api/v1/results/refresh` | `request_refresh` | Queue a current-season refresh (`202 Accepted`; requires `X-API-Key`) |
+| POST | `/api/v1/results/history/fetch` | `fetch_historical_season` | Queue a non-current-season fetch (`202 Accepted`; requires `X-API-Key`); cached results return immediately |
+| GET | `/api/v1/jobs/{job_id}` | `get_job` | Get queued, running, completed, or failed scrape-job status (`X-API-Key` required) |
 
-Interactive documentation is available at `/docs`.
+Interactive documentation is available at `/docs`; the OpenAPI document is at `/openapi.json`.
+
+### OpenAPI contract
+
+The OpenAPI document is the source for the agent-facing surfaces (llms.txt, CLI, skill, MCP):
+
+- Every operation has a stable snake_case `operationId` (table above), one tag, a summary, and a
+  description that says when to use it. Tags group tasks: `Competitions` (competitions, teams),
+  `Matches`, `Standings`, `Data refresh` (refresh, history fetch, jobs; API key), and `System`.
+- Query parameters have descriptions and examples. `/api/v1/results` is marked `deprecated`.
+- Error responses are documented per status with examples. Bodies currently have three shapes:
+  - `MessageError`: `{"detail": "Unknown competition: la-liga"}`.
+  - `ParameterError`: `{"detail": {"message", "parameter", "invalid"?, "valid_values"?,
+    "hint"?, "examples"?}}` for cursor (`400`), unknown season (`404`), and `fields`, `status`,
+    date, and cup `stage` errors (`422`).
+  - `RequestValidationErrorResponse`: FastAPI's `{"detail": [{"loc", "msg", "type", ...}]}` for
+    `422` type, range, pattern, or missing-value errors.
 
 ### Examples
 

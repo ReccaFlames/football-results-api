@@ -3,17 +3,17 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
-from typing import Literal
+from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Path, Query, Response
 from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
 
+from app import api_docs as docs
 from app.competitions import provider_competition_code, source_from_url
 from app.config import load_config, settings
 from app.contract import (
     DEFAULT_LIMIT,
-    MAX_LIMIT,
     ContractError,
     compact,
     encode_cursor,
@@ -28,13 +28,17 @@ from app.database import session_factory
 from app.models import (
     Competition,
     CompetitionSummary,
+    HealthStatus,
     HistoricalFetchRequest,
     JobAccepted,
     Match,
     MatchesResponse,
     MatchQuery,
+    MessageError,
     Pagination,
+    ParameterError,
     RefreshRequest,
+    RequestValidationErrorResponse,
     ResultsResponse,
     ScrapeJobStatus,
     StandingRow,
@@ -102,11 +106,32 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(
-    title="Football Results API", version=version("football-results-api"), lifespan=lifespan
+    title="Football Results API",
+    version=version("football-results-api"),
+    description=docs.API_DESCRIPTION,
+    openapi_tags=docs.OPENAPI_TAGS,
+    lifespan=lifespan,
 )
 
 
-@app.get("/health")
+@app.get(
+    "/health",
+    operation_id="get_health",
+    tags=[docs.TAG_SYSTEM],
+    summary="Check service health",
+    description=(
+        "Use for monitoring. Reports database connectivity and whether the scheduler heartbeat "
+        "is recent (`ok`), old (`stale`), or missing (`not_started`)."
+    ),
+    response_model=HealthStatus,
+    responses={
+        503: docs.error(
+            "The database is unreachable",
+            MessageError,
+            database=docs.example("Database down", "Database unavailable"),
+        )
+    },
+)
 async def health() -> dict[str, str]:
     try:
         await store.health()
@@ -120,18 +145,47 @@ async def health() -> dict[str, str]:
     return {"status": "ok", "database": "ok", "scheduler": scheduler_status}
 
 
-@app.get("/api/v1/competitions", response_model=list[CompetitionSummary])
+@app.get(
+    "/api/v1/competitions",
+    operation_id="list_competitions",
+    tags=[docs.TAG_COMPETITIONS],
+    summary="List competitions and their seasons",
+    description=(
+        "Use first to discover competition slugs, the current season, available and fetched "
+        "seasons, the season format, and scheduler state. Not paginated."
+    ),
+    response_model=list[CompetitionSummary],
+)
 async def get_competitions() -> list[CompetitionSummary]:
     return await store.list_competitions()
 
 
-@app.get("/api/v1/results", response_model=ResultsResponse)
+@app.get(
+    "/api/v1/results",
+    operation_id="list_results",
+    tags=[docs.TAG_MATCHES],
+    summary="List finished matches (legacy)",
+    description=(
+        "Deprecated: use `list_matches` with `status=finished`. Kept unchanged for existing "
+        "clients. Returns every finished match matching the filters, without pagination."
+    ),
+    deprecated=True,
+    response_model=ResultsResponse,
+    responses={
+        404: docs.error(
+            "Unknown competition",
+            MessageError,
+            unknown_competition=docs.UNKNOWN_COMPETITION_EXAMPLE,
+        ),
+        422: docs.REQUEST_VALIDATION,
+    },
+)
 async def get_results(
-    competition: str | None = None,
-    season: str | None = Query(default=None, pattern=SEASON_PATTERN),
-    round_number: int | None = Query(default=None, alias="round", ge=1),
-    stage: str | None = None,
-    team: str | None = None,
+    competition: docs.CompetitionFilter = None,
+    season: docs.SeasonFilter = None,
+    round_number: docs.RoundFilter = None,
+    stage: docs.StageFilter = None,
+    team: docs.TeamFilter = None,
 ) -> ResultsResponse:
     if competition and await store.get_competition(competition) is None:
         raise HTTPException(status_code=404, detail=f"Unknown competition: {competition}")
@@ -150,22 +204,92 @@ async def get_results(
     )
 
 
-@app.get("/api/v1/matches", response_model=MatchesResponse)
-async def get_matches(
-    competition: str | None = None,
-    season: str | None = Query(default=None, pattern=SEASON_PATTERN),
-    status: str | None = Query(
-        default=None, description="Comma-separated: finished, scheduled, inactive"
+@app.get(
+    "/api/v1/matches",
+    operation_id="list_matches",
+    tags=[docs.TAG_MATCHES],
+    summary="Find matches: results, fixtures, and postponed games",
+    description=(
+        "Use for any question about matches: results, upcoming fixtures, a team's recent form, "
+        "or a round. Combine `status`, date range, `team`, `round`, and `stage`; use "
+        "`order=desc` with a small `limit` for the latest matches. Items contain every Match "
+        "field (unknown values are null, never 0) unless `fields` selects a subset; `id` is "
+        "always included. `freshness` reports each competition-season in the filter."
     ),
-    date_from: str | None = Query(default=None, description="ISO date or datetime, inclusive"),
-    date_to: str | None = Query(default=None, description="ISO date or datetime, inclusive"),
-    team: str | None = Query(default=None, description="Canonical team slug, or name substring"),
-    round_number: int | None = Query(default=None, alias="round", ge=1),
-    stage: str | None = None,
-    order: Literal["asc", "desc"] = "asc",
-    limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
-    cursor: str | None = None,
-    fields: str | None = Query(default=None, description="Comma-separated Match fields"),
+    response_model=MatchesResponse,
+    responses={
+        400: docs.INVALID_CURSOR,
+        404: docs.UNKNOWN_COMPETITION_OR_SEASON,
+        422: docs.error(
+            "Invalid `fields`, `status`, or date (with `invalid` and `valid_values` or "
+            "`examples`), or request validation failed",
+            ParameterError | RequestValidationErrorResponse,
+            unknown_fields=docs.unknown_fields_example(list(Match.model_fields)),
+            unknown_status=docs.example(
+                "Unknown status",
+                {
+                    "message": "Unknown match status",
+                    "parameter": "status",
+                    "invalid": ["played"],
+                    "valid_values": ["finished", "scheduled", "inactive"],
+                },
+            ),
+            invalid_date=docs.example(
+                "Invalid date",
+                {
+                    "message": "date_from must be an ISO 8601 date or datetime",
+                    "parameter": "date_from",
+                    "invalid": ["01.08.2026"],
+                    "examples": ["2026-08-01", "2026-08-01T18:00:00+02:00"],
+                },
+            ),
+            validation=docs.VALIDATION_EXAMPLE,
+        ),
+    },
+)
+async def get_matches(
+    competition: docs.CompetitionFilter = None,
+    season: docs.SeasonFilter = None,
+    status: Annotated[
+        str | None,
+        Query(
+            description="Comma-separated statuses: finished, scheduled, inactive (default: all)",
+            examples=["finished", "scheduled,inactive"],
+        ),
+    ] = None,
+    date_from: Annotated[
+        str | None,
+        Query(
+            description="Earliest kickoff, inclusive: ISO date or datetime (naive values are UTC)",
+            examples=["2026-08-01"],
+        ),
+    ] = None,
+    date_to: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Latest kickoff, inclusive: ISO date (the whole UTC day) or datetime "
+                "(naive values are UTC)"
+            ),
+            examples=["2026-08-31"],
+        ),
+    ] = None,
+    team: docs.TeamFilter = None,
+    round_number: docs.RoundFilter = None,
+    stage: docs.StageFilter = None,
+    order: Annotated[
+        Literal["asc", "desc"],
+        Query(description="Kickoff order; matches without a kickoff sort last"),
+    ] = "asc",
+    limit: docs.Limit = DEFAULT_LIMIT,
+    cursor: docs.Cursor = None,
+    fields: Annotated[
+        str | None,
+        Query(
+            description="Comma-separated Match fields for compact items; `id` is always included",
+            examples=["kickoff_at,home_team_slug,away_team_slug,home_goals,away_goals"],
+        ),
+    ] = None,
 ) -> Response:
     selected = _contract(lambda: parse_fields(fields, Match, always=("id",)))
     statuses = _contract(lambda: parse_statuses(status))
@@ -205,14 +329,72 @@ async def get_matches(
     )
 
 
-@app.get("/api/v1/standings", response_model=StandingsResponse)
-async def get_standings(
-    competition: str,
-    season: str | None = Query(default=None, pattern=SEASON_PATTERN),
-    stage: str | None = Query(
-        default=None, description="Stage substring; required for cup competitions"
+@app.get(
+    "/api/v1/standings",
+    operation_id="get_standings",
+    tags=[docs.TAG_STANDINGS],
+    summary="Get the league table of a competition-season",
+    description=(
+        "Use for table positions, points, and recent form. Computed from stored finished "
+        "matches: 3 points for a win, 1 for a draw; ties are broken by goal difference, goals "
+        "for, wins, then team name (head-to-head is not applied). Cup competitions require "
+        "`stage` (for example a group). Not paginated."
     ),
-    fields: str | None = Query(default=None, description="Comma-separated StandingRow fields"),
+    response_model=StandingsResponse,
+    responses={
+        404: docs.UNKNOWN_COMPETITION_OR_SEASON,
+        422: docs.error(
+            "Invalid `fields`, a cup without `stage`, or a competition without a current "
+            "season (each with `valid_values`), or request validation failed",
+            ParameterError | RequestValidationErrorResponse,
+            unknown_fields=docs.unknown_fields_example(list(StandingRow.model_fields)),
+            stage_required=docs.example(
+                "Cup needs a stage",
+                {
+                    "message": (
+                        "Standings for a cup competition need a stage (for example a group)"
+                    ),
+                    "parameter": "stage",
+                    "valid_values": ["Faza ligowa", "Runda eliminacyjna"],
+                },
+            ),
+            validation=docs.example(
+                "Missing competition",
+                [{"loc": ["query", "competition"], "msg": "Field required", "type": "missing"}],
+            ),
+        ),
+    },
+)
+async def get_standings(
+    competition: Annotated[
+        str,
+        Query(description="Competition slug from `list_competitions`", examples=["ekstraklasa"]),
+    ],
+    season: Annotated[
+        str | None,
+        Query(
+            pattern=SEASON_PATTERN,
+            description="Season in the competition's format; defaults to the current season",
+            examples=["2026-2027"],
+        ),
+    ] = None,
+    stage: Annotated[
+        str | None,
+        Query(
+            description="Stage substring; required for cup competitions",
+            examples=["Group A"],
+        ),
+    ] = None,
+    fields: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Comma-separated StandingRow fields for compact rows; `team_slug` is always "
+                "included"
+            ),
+            examples=["position,points,form"],
+        ),
+    ] = None,
 ) -> Response:
     selected = _contract(lambda: parse_fields(fields, StandingRow, always=("team_slug",)))
     found = await _require_season(competition, season)
@@ -251,13 +433,35 @@ async def get_standings(
     )
 
 
-@app.get("/api/v1/teams", response_model=TeamsResponse)
+@app.get(
+    "/api/v1/teams",
+    operation_id="list_teams",
+    tags=[docs.TAG_COMPETITIONS],
+    summary="Find teams and their canonical slugs",
+    description=(
+        "Use to resolve a team name to its canonical slug (for the `team` filter of "
+        "`list_matches`) or to list the teams of a competition-season. Includes source aliases; "
+        "ordered by slug."
+    ),
+    response_model=TeamsResponse,
+    responses={
+        400: docs.INVALID_CURSOR,
+        404: docs.UNKNOWN_COMPETITION_OR_SEASON,
+        422: docs.REQUEST_VALIDATION,
+    },
+)
 async def get_teams(
-    competition: str | None = None,
-    season: str | None = Query(default=None, pattern=SEASON_PATTERN),
-    q: str | None = Query(default=None, description="Canonical team slug, or name substring"),
-    limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
-    cursor: str | None = None,
+    competition: docs.CompetitionFilter = None,
+    season: docs.SeasonFilter = None,
+    q: Annotated[
+        str | None,
+        Query(
+            description="Canonical team slug, otherwise a case-insensitive name or slug substring",
+            examples=["wisla"],
+        ),
+    ] = None,
+    limit: docs.Limit = DEFAULT_LIMIT,
+    cursor: docs.Cursor = None,
 ) -> TeamsResponse:
     if competition:
         await _require_season(competition, season)
@@ -275,9 +479,40 @@ async def get_teams(
 
 @app.post(
     "/api/v1/results/refresh",
+    operation_id="request_refresh",
+    tags=[docs.TAG_REFRESH],
+    summary="Queue a refresh of the current season",
+    description=(
+        "Use only when current-season data is stale and cannot wait for the scheduler. Returns "
+        "`202` with a job `status_url` (also in `Location`); poll `get_job` until it completes. "
+        "For other seasons use `fetch_historical_season`."
+    ),
     response_model=JobAccepted,
     status_code=202,
     dependencies=[Depends(require_api_key)],
+    responses={
+        202: {"description": "The refresh is queued", "headers": docs.LOCATION_HEADER},
+        **docs.AUTH_ERRORS,
+        404: docs.error(
+            "Unknown competition",
+            MessageError,
+            unknown_competition=docs.UNKNOWN_COMPETITION_EXAMPLE,
+        ),
+        409: docs.JOB_CONFLICT,
+        422: docs.error(
+            "Not the current season, no current season configured, or request validation failed",
+            MessageError | RequestValidationErrorResponse,
+            not_current=docs.example(
+                "Historical season",
+                "Refresh supports only the current season 2026-2027; "
+                "use /api/v1/results/history/fetch for historical seasons",
+            ),
+            validation=docs.example(
+                "Missing competition",
+                [{"loc": ["body", "competition"], "msg": "Field required", "type": "missing"}],
+            ),
+        ),
+    },
 )
 async def refresh_results(request: RefreshRequest, response: Response) -> JobAccepted:
     competition = await store.get_competition(request.competition)
@@ -304,10 +539,26 @@ async def refresh_results(request: RefreshRequest, response: Response) -> JobAcc
 
 @app.get(
     "/api/v1/jobs/{job_id}",
+    operation_id="get_job",
+    tags=[docs.TAG_REFRESH],
+    summary="Get the status of a queued import job",
+    description=(
+        "Use to poll a job from `request_refresh` or `fetch_historical_season` until its "
+        "status is `completed` or `failed`."
+    ),
     response_model=ScrapeJobStatus,
     dependencies=[Depends(require_api_key)],
+    responses={
+        **docs.AUTH_ERRORS,
+        404: docs.error(
+            "Unknown job", MessageError, unknown_job=docs.example("Unknown job", "Unknown job: 42")
+        ),
+        422: docs.REQUEST_VALIDATION,
+    },
 )
-async def get_job_status(job_id: int = Path(ge=1)) -> ScrapeJobStatus:
+async def get_job_status(
+    job_id: Annotated[int, Path(ge=1, description="Job ID from `status_url`", examples=[42])],
+) -> ScrapeJobStatus:
     job = await store.get_scrape_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Unknown job: {job_id}")
@@ -316,10 +567,55 @@ async def get_job_status(job_id: int = Path(ge=1)) -> ScrapeJobStatus:
 
 @app.post(
     "/api/v1/results/history/fetch",
-    response_model=JobAccepted | ResultsResponse,
+    operation_id="fetch_historical_season",
+    tags=[docs.TAG_REFRESH],
+    summary="Import a past season, or return it if already stored",
+    description=(
+        "Use when a non-current season is missing from `list_competitions` `fetched_seasons`. "
+        "A stored season returns `200` with its results unless `force_refresh` is true; "
+        "otherwise the fetch is queued and returns `202` with a job `status_url`. "
+        "`source_url` is needed only for seasons that are not configured."
+    ),
+    response_model=None,
     status_code=202,
-    responses={200: {"model": ResultsResponse}},
     dependencies=[Depends(require_api_key)],
+    responses={
+        200: {"model": ResultsResponse, "description": "The season is already stored"},
+        202: {
+            "model": JobAccepted,
+            "description": "The fetch is queued",
+            "headers": docs.LOCATION_HEADER,
+        },
+        **docs.AUTH_ERRORS,
+        404: docs.error(
+            "Unknown competition",
+            MessageError,
+            unknown_competition=docs.UNKNOWN_COMPETITION_EXAMPLE,
+        ),
+        409: docs.JOB_CONFLICT,
+        422: docs.error(
+            "The season or source is not acceptable for this competition, or request "
+            "validation failed",
+            MessageError | RequestValidationErrorResponse,
+            missing_source=docs.example(
+                "No source",
+                "No source configured for ekstraklasa 2019-2020; provide source_url",
+            ),
+            current_season=docs.example(
+                "Current season", "Use /api/v1/results/refresh for the current season"
+            ),
+            validation=docs.example(
+                "Bad season format",
+                [
+                    {
+                        "loc": ["body", "season"],
+                        "msg": f"String should match pattern '{SEASON_PATTERN}'",
+                        "type": "string_pattern_mismatch",
+                    }
+                ],
+            ),
+        ),
+    },
 )
 async def fetch_historical_results(
     request: HistoricalFetchRequest, response: Response
