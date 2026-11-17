@@ -50,7 +50,7 @@ def _job_accepted(response: Response, job_id: int, status: str) -> JobAccepted:
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     config = load_config()
-    await store.seed_competitions(config.to_competitions())
+    await store.seed_competitions(config.to_competitions(), config.auto_rollover_slugs())
     yield
 
 

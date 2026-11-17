@@ -19,8 +19,8 @@ league-data API**. This README describes both:
 | Data providers | `90minut` (HTML scraping) and `football-data` (JSON API, any competition code) behind a [documented provider contract](docs/PROVIDERS.md) | More sources and fallback providers |
 | Adding a competition/season | Edit `config/competitions.yaml`; the scheduler applies changes | Edit configuration (no code), hot-reloaded |
 | Seasons | Split (`2026-2027`) or calendar-year (`2026`) per competition, with a configurable start month | Same |
-| Season rollover | Manual: edit `current_season` and source URLs in YAML (football-data can already list its seasons) | Automatic discovery of the new season's source |
-| Scheduling | Adaptive per-season scheduler driven by fixture times (built-in rules) | Same engine, with policy thresholds configurable per competition |
+| Season rollover | Automatic: providers with discovery (football-data) add new seasons; the scheduler switches `current_season` once the new season has started and the old one is finished. 90minut sources are added to YAML by hand | Same, with more discovering providers |
+| Scheduling | Adaptive per-season scheduler driven by fixture times; thresholds from `defaults.schedule` with per-competition overrides | Plus cron-style overrides and global provider quotas |
 | Configuration | Environment variables plus validated YAML for leagues, sources, providers, and schedule defaults | Env vars for infrastructure + one validated config file for leagues, sources, and schedules |
 | Observability | `/health` (DB + scheduler heartbeat), `scrape_run` table, logs; CI with PostgreSQL integration tests | Scheduler/scrape status endpoints, metrics, alerting on stale data |
 | API | Read finished results with stable match IDs, manual refresh, historical fetch | Plus fixtures, standings, teams, and authenticated admin endpoints |
@@ -47,9 +47,10 @@ Scheduler (app.scheduler) ──┬──▶ ScraperRegistry ──▶ sources
 - Alembic owns database migrations.
 - `config/competitions.yaml` is validated and seeded into PostgreSQL when the API or scheduler starts.
   The scheduler reseeds only when the file contents change. Configured competitions are authoritative
-  for names, sources, and the current season; seasons added through the historical fetch endpoint
-  remain in the database alongside them. Removed competitions are disabled and retained in the
-  database, including their matches.
+  for names and sources. Seasons added by discovery or the historical fetch endpoint remain in the
+  database alongside them. `current_season` is exact with `season_rollover: manual`, and a minimum
+  with `auto` (see [Season discovery and rollover](#season-discovery-and-rollover)). Removed
+  competitions are disabled and retained in the database, including their matches.
 - A refresh reconciles one competition-season atomically, retaining match IDs by provider match ID
   or a team/stage key that ignores kickoff-time changes.
 - Teams have canonical slugs and normalized aliases; match rows reference team records while
@@ -76,10 +77,9 @@ scheduler_heartbeat, and alembic_version.
 - Source URLs are validated against the currently supported 90minut and football-data.org endpoints.
 - football-data.org sources must use `/v4/competitions/<CODE>/matches?season=<start year>`, and
   all sources of one competition must share the same `<CODE>`.
-- Season discovery (`discover_seasons`) is implemented for football-data.org but not yet used by the
-  scheduler; 90minut sources are configured by hand.
+- Season discovery is implemented for football-data.org only; new 90minut seasons must be added to
+  the YAML by hand (rollover to them is then automatic).
 - 90minut source URLs must match `http(s)://(www.)90minut.pl/liga/1/ligaNNNNN.html`.
-- Scheduler thresholds (match duration, polling intervals, backoff) are constants in code.
 - Only finished matches are exposed; scheduled fixtures are stored but not served.
 - Refresh and history-fetch requests require an API key; write endpoints return `503` until at
   least one key is configured.
@@ -167,19 +167,50 @@ seeded during application startup.
 ## Adaptive refresh policy
 
 The scraper stores scheduled fixtures internally, while GET /api/v1/results continues to expose
-only finished matches. For each current season the worker calculates next_check_at:
+only finished matches. For each current season the worker calculates next_check_at. The thresholds
+come from `defaults.schedule` in `config/competitions.yaml` and can be overridden per competition
+(see [Schedule settings](#schedule-settings)); the shipped defaults are:
 
-- far from a fixture: once a day, or once a week when it is more than 30 days away;
-- within 24 hours: at most daily, with a final check 30 minutes before kickoff;
-- during a match: at its expected end (105 minutes for leagues, 135 minutes for cups);
-- while waiting for a posted result: every 5 minutes initially, then 15 minutes, then hourly;
-- with no published schedule: once daily;
-- after source errors: 5, 15, 30, then 60 minutes.
+- far from a fixture: once a day (`idle_interval`), or once a week (`off_season_interval`) when it
+  is more than 30 days away (`off_season_after`);
+- within 24 hours: at most daily, with a final check 30 minutes before kickoff
+  (`pre_match_check_minutes`);
+- during a match: at its expected end (`match_duration_minutes`: 105 for leagues, 135 for cups);
+- while waiting for a posted result: every 5 minutes for the first 30 minutes, then every 15
+  minutes up to 4 hours, then hourly (`result_poll_minutes`, `result_poll_until_minutes`);
+- with no published schedule: once daily (`idle_interval`);
+- after source errors: 5, 15, 30, then 60 minutes (`failure_backoff_minutes`).
 
 Manual current-season refreshes are queued and use the same scheduling calculation when completed.
 Historical seasons are never scheduled automatically; they remain available through the queued
 historical fetch endpoint. PostgreSQL row locking makes claims safe if more than one worker is
 accidentally running.
+
+### Season discovery and rollover
+
+Every `season_check_interval` (default daily) the scheduler claims each enabled competition for a
+season check:
+
+1. **Discovery.** If the provider supports it (football-data.org), `discover_seasons` lists the
+   provider's seasons. Only seasons newer than the newest known season are stored; existing
+   seasons, including their source URLs, are never changed. Failed discovery is retried after the
+   longest failure backoff.
+2. **Rollover** (`season_rollover: auto`, the default). The scheduler switches `current_season` to
+   the newest known season that has started by date (according to `season_format` and
+   `season_start_month`), but only once the current season is finished: it has no upcoming,
+   in-progress, or pending-result fixtures (`waiting_for_schedule` or `delayed`). The previous
+   season stops being refreshed and stays readable. A competition without a `current_season` is
+   never rolled over. If the new season has started but no source is known (for example a 90minut
+   competition), the scheduler logs a hint to add it to the YAML.
+
+Interaction with `config/competitions.yaml`, which stays authoritative:
+
+- Discovered seasons are kept when the file is reseeded; listing the same season in the file later
+  makes the file's source URL win.
+- With `season_rollover: auto`, `current_season` in the file is a minimum: reseeding keeps a newer
+  season the scheduler rolled over to, while a newer `current_season` in the file takes effect.
+- With `season_rollover: manual`, the file's `current_season` is applied exactly (use this to pin
+  or roll back a season) and the scheduler never switches seasons; discovery still adds seasons.
 
 ## Database migrations
 
@@ -404,8 +435,35 @@ A calendar-year football-data.org competition, for example the Brazilian Série 
 
 football-data.org source URLs accept any competition code (`PL`, `BL1`, `SA`, `PD`, `CL`, ...);
 `season` is the season's start year. Which codes your token can read depends on your
-football-data.org plan. Schedule defaults are validated and recorded in the config, but the scheduler still
-uses its built-in thresholds until the scheduler-settings roadmap step.
+football-data.org plan.
+
+#### Schedule settings
+
+`defaults.schedule` sets the scheduler thresholds for every competition. A competition may add a
+`schedule` block that overrides only the keys it lists (`match_duration_minutes` entries are merged
+per format). Durations use `s`, `m`, `h`, or `d` suffixes.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `pre_match_check_minutes` | `30` | Final check before kickoff |
+| `match_duration_minutes` | `{league: 105, cup: 135}` | Expected kickoff-to-result time per competition `format`; each competition's format must be listed |
+| `result_poll_minutes` | `[5, 15, 60]` | Poll intervals while a result is overdue |
+| `result_poll_until_minutes` | `[30, 240]` | How late a result may be for each interval except the last (one entry fewer, increasing); afterwards the state is `delayed` |
+| `idle_interval` | `1d` | Check interval without a published schedule, and the longest wait before a fixture |
+| `off_season_interval` | `7d` | Check interval when the next fixture is further away than `off_season_after` |
+| `off_season_after` | `30d` | See above |
+| `failure_backoff_minutes` | `[5, 15, 30, 60]` | Retry delays after consecutive source errors |
+| `season_rollover` | `auto` | `auto` or `manual`; see [Season discovery and rollover](#season-discovery-and-rollover) |
+| `season_check_interval` | `1d` | How often seasons are discovered and rollover is evaluated |
+
+~~~yaml
+  - slug: europa-league
+    format: cup
+    # ...
+    schedule:
+      result_poll_minutes: [2, 10, 60]
+      season_rollover: manual
+~~~
 
 Application variables:
 
@@ -450,6 +508,7 @@ Unit and API tests use a repository test double and do not require PostgreSQL.
 
 `tests/integration/` tests the repository and migrations against a real PostgreSQL database:
 seeding, scheduler claims (including `SKIP LOCKED`), atomic season replacement, failure backoff,
+season discovery and rollover,
 and a migration round trip followed by `alembic check`. That last check fails when
 `app/db_models.py` changes without a matching migration. The tests are skipped unless
 `FOOTBALL_RESULTS_TEST_DATABASE_URL` is set. They truncate and drop tables, so the database name
@@ -501,8 +560,13 @@ defaults:
       league: 105
       cup: 135
     result_poll_minutes: [5, 15, 60]
+    result_poll_until_minutes: [30, 240]
     idle_interval: 1d
+    off_season_interval: 7d
+    off_season_after: 30d
     failure_backoff_minutes: [5, 15, 30, 60]
+    season_rollover: auto
+    season_check_interval: 1d
 
 providers:
   90minut:
@@ -546,7 +610,7 @@ Configuration behaviour:
 ### Pluggable data providers
 
 - The provider interface (`scrape`, `discover_seasons`, declared capabilities) is documented in
-  [docs/PROVIDERS.md](docs/PROVIDERS.md); next, use discovery for automatic rollover.
+  [docs/PROVIDERS.md](docs/PROVIDERS.md); the scheduler uses discovery for automatic rollover.
 - Register providers by name (entry points or a simple registry module) so a new source is one new
   module plus configuration.
 - Candidate additional sources: official league sites, other open football APIs, and a
@@ -559,10 +623,10 @@ Configuration behaviour:
 
 The current adaptive scheduler is the foundation; planned improvements:
 
-- Make every threshold configurable per competition (see `schedule` above), with optional
-  cron-style overrides (e.g. `cron: "0 6 * * *"`) for sources that publish on a fixed timetable.
-- Automatic season rollover: detect when a provider publishes the next season, switch
-  `current_season`, and archive the previous one.
+- ~~Make every threshold configurable per competition.~~ (done; see `schedule` above)
+- Optional cron-style overrides (e.g. `cron: "0 6 * * *"`) for sources that publish on a fixed
+  timetable.
+- ~~Automatic season discovery and rollover.~~ (done)
 - Respect provider quotas globally across all competitions and workers.
 - Optional one-off backfill jobs for historical seasons, queued and processed by the scheduler
   instead of blocking an HTTP request.
@@ -587,8 +651,8 @@ The current adaptive scheduler is the foundation; planned improvements:
 
 1. Move the registry to a validated config file (no behaviour change).
 2. ~~Generalise the football-data.org adapter to any competition code.~~ (done)
-3. Make scheduler thresholds configurable per competition.
+3. ~~Make scheduler thresholds configurable per competition.~~ (done)
 4. Add fixtures and standings endpoints.
 5. Add admin/status endpoints with API-key authentication and metrics.
-6. Automatic season discovery and rollover.
+6. ~~Automatic season discovery and rollover.~~ (done)
 7. Additional providers and fallback sources.

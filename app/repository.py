@@ -1,6 +1,6 @@
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import exists, func, or_, select, update
@@ -8,6 +8,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased, selectinload
 
+from app.competitions import source_from_url
 from app.db_models import (
     CompetitionRow,
     CompetitionSeasonRow,
@@ -25,7 +26,15 @@ from app.models import (
     ScrapeJobStatus,
     SeasonSource,
 )
-from app.scheduling import calculate_next_check, failure_backoff
+from app.scheduling import (
+    DEFAULT_POLICY,
+    SchedulePolicy,
+    calculate_next_check,
+    failure_backoff,
+    next_check_for_kickoffs,
+    rollover_target,
+)
+from app.seasons import season_for_date, season_years, validate_season
 
 
 def _now() -> datetime:
@@ -60,6 +69,20 @@ class ActiveScrapeJobConflict(ValueError):
     pass
 
 
+@dataclass(frozen=True)
+class SeasonCheckResult:
+    added_seasons: list[str] = field(default_factory=list)
+    rejected_sources: list[str] = field(default_factory=list)
+    rolled_over_from: str | None = None
+    rolled_over_to: str | None = None
+    # The season that has started by date but has no known source yet.
+    missing_season: str | None = None
+
+
+def _season_start(season: str) -> int:
+    return season_years(season)[0]
+
+
 class PostgresResultRepository:
     def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
         self.sessions = sessions
@@ -68,7 +91,18 @@ class PostgresResultRepository:
         async with self.sessions() as session:
             await session.execute(select(1))
 
-    async def seed_competitions(self, seeds: dict[str, Competition]) -> None:
+    async def seed_competitions(
+        self,
+        seeds: dict[str, Competition],
+        auto_rollover: frozenset[str] = frozenset(),
+    ) -> None:
+        """Apply the configured competitions.
+
+        Configured values are authoritative, with one exception: for slugs in ``auto_rollover`` the
+        configured ``current_season`` is a minimum, so a newer season that the scheduler rolled over
+        to stays current. Seasons that exist only in the database (discovered or fetched on request)
+        are kept unchanged.
+        """
         async with self.sessions.begin() as session:
             now = _now()
             existing_rows = (
@@ -139,11 +173,23 @@ class PostgresResultRepository:
                     )
                 ).all()
                 existing = {item.season: item for item in seasons}
+                current_season = seed.current_season
+                stored_current = next((item.season for item in seasons if item.is_current), None)
+                if (
+                    seed.slug in auto_rollover
+                    and current_season is not None
+                    and stored_current is not None
+                    and _season_start(stored_current) > _season_start(current_season)
+                ):
+                    current_season = stored_current
                 for item in seasons:
                     item.is_current = False
+                # The partial unique index allows one current season per competition.
                 await session.flush()
+                if current_season not in seed.seasons and current_season in existing:
+                    existing[current_season].is_current = True
                 for season_name, source in seed.seasons.items():
-                    is_current = season_name == seed.current_season
+                    is_current = season_name == current_season
                     item = existing.get(season_name)
                     if item is None:
                         session.add(
@@ -465,6 +511,7 @@ class PostgresResultRepository:
         source: SeasonSource,
         fresh: list[ScrapedMatch],
         run_id: int | None = None,
+        policy: SchedulePolicy = DEFAULT_POLICY,
     ) -> datetime:
         started = _now()
         async with self.sessions.begin() as session:
@@ -567,7 +614,7 @@ class PostgresResultRepository:
             season.fetched_at = season.last_checked_at = season.last_successful_check_at = now
             season.consecutive_failures, season.updated_at = 0, now
             if season.is_current and season.automatic_refresh_enabled:
-                decision = calculate_next_check(fresh, competition.format, now)
+                decision = calculate_next_check(fresh, competition.format, now, policy)
                 season.scheduler_state, season.next_check_at = (
                     decision.state,
                     decision.next_check_at,
@@ -642,6 +689,7 @@ class PostgresResultRepository:
         source: SeasonSource,
         error: Exception,
         run_id: int | None = None,
+        policy: SchedulePolicy = DEFAULT_POLICY,
     ) -> None:
         now = _now()
         async with self.sessions.begin() as session:
@@ -657,7 +705,7 @@ class PostgresResultRepository:
             season.consecutive_failures += 1
             if season.is_current and season.automatic_refresh_enabled:
                 season.scheduler_state = "retrying"
-                season.next_check_at = now + failure_backoff(season.consecutive_failures)
+                season.next_check_at = now + failure_backoff(season.consecutive_failures, policy)
             if run_id is not None:
                 run = await session.get(ScrapeRunRow, run_id)
                 if run is None or run.competition_season_id != season.id or run.status != "running":
@@ -739,6 +787,136 @@ class PostgresResultRepository:
                 await session.flush()
                 result.append(RefreshTarget(value, source, run.id))
             return result
+
+    async def claim_season_checks(
+        self, limit: int, lease: timedelta = timedelta(minutes=10)
+    ) -> list[Competition]:
+        """Claim enabled competitions whose season discovery/rollover check is due."""
+        now = _now()
+        async with self.sessions.begin() as session:
+            rows = (
+                await session.scalars(
+                    select(CompetitionRow)
+                    .where(
+                        CompetitionRow.is_enabled.is_(True),
+                        or_(
+                            CompetitionRow.next_season_check_at.is_(None),
+                            CompetitionRow.next_season_check_at <= now,
+                        ),
+                    )
+                    .options(selectinload(CompetitionRow.seasons))
+                    .order_by(CompetitionRow.next_season_check_at.asc().nulls_first())
+                    .limit(limit)
+                    .with_for_update(skip_locked=True, of=CompetitionRow)
+                )
+            ).all()
+            for row in rows:
+                row.next_season_check_at = now + lease
+            return [self._competition(row) for row in rows]
+
+    async def apply_season_check(
+        self,
+        slug: str,
+        discovered: list[SeasonSource],
+        next_check_at: datetime,
+        policy: SchedulePolicy = DEFAULT_POLICY,
+        now: datetime | None = None,
+    ) -> SeasonCheckResult:
+        """Store newly discovered seasons and roll the current season over when it is due.
+
+        Only seasons newer than the newest known season are added; existing seasons (configured,
+        discovered earlier, or fetched on request) are never modified. Rollover follows
+        ``app.scheduling.rollover_target`` and runs only for ``season_rollover: auto``.
+        """
+        current_time = now or _now()
+        async with self.sessions.begin() as session:
+            row = await session.scalar(
+                select(CompetitionRow)
+                .where(CompetitionRow.slug == slug, CompetitionRow.is_enabled.is_(True))
+                .options(selectinload(CompetitionRow.seasons))
+                .with_for_update(of=CompetitionRow)
+            )
+            if row is None:
+                return SeasonCheckResult()
+            known = {item.season: item for item in row.seasons}
+            newest = max((_season_start(season) for season in known), default=None)
+            added: list[str] = []
+            rejected: list[str] = []
+            for source in discovered:
+                try:
+                    validate_season(source.season, row.season_format)
+                    if source_from_url(source.season, source.source_url) != source:
+                        raise ValueError("source does not match its URL")
+                except ValueError:
+                    rejected.append(source.season)
+                    continue
+                if source.season in known or (
+                    newest is not None and _season_start(source.season) <= newest
+                ):
+                    continue
+                item = CompetitionSeasonRow(
+                    competition_id=row.id,
+                    season=source.season,
+                    source_url=source.source_url,
+                    provider=source.provider,
+                    is_current=False,
+                    fetched_at=None,
+                    automatic_refresh_enabled=False,
+                    scheduler_state="disabled",
+                    next_check_at=None,
+                    consecutive_failures=0,
+                    created_at=current_time,
+                    updated_at=current_time,
+                )
+                row.seasons.append(item)
+                known[source.season] = item
+                added.append(source.season)
+            await session.flush()
+
+            current = next((item for item in known.values() if item.is_current), None)
+            missing: str | None = None
+            rolled_from: str | None = None
+            target: str | None = None
+            if current is not None:
+                started = season_for_date(
+                    current_time.date(), row.season_format, row.season_start_month
+                )
+                if _season_start(started) > _season_start(current.season) and started not in known:
+                    missing = started
+            if current is not None and policy.season_rollover == "auto":
+                kickoffs = (
+                    await session.scalars(
+                        select(MatchRow.played_at).where(
+                            MatchRow.competition_season_id == current.id,
+                            MatchRow.status == "scheduled",
+                            MatchRow.played_at.is_not(None),
+                        )
+                    )
+                ).all()
+                state = next_check_for_kickoffs(kickoffs, row.format, current_time, policy).state
+                target = rollover_target(
+                    current.season,
+                    known,
+                    current_time.date(),
+                    row.season_format,
+                    row.season_start_month,
+                    state,
+                )
+            if current is not None and target is not None:
+                rolled_from = current.season
+                current.is_current = current.automatic_refresh_enabled = False
+                current.scheduler_state, current.next_check_at = "disabled", None
+                current.updated_at = current_time
+                # The partial unique index allows one current season per competition.
+                await session.flush()
+                new_current = known[target]
+                new_current.is_current = new_current.automatic_refresh_enabled = True
+                new_current.scheduler_state = "waiting_for_schedule"
+                new_current.next_check_at = current_time
+                new_current.consecutive_failures = 0
+                new_current.updated_at = current_time
+            row.next_season_check_at = next_check_at
+            return SeasonCheckResult(added, rejected, rolled_from, target, missing)
 
     async def heartbeat(self, worker_id: str, started_at: datetime) -> None:
         now = _now()

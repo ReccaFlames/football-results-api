@@ -47,6 +47,7 @@ class CompetitionRow(Base):
         SmallInteger, default=7, server_default=text("7")
     )
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
+    next_season_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 

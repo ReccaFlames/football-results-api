@@ -75,6 +75,10 @@ Return the seasons the provider currently offers for `competition`, newest first
   if it cannot be determined unambiguously.
 - Providers without discovery declare `season_discovery=False` and return an empty list.
 - Discovery only reports sources; switching `current_season` (rollover) is the scheduler's job.
+  The scheduler calls `discover_seasons` every `season_check_interval` and stores only seasons newer
+  than the newest known one; it never changes existing seasons. Seasons with an invalid format or
+  a URL that `source_from_url` rejects are ignored with a warning. See "Season discovery and
+  rollover" in the README.
 
 ## Seasons
 

@@ -155,9 +155,9 @@ How to use this list:
   - [x] Season-to-date mapping per competition (no hard-coded July start)
   - [x] football-data.org adapter and URL validation for any competition code
   - [x] Written provider contract (capabilities, `discover_seasons`)
-- [ ] **8. Scheduler settings per competition**
-  - [ ] Scheduler thresholds read from the configuration file
-  - [ ] Automatic season discovery and rollover
+- [x] **8. Scheduler settings per competition**
+  - [x] Scheduler thresholds read from the configuration file
+  - [x] Automatic season discovery and rollover
 
 ### Phase 2: Agent-first API surface
 

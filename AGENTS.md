@@ -16,8 +16,8 @@ API.
 | Path | Responsibility |
 | --- | --- |
 | `app/main.py` | FastAPI app and all HTTP endpoints; module-level `store` singleton |
-| `app/scheduler.py` | Scheduler loop (`python -m app.scheduler`): seed → heartbeat → claim due seasons → scrape → persist |
-| `app/scheduling.py` | Pure functions: `calculate_next_check`, `failure_backoff` |
+| `app/scheduler.py` | Scheduler loop (`python -m app.scheduler`): seed → heartbeat → season checks (discovery/rollover) → claim due seasons → scrape → persist |
+| `app/scheduling.py` | Pure rules driven by `SchedulePolicy`: `calculate_next_check`, `failure_backoff`, `rollover_target` |
 | `app/scraper.py` | Provider adapters (`NinetyMinutScraper`, `FootballDataScraper`), parsers, `ScraperRegistry` |
 | `app/seasons.py` | Season formats (`2026-2027`, `2026`) and season/date mapping |
 | `app/competitions.py` | Competition summary helpers and `source_from_url` validation |
@@ -64,6 +64,13 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
 - `config/competitions.yaml` is seeded on API and scheduler startup; the scheduler reseeds only when
   the file changes. Configured competitions overwrite names, sources, provider, and current season.
   Removed competitions are disabled, not deleted, so their stored results remain in the database.
+- Scheduler thresholds come from `defaults.schedule` plus a per-competition `schedule` override
+  (`CompetitionFile.schedule_for`); never hard-code them. `SchedulePolicy()` must equal the shipped
+  defaults (a test checks this).
+- With `season_rollover: auto` (default) the configured `current_season` is a minimum: reseeding
+  keeps a newer season the scheduler rolled over to. Discovered seasons are never overwritten or
+  removed by reseeding; `manual` makes `current_season` exact. Pass `auto_rollover_slugs()` to
+  every `seed_competitions` call (API startup and scheduler).
 - A refresh deletes and re-inserts all matches of one competition-season in one transaction.
   Database match IDs are therefore not stable; `source_key` is a hash of season/stage/teams/kickoff.
 - `MatchResult` (API) exposes only finished matches; `ScrapedMatch` (internal) also has scheduled ones.

@@ -34,7 +34,8 @@ async def discover_seasons(self, competition: Competition) -> list[SeasonSource]
 - Raise an exception on unusable responses; the caller records a failed `scrape_run` and backs off.
 
 `discover_seasons` returns the provider's seasons (newest first, in `competition.season_format`),
-or `[]` with `season_discovery=False` when the provider cannot list them.
+or `[]` with `season_discovery=False` when the provider cannot list them. The scheduler uses it
+for automatic rollover, so every returned URL must pass `source_from_url` (extend the allow-list).
 
 ## Steps
 

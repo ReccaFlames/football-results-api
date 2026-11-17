@@ -31,7 +31,7 @@ class FakeRepository:
     async def latest_scheduler_heartbeat(self):
         return None
 
-    async def seed_competitions(self, _seeds) -> None:
+    async def seed_competitions(self, _seeds, _auto_rollover=frozenset()) -> None:
         return None
 
     async def get_competition(self, slug: str):

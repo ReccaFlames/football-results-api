@@ -1,9 +1,11 @@
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 import yaml
 
 from app.config import ConfigFileWatcher, cli, load_config
+from app.scheduling import SchedulePolicy
 
 DEFAULT_CONFIG = Path(__file__).parents[1] / "config/competitions.yaml"
 
@@ -173,3 +175,55 @@ def test_config_rejects_inconsistent_season_settings(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         load_config(write_config(tmp_path, calendar_competition(**overrides)))
+
+
+def test_shipped_schedule_defaults_match_the_built_in_policy() -> None:
+    config = load_config(DEFAULT_CONFIG)
+
+    assert config.schedules() == dict.fromkeys(config.schedules(), SchedulePolicy())
+    assert config.auto_rollover_slugs() == {competition.slug for competition in config.competitions}
+
+
+def test_competition_schedule_override_merges_over_defaults(tmp_path: Path) -> None:
+    override = {
+        "pre_match_check_minutes": 45,
+        "match_duration_minutes": {"league": 120, "playoff": 150},
+        "season_rollover": "manual",
+        "season_check_interval": "12h",
+    }
+    config = load_config(write_config(tmp_path, calendar_competition(schedule=override)))
+
+    policy = config.schedule_for("brasileirao")
+
+    assert policy.pre_match_check == timedelta(minutes=45)
+    assert policy.match_duration == {
+        "league": timedelta(minutes=120),
+        "cup": timedelta(minutes=135),
+        "playoff": timedelta(minutes=150),
+    }
+    assert policy.season_check_interval == timedelta(hours=12)
+    assert policy.failure_backoff == SchedulePolicy().failure_backoff
+    assert "brasileirao" not in config.auto_rollover_slugs()
+    assert config.schedule_for("ekstraklasa") == SchedulePolicy()
+
+
+@pytest.mark.parametrize(
+    ("schedule", "message"),
+    [
+        ({"result_poll_minutes": [5, 10]}, "one entry fewer"),
+        ({"result_poll_until_minutes": [240, 30]}, "strictly increasing"),
+        ({"idle_interval": "1w"}, "idle_interval"),
+        ({"season_rollover": "sometimes"}, "season_rollover"),
+        ({"unknown_threshold": 1}, "unknown_threshold"),
+    ],
+)
+def test_config_rejects_invalid_schedule_overrides(
+    tmp_path: Path, schedule: dict[str, object], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        load_config(write_config(tmp_path, calendar_competition(schedule=schedule)))
+
+
+def test_config_requires_a_match_duration_for_each_format(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="does not define it"):
+        load_config(write_config(tmp_path, calendar_competition(format="playoff")))

@@ -45,8 +45,15 @@ Rules:
 - `current_season` must exist in `seasons`; only the current season is auto-refreshed.
 - A competition uses a single provider; historical fetches reject other providers and other
   football-data.org codes.
-- Rolling over = add the new season entry and change `current_season`. Changing a season's
-  source URL resets its scheduler state on next seed.
+- Rollover is automatic by default (`schedule.season_rollover: auto`): football-data.org seasons
+  are discovered, and the scheduler switches to a known newer season once it has started and the
+  current season has no pending fixtures. For 90minut, add the next season's entry in advance and
+  leave `current_season` alone. `current_season` is then a minimum: raising it rolls over
+  immediately, lowering it has no effect. To pin or roll back, set `schedule: {season_rollover:
+  manual}` on the competition and change `current_season`.
+- Changing a season's source URL resets its scheduler state on next seed.
+- Thresholds (match duration, polling, backoff) can be overridden per competition with a `schedule`
+  block listing only the changed keys; a new `format` needs a `match_duration_minutes` entry.
 
 ## 3. Verify
 

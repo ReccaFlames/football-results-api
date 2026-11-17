@@ -14,6 +14,7 @@ from app.db_models import (
 )
 from app.models import Competition, ScrapedMatch, SeasonSource
 from app.repository import ActiveScrapeJobConflict, PostgresResultRepository
+from app.scheduling import SchedulePolicy
 
 
 def source(season: str, league_id: int) -> SeasonSource:
@@ -585,3 +586,149 @@ async def test_scheduler_heartbeat(repository: PostgresResultRepository) -> None
     await repository.heartbeat("worker-1", started)
     second = await repository.latest_scheduler_heartbeat()
     assert first is not None and second is not None and second >= first
+
+
+ROLLOVER_DAY = datetime(2027, 7, 5, 12, tzinfo=UTC)
+
+
+async def test_claim_season_checks_leases_enabled_competitions(
+    repository: PostgresResultRepository, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    await repository.seed_competitions({"test-league": league(), "test-cup": cup()})
+    await repository.seed_competitions({"test-league": league()})
+    now = datetime.now(UTC)
+
+    claimed = await repository.claim_season_checks(10)
+
+    assert [competition.slug for competition in claimed] == ["test-league"]
+    assert set(claimed[0].seasons) == {"2025-2026", "2026-2027"}
+    assert await repository.claim_season_checks(10) == []
+    async with sessions() as session:
+        row = await session.scalar(
+            select(CompetitionRow).where(CompetitionRow.slug == "test-league")
+        )
+    assert close_to(row.next_season_check_at, now + timedelta(minutes=10))
+
+
+async def test_season_check_adds_only_newer_valid_seasons(
+    repository: PostgresResultRepository, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    await repository.seed_competitions({"test-league": league()})
+    next_check = datetime.now(UTC) + timedelta(days=1)
+    discovered = [
+        source("2027-2028", 5),
+        source("2026-2027", 77),
+        source("2024-2025", 6),
+        SeasonSource(season="2028", source_url=source("2028-2029", 8).source_url),
+    ]
+
+    result = await repository.apply_season_check(
+        "test-league", discovered, next_check, now=datetime(2026, 11, 17, tzinfo=UTC)
+    )
+
+    assert result.added_seasons == ["2027-2028"]
+    assert result.rejected_sources == ["2028"]
+    assert result.rolled_over_to is None and result.missing_season is None
+    current = await season_row(sessions, "test-league", "2026-2027")
+    assert current.is_current and current.source_url.endswith("liga2.html")
+    added = await season_row(sessions, "test-league", "2027-2028")
+    assert not added.is_current and added.scheduler_state == "disabled"
+    assert await season_row(sessions, "test-league", "2024-2025") is None
+    async with sessions() as session:
+        row = await session.scalar(
+            select(CompetitionRow).where(CompetitionRow.slug == "test-league")
+        )
+    assert row.next_season_check_at == next_check
+
+
+async def test_rollover_waits_until_the_current_season_is_finished(
+    repository: PostgresResultRepository, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    competition = league()
+    current_source = competition.seasons["2026-2027"]
+    await repository.seed_competitions({"test-league": competition})
+    later = ROLLOVER_DAY + timedelta(days=1)
+    await repository.replace_competition(
+        competition, current_source, [match("A", "B", ROLLOVER_DAY + timedelta(days=3))]
+    )
+
+    waiting = await repository.apply_season_check(
+        "test-league", [source("2027-2028", 5)], later, now=ROLLOVER_DAY
+    )
+    assert waiting.added_seasons == ["2027-2028"] and waiting.rolled_over_to is None
+
+    await repository.replace_competition(
+        competition, current_source, [match("A", "B", ROLLOVER_DAY - timedelta(days=3), (1, 0))]
+    )
+    rolled = await repository.apply_season_check("test-league", [], later, now=ROLLOVER_DAY)
+
+    assert (rolled.rolled_over_from, rolled.rolled_over_to) == ("2026-2027", "2027-2028")
+    previous = await season_row(sessions, "test-league", "2026-2027")
+    assert not previous.is_current and not previous.automatic_refresh_enabled
+    assert previous.scheduler_state == "disabled" and previous.next_check_at is None
+    new_current = await season_row(sessions, "test-league", "2027-2028")
+    assert new_current.is_current and new_current.automatic_refresh_enabled
+    assert new_current.scheduler_state == "waiting_for_schedule"
+    await set_next_check(sessions, "test-league", datetime.now(UTC) - timedelta(minutes=1))
+    targets = await repository.claim_due_seasons(10)
+    assert [target.source for target in targets] == [source("2027-2028", 5)]
+
+
+async def test_manual_rollover_only_reports_a_missing_season(
+    repository: PostgresResultRepository, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    await repository.seed_competitions({"test-league": league()})
+    later = ROLLOVER_DAY + timedelta(days=1)
+
+    missing = await repository.apply_season_check("test-league", [], later, now=ROLLOVER_DAY)
+    await repository.apply_season_check("test-league", [source("2027-2028", 5)], later)
+    manual = await repository.apply_season_check(
+        "test-league", [], later, SchedulePolicy(season_rollover="manual"), now=ROLLOVER_DAY
+    )
+
+    assert missing.missing_season == "2027-2028" and missing.rolled_over_to is None
+    assert manual.rolled_over_to is None and manual.missing_season is None
+    assert (await season_row(sessions, "test-league", "2026-2027")).is_current
+
+
+async def test_reseed_keeps_an_automatically_rolled_over_season(
+    repository: PostgresResultRepository, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    await repository.seed_competitions({"test-league": league()})
+    later = ROLLOVER_DAY + timedelta(days=1)
+    await repository.apply_season_check(
+        "test-league", [source("2027-2028", 5)], later, now=ROLLOVER_DAY
+    )
+    auto = frozenset({"test-league"})
+
+    await repository.seed_competitions({"test-league": league()}, auto)
+    competition = await repository.get_competition("test-league")
+    assert competition is not None and competition.current_season == "2027-2028"
+    assert competition.seasons["2027-2028"] == source("2027-2028", 5)
+
+    newer = league()
+    newer.seasons["2028-2029"] = source("2028-2029", 9)
+    newer.current_season = "2028-2029"
+    await repository.seed_competitions({"test-league": newer}, auto)
+    assert (await season_row(sessions, "test-league", "2028-2029")).is_current
+
+    await repository.seed_competitions({"test-league": league()})
+    competition = await repository.get_competition("test-league")
+    assert competition is not None and competition.current_season == "2026-2027"
+    assert set(competition.seasons) == {"2025-2026", "2026-2027", "2027-2028", "2028-2029"}
+
+
+async def test_failure_backoff_uses_the_competition_policy(
+    repository: PostgresResultRepository, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    competition = league()
+    await repository.seed_competitions({"test-league": competition})
+    policy = SchedulePolicy(failure_backoff=(timedelta(minutes=2),))
+    before = datetime.now(UTC)
+
+    await repository.record_scrape_failure(
+        competition, competition.seasons["2026-2027"], RuntimeError("boom"), policy=policy
+    )
+
+    row = await season_row(sessions, "test-league", "2026-2027")
+    assert close_to(row.next_check_at, before + timedelta(minutes=2))

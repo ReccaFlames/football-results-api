@@ -1,9 +1,10 @@
 import argparse
 import hashlib
 import sys
+from datetime import timedelta
 from importlib.metadata import version
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 import yaml
 from pydantic import (
@@ -18,6 +19,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.competitions import provider_competition_code, source_from_url
 from app.models import Competition, SeasonSource
+from app.scheduling import (
+    DURATION_PATTERN,
+    SchedulePolicy,
+    SeasonRollover,
+    parse_duration,
+)
 from app.seasons import SeasonFormat, default_start_month, validate_season
 
 
@@ -50,33 +57,108 @@ class Settings(BaseSettings):
 settings = Settings()
 
 
+Duration = Annotated[str, Field(pattern=DURATION_PATTERN)]
+
+
+def _positive(values: list[int], name: str) -> list[int]:
+    if any(value <= 0 for value in values):
+        raise ValueError(f"{name} must be positive")
+    return values
+
+
 class ScheduleConfig(BaseModel):
+    """Scheduler thresholds; ``defaults.schedule`` in the configuration file."""
+
     model_config = ConfigDict(extra="forbid")
 
     policy: Literal["adaptive"] = "adaptive"
     pre_match_check_minutes: int = Field(default=30, gt=0)
     match_duration_minutes: dict[str, int] = Field(
-        default_factory=lambda: {"league": 105, "cup": 135}
+        default_factory=lambda: {"league": 105, "cup": 135}, min_length=1
     )
     result_poll_minutes: list[int] = Field(default_factory=lambda: [5, 15, 60], min_length=1)
-    idle_interval: str = Field(default="1d", pattern=r"^[1-9]\d*[smhd]$")
+    result_poll_until_minutes: list[int] = Field(default_factory=lambda: [30, 240])
+    idle_interval: Duration = "1d"
+    off_season_interval: Duration = "7d"
+    off_season_after: Duration = "30d"
     failure_backoff_minutes: list[int] = Field(
         default_factory=lambda: [5, 15, 30, 60], min_length=1
     )
+    season_rollover: SeasonRollover = "auto"
+    season_check_interval: Duration = "1d"
 
     @field_validator("match_duration_minutes")
     @classmethod
     def positive_match_durations(cls, values: dict[str, int]) -> dict[str, int]:
-        if any(value <= 0 for value in values.values()):
-            raise ValueError("match durations must be positive")
+        _positive(list(values.values()), "match durations")
         return values
 
     @field_validator("result_poll_minutes", "failure_backoff_minutes")
     @classmethod
     def positive_intervals(cls, values: list[int]) -> list[int]:
-        if any(value <= 0 for value in values):
-            raise ValueError("schedule intervals must be positive")
-        return values
+        return _positive(values, "schedule intervals")
+
+    @model_validator(mode="after")
+    def poll_limits_match_intervals(self) -> "ScheduleConfig":
+        limits = self.result_poll_until_minutes
+        _positive(limits, "result_poll_until_minutes")
+        if len(limits) != len(self.result_poll_minutes) - 1:
+            raise ValueError(
+                "result_poll_until_minutes needs exactly one entry fewer than result_poll_minutes"
+            )
+        if limits != sorted(set(limits)):
+            raise ValueError("result_poll_until_minutes must be strictly increasing")
+        return self
+
+    def merged(self, override: "ScheduleOverride | None") -> "ScheduleConfig":
+        """Return these settings with a per-competition override applied on top."""
+        if override is None:
+            return self
+        values = self.model_dump()
+        changes = override.model_dump(exclude_unset=True)
+        if "match_duration_minutes" in changes:
+            changes["match_duration_minutes"] = {
+                **values["match_duration_minutes"],
+                **changes["match_duration_minutes"],
+            }
+        return ScheduleConfig.model_validate({**values, **changes})
+
+    def to_policy(self) -> SchedulePolicy:
+        def minutes(values: list[int]) -> tuple[timedelta, ...]:
+            return tuple(timedelta(minutes=value) for value in values)
+
+        return SchedulePolicy(
+            pre_match_check=timedelta(minutes=self.pre_match_check_minutes),
+            match_duration={
+                name: timedelta(minutes=value)
+                for name, value in self.match_duration_minutes.items()
+            },
+            result_poll=minutes(self.result_poll_minutes),
+            result_poll_until=minutes(self.result_poll_until_minutes),
+            idle_interval=parse_duration(self.idle_interval),
+            off_season_interval=parse_duration(self.off_season_interval),
+            off_season_after=parse_duration(self.off_season_after),
+            failure_backoff=minutes(self.failure_backoff_minutes),
+            season_rollover=self.season_rollover,
+            season_check_interval=parse_duration(self.season_check_interval),
+        )
+
+
+class ScheduleOverride(BaseModel):
+    """Per-competition ``schedule``: only the listed keys replace ``defaults.schedule``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    pre_match_check_minutes: int | None = Field(default=None, gt=0)
+    match_duration_minutes: dict[str, int] | None = None
+    result_poll_minutes: list[int] | None = Field(default=None, min_length=1)
+    result_poll_until_minutes: list[int] | None = None
+    idle_interval: Duration | None = None
+    off_season_interval: Duration | None = None
+    off_season_after: Duration | None = None
+    failure_backoff_minutes: list[int] | None = Field(default=None, min_length=1)
+    season_rollover: SeasonRollover | None = None
+    season_check_interval: Duration | None = None
 
 
 class ProviderConfig(BaseModel):
@@ -103,7 +185,7 @@ class CompetitionConfig(BaseModel):
     season_start_month: int | None = Field(default=None, ge=1, le=12)
     current_season: str | None = None
     seasons: dict[str, SeasonConfig] = Field(default_factory=dict)
-    schedule: ScheduleConfig | None = None
+    schedule: ScheduleOverride | None = None
 
     @field_validator("current_season", mode="before")
     @classmethod
@@ -194,10 +276,39 @@ class CompetitionFile(BaseModel):
                     f"competition {competition.slug!r} mixes provider competition codes "
                     f"{sorted(codes)}"
                 )
+            try:
+                schedule = self.defaults.schedule.merged(competition.schedule)
+            except ValidationError as error:
+                raise ValueError(
+                    f"competition {competition.slug!r} has an invalid schedule override:\n{error}"
+                ) from error
+            if competition.format not in schedule.match_duration_minutes:
+                raise ValueError(
+                    f"competition {competition.slug!r} has format {competition.format!r} but "
+                    "schedule.match_duration_minutes does not define it"
+                )
         return self
 
     def to_competitions(self) -> dict[str, Competition]:
         return {competition.slug: competition.to_competition() for competition in self.competitions}
+
+    def schedule_for(self, slug: str) -> SchedulePolicy:
+        """Scheduler policy of one competition: ``defaults.schedule`` plus its override."""
+        competition = next((item for item in self.competitions if item.slug == slug), None)
+        override = None if competition is None else competition.schedule
+        return self.defaults.schedule.merged(override).to_policy()
+
+    def schedules(self) -> dict[str, SchedulePolicy]:
+        return {
+            competition.slug: self.schedule_for(competition.slug)
+            for competition in self.competitions
+        }
+
+    def auto_rollover_slugs(self) -> frozenset[str]:
+        """Competitions whose configured ``current_season`` is a floor, not an exact value."""
+        return frozenset(
+            slug for slug, policy in self.schedules().items() if policy.season_rollover == "auto"
+        )
 
 
 def _validate_config(path: Path, contents: bytes) -> CompetitionFile:

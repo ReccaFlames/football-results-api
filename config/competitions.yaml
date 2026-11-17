@@ -5,9 +5,17 @@ defaults:
     match_duration_minutes:
       league: 105
       cup: 135
+    # Poll every 5 min while a result is up to 30 min late, every 15 min up to 4 h, then hourly.
     result_poll_minutes: [5, 15, 60]
+    result_poll_until_minutes: [30, 240]
     idle_interval: 1d
+    off_season_interval: 7d   # used when the next fixture is more than off_season_after away
+    off_season_after: 30d
     failure_backoff_minutes: [5, 15, 30, 60]
+    # auto: discover new seasons and roll current_season forward once the current season is
+    # finished; current_season below then acts as a minimum. manual: current_season is exact.
+    season_rollover: auto
+    season_check_interval: 1d
 
 providers:
   90minut:
