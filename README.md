@@ -23,7 +23,7 @@ league-data API**. This README describes both:
 | Scheduling | Adaptive per-season scheduler driven by fixture times; thresholds from `defaults.schedule` with per-competition overrides | Plus cron-style overrides and global provider quotas |
 | Configuration | Environment variables plus validated YAML for leagues, sources, providers, and schedule defaults | Env vars for infrastructure + one validated config file for leagues, sources, and schedules |
 | Observability | `/health` (DB + scheduler heartbeat), `scrape_run` table, logs; CI with PostgreSQL integration tests | Scheduler/scrape status endpoints, metrics, alerting on stale data |
-| API | Matches of every status with filters, cursor pagination, `fields=` and per-season freshness; computed standings; teams with aliases; manual refresh and historical fetch; RFC 9457 errors, rate limits, and `ETag` caching | Plus authenticated admin endpoints |
+| API | Matches of every status with filters, cursor pagination, `fields=` and per-season freshness; computed standings; teams with aliases; manual refresh and historical fetch; RFC 9457 errors, rate limits, and `ETag` caching; generated `/llms.txt` and `/agents` guide | Plus authenticated admin endpoints |
 
 ## Current state
 
@@ -247,6 +247,39 @@ go through Alembic.
 | GET | `/api/v1/jobs/{job_id}` | `get_job` | Get queued, running, completed, or failed scrape-job status (`X-API-Key` required) |
 
 Interactive documentation is available at `/docs`; the OpenAPI document is at `/openapi.json`.
+Agents should start at `/llms.txt` (see [Agent documentation](#agent-documentation)).
+
+### Agent documentation
+
+Pages for AI agents and people, generated on each request from the OpenAPI document (operation
+IDs, summaries, "when to use" descriptions, parameters, auth, documented problem types) and the
+competitions in the database. They are not operations, so they are absent from `/openapi.json`.
+
+| Path | Content type | Content |
+| --- | --- | --- |
+| `/llms.txt` | `text/markdown; charset=utf-8` | [llms.txt v2](https://llmstxt.org/) index: purpose, base URL, auth, competitions, top 5 tasks with curl, rules, links |
+| `/agents` | `text/html; charset=utf-8` | Agent guide for people: every operation with parameters, auth, and errors, plus conventions |
+| `/agents.md` | `text/markdown; charset=utf-8` | The same guide as Markdown (the llms.txt `.md` alternate) |
+| `/llms-full.txt` | `text/markdown; charset=utf-8` | The guide plus every problem type in one file (a common, non-standard convention) |
+| `/problems`, `/problems/<slug>` | `text/markdown; charset=utf-8` | Meaning and fix of each problem `type`, so `type` URIs resolve |
+
+- The top 5 tasks are: discover competitions, resolve a team slug, a team's latest results,
+  upcoming fixtures, and the league table. Examples use the first configured league.
+- Links and curl examples use `FOOTBALL_RESULTS_PUBLIC_BASE_URL` (for example
+  `https://football.example.com`, optionally with a path prefix). When it is unset, the base URL
+  comes from the request's `Host`; `X-Forwarded-Proto` and `X-Forwarded-Host` count only from
+  `FOOTBALL_RESULTS_TRUSTED_PROXIES`, and the response adds `Vary: Host, X-Forwarded-Host,
+  X-Forwarded-Proto`. Set the variable in production.
+- Pages count against the `read` rate limit and carry `ETag`, `Cache-Control: public,
+  max-age=<FOOTBALL_RESULTS_CACHE_MAX_AGE_SECONDS>`, and `Link` headers (`rel="describedby"` to
+  `/llms.txt`; `/agents` also `rel="alternate"` to `/agents.md`).
+- When the database is unavailable the pages still return `200`, listing competitions from
+  `config/competitions.yaml` with a note and `Cache-Control: no-store`.
+- The CLI and the Agent Skill (roadmap steps 13 and 14) are listed as planned until they exist.
+
+~~~bash
+curl -s http://localhost:8000/llms.txt
+~~~
 
 ### OpenAPI contract
 
@@ -514,7 +547,8 @@ When using Caddy or nginx, set API_BIND_ADDRESS=127.0.0.1 and expose only the re
 HTTP/HTTPS ports through the Ubuntu firewall. Also set `FOOTBALL_RESULTS_TRUSTED_PROXIES` to the address the
 proxy connects from as seen by the API container (for a proxy on the host, the Docker network
 gateway, for example `172.16.0.0/12`), and make the proxy set `X-Forwarded-For`. Otherwise every
-client shares one rate-limit quota.
+client shares one rate-limit quota. Set `FOOTBALL_RESULTS_PUBLIC_BASE_URL` to the public HTTPS URL
+so that `/llms.txt` and `/agents` show the right base URL.
 
 ### Backups
 
@@ -637,6 +671,7 @@ Application variables:
 | FOOTBALL_RESULTS_RATE_LIMIT_WRITE_PER_MINUTE | `10` | `POST` (and other non-read) requests per client per minute |
 | FOOTBALL_RESULTS_TRUSTED_PROXIES | empty | Comma-separated proxy IPs or CIDRs whose `X-Forwarded-For` is trusted for the client address |
 | FOOTBALL_RESULTS_CACHE_MAX_AGE_SECONDS | `60` | Maximum `Cache-Control` `max-age` of read responses; `0` sends `no-cache` |
+| FOOTBALL_RESULTS_PUBLIC_BASE_URL | empty | Absolute public URL (optionally with a path prefix) used in `/llms.txt` and `/agents` links and examples; empty derives it from the request |
 
 Deployment variables (Docker Compose):
 

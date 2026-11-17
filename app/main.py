@@ -1,3 +1,4 @@
+import logging
 import secrets
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -10,16 +11,19 @@ from typing import Annotated, Literal
 from fastapi import Depends, FastAPI, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
+from sqlalchemy.exc import SQLAlchemyError
 
+from app import agent_docs
 from app import api_docs as docs
 from app.caching import (
     CACHEABLE_OPERATIONS,
+    CACHEABLE_PAGES,
     cache_control,
     etag_for,
     if_none_match,
     max_age_seconds,
 )
-from app.competitions import provider_competition_code, source_from_url
+from app.competitions import competition_summary, provider_competition_code, source_from_url
 from app.config import load_config, parse_networks, settings
 from app.contract import (
     DEFAULT_LIMIT,
@@ -35,6 +39,7 @@ from app.contract import (
 )
 from app.database import session_factory
 from app.models import (
+    PROBLEM_TYPES,
     Competition,
     CompetitionSummary,
     Freshness,
@@ -65,6 +70,7 @@ from app.repository import ActiveScrapeJobConflict, PostgresResultRepository
 from app.seasons import SEASON_PATTERN, validate_season
 from app.standings import compute_standings
 
+logger = logging.getLogger(__name__)
 store = PostgresResultRepository(session_factory)
 rate_limiter = FixedWindowRateLimiter()
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -209,12 +215,13 @@ async def rate_limit_and_cache(
     response.headers.update(rate_headers)
     route = request.scope.get("route")
     operation_id = getattr(route, "operation_id", None)
-    if response.status_code >= 400 or (
-        operation_id is not None and operation_id not in CACHEABLE_OPERATIONS
-    ):
+    cacheable = (
+        operation_id in CACHEABLE_OPERATIONS or getattr(route, "path", None) in CACHEABLE_PAGES
+    )
+    if response.status_code >= 400 or (operation_id is not None and not cacheable):
         response.headers["Cache-Control"] = "no-store"
         return response
-    if operation_id is None or request.method != "GET" or response.status_code != 200:
+    if not cacheable or request.method != "GET" or response.status_code != 200:
         return response
 
     body = b"".join([chunk async for chunk in response.body_iterator])  # type: ignore[attr-defined]
@@ -845,3 +852,123 @@ async def fetch_historical_results(
     except ActiveScrapeJobConflict as error:
         raise ProblemError("job-conflict", str(error)) from error
     return _job_accepted(response, job_id, status)
+
+
+# Agent documentation: `/llms.txt`, `/llms-full.txt`, `/agents`, `/agents.md`, `/problems/...`.
+# Generated from the OpenAPI spec and the competitions; not part of the OpenAPI spec itself.
+
+
+def _public_base_url(request: Request) -> tuple[str, bool]:
+    """The base URL for links and examples, and whether it was derived from the request."""
+    if settings.public_base_url:
+        return settings.public_base_url, False
+    base_url = agent_docs.request_base_url(
+        scheme=request.url.scheme,
+        host=request.headers.get("host"),
+        root_path=request.scope.get("root_path", ""),
+        peer=request.client.host if request.client else None,
+        forwarded_proto=request.headers.get("X-Forwarded-Proto"),
+        forwarded_host=request.headers.get("X-Forwarded-Host"),
+        trusted_proxies=_trusted_proxies(settings.trusted_proxies),
+    )
+    return base_url, True
+
+
+def _page_headers(
+    base_url: str, request_derived: bool, *, cacheable: bool = True, alternate: str | None = None
+) -> dict[str, str]:
+    headers = {
+        "Link": agent_docs.link_header(base_url, alternate=alternate),
+        "Cache-Control": (
+            cache_control(settings.cache_max_age_seconds) if cacheable else "no-store"
+        ),
+    }
+    if request_derived:
+        headers["Vary"] = agent_docs.REQUEST_DERIVED_VARY
+    return headers
+
+
+async def _agent_guide(
+    request: Request, *, competitions_needed: bool = True
+) -> tuple[agent_docs.AgentGuide, str, bool]:
+    base_url, request_derived = _public_base_url(request)
+    competitions: list[CompetitionSummary] = []
+    live = True
+    if competitions_needed:
+        try:
+            competitions = await store.list_competitions()
+        except (SQLAlchemyError, OSError):
+            logger.warning("Agent docs use the configuration file: database unavailable")
+            competitions = [
+                competition_summary(item) for item in load_config().to_competitions().values()
+            ]
+            live = False
+    guide = agent_docs.build_guide(
+        app.openapi(),
+        competitions,
+        base_url=base_url,
+        competitions_live=live,
+        rate_limits=agent_docs.RateLimits(
+            settings.rate_limit_enabled,
+            settings.rate_limit_read_per_minute,
+            settings.rate_limit_write_per_minute,
+        ),
+        cache_max_age_seconds=settings.cache_max_age_seconds,
+    )
+    return guide, base_url, request_derived
+
+
+def _markdown(content: str, headers: dict[str, str]) -> Response:
+    return Response(content, media_type=agent_docs.MARKDOWN_MEDIA_TYPE, headers=headers)
+
+
+@app.get("/llms.txt", include_in_schema=False)
+async def llms_txt(request: Request) -> Response:
+    guide, base_url, derived = await _agent_guide(request)
+    headers = _page_headers(base_url, derived, cacheable=guide.competitions_live)
+    return _markdown(agent_docs.llms_txt(guide), headers)
+
+
+@app.get("/llms-full.txt", include_in_schema=False)
+async def llms_full_txt(request: Request) -> Response:
+    guide, base_url, derived = await _agent_guide(request)
+    headers = _page_headers(base_url, derived, cacheable=guide.competitions_live)
+    return _markdown(agent_docs.llms_full_txt(guide), headers)
+
+
+@app.get("/agents.md", include_in_schema=False)
+async def agents_markdown(request: Request) -> Response:
+    guide, base_url, derived = await _agent_guide(request)
+    headers = _page_headers(base_url, derived, cacheable=guide.competitions_live)
+    return _markdown(agent_docs.agent_guide_markdown(guide), headers)
+
+
+@app.get("/agents", include_in_schema=False)
+async def agents_page(request: Request) -> Response:
+    guide, base_url, derived = await _agent_guide(request)
+    headers = _page_headers(
+        base_url, derived, cacheable=guide.competitions_live, alternate="/agents.md"
+    )
+    return Response(
+        agent_docs.agent_guide_html(guide), media_type=agent_docs.HTML_MEDIA_TYPE, headers=headers
+    )
+
+
+@app.get("/problems", include_in_schema=False)
+async def problem_index(request: Request) -> Response:
+    guide, base_url, derived = await _agent_guide(request, competitions_needed=False)
+    return _markdown(agent_docs.problem_index_markdown(guide), _page_headers(base_url, derived))
+
+
+@app.get("/problems/{slug}", include_in_schema=False)
+async def problem_page(request: Request, slug: str) -> Response:
+    if slug not in PROBLEM_TYPES:
+        raise ProblemError(
+            "not-found",
+            f"Unknown problem type: {slug}",
+            parameter="slug",
+            invalid=[slug],
+            valid_values=list(PROBLEM_TYPES),
+        )
+    guide, base_url, derived = await _agent_guide(request, competitions_needed=False)
+    return _markdown(agent_docs.problem_markdown(guide, slug), _page_headers(base_url, derived))

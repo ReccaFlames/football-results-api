@@ -1,0 +1,919 @@
+"""Agent-facing documentation generated from the OpenAPI spec and the competition data.
+
+Backs `/llms.txt` (llmstxt.org v2), `/agents` (HTML), `/agents.md`, `/llms-full.txt`, and the
+`/problems/<slug>` pages. Everything here is pure: callers pass the OpenAPI document, the
+competitions, and the public base URL. Pages are built as `Block`s so that the Markdown and the
+HTML renderings always carry the same content.
+"""
+
+import re
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
+from html import escape
+from ipaddress import IPv4Network, IPv6Network
+from typing import Any
+
+from app.models import PROBLEM_TYPES, CompetitionSummary
+from app.problems import PROBLEM_MEDIA_TYPE
+from app.ratelimit import is_trusted_proxy
+
+MARKDOWN_MEDIA_TYPE = "text/markdown; charset=utf-8"
+HTML_MEDIA_TYPE = "text/html; charset=utf-8"
+HTTP_METHODS = ("get", "post", "put", "patch", "delete")
+REQUEST_DERIVED_VARY = "Host, X-Forwarded-Host, X-Forwarded-Proto"
+
+# Meaning and fix for every registered problem type; a test keeps this in sync with PROBLEM_TYPES.
+PROBLEM_GUIDANCE: dict[str, tuple[str, str]] = {
+    "invalid-cursor": (
+        "The `cursor` is malformed, or it belongs to a request with other filters or order.",
+        (
+            "Pass `pagination.next_cursor` unchanged with the same filters, or omit `cursor` to "
+            "start again."
+        ),
+    ),
+    "unauthorized": (
+        "The operation needs an API key, and `X-API-Key` is missing or wrong.",
+        "Send a key issued by the operator in the `X-API-Key` header. Read operations need no key.",
+    ),
+    "unknown-competition": (
+        "No competition has this slug.",
+        "Use a slug from `valid_values` or from `list_competitions`.",
+    ),
+    "unknown-season": (
+        "The competition has no such season.",
+        (
+            "Use a season from `valid_values`; `list_competitions` lists `available_seasons`. "
+            "Seasons are `2026-2027` (split) or `2026` (calendar), depending on `season_format`."
+        ),
+    ),
+    "unknown-job": (
+        "No import job has this ID.",
+        "Use the `status_url` returned by `request_refresh` or `fetch_historical_season`.",
+    ),
+    "not-found": (
+        "No route matches the request path.",
+        "Check the path against `/openapi.json` or `/llms.txt`.",
+    ),
+    "method-not-allowed": (
+        "The path exists, but not for this HTTP method.",
+        "Use the method documented in `/openapi.json`.",
+    ),
+    "job-conflict": (
+        "An import job for this competition-season is already active with another source URL.",
+        "Poll the active job with `get_job` until it finishes, then retry.",
+    ),
+    "invalid-parameter": (
+        (
+            "A parameter has an unsupported value: an unknown `fields` entry or `status`, a date "
+            "that is not ISO 8601, a cup table without `stage`, or a competition without a current "
+            "season."
+        ),
+        "Correct `parameter` using `valid_values` or `examples`.",
+    ),
+    "validation-error": (
+        (
+            "The request failed schema validation: a wrong type, a value out of range, a pattern "
+            "mismatch, or a missing required field."
+        ),
+        "Fix every entry of `errors`; `loc` names the parameter and `msg` says what is wrong.",
+    ),
+    "invalid-request": (
+        (
+            "The request is well-formed but not allowed for this competition or season, for "
+            "example a refresh of a season that is not current, or an unsupported `source_url`."
+        ),
+        (
+            "Follow `hint`: use `request_refresh` for the current season and "
+            "`fetch_historical_season` for other seasons."
+        ),
+    ),
+    "rate-limited": (
+        "This client sent too many requests in the current window.",
+        (
+            "Wait `Retry-After` seconds. Revalidate with `If-None-Match` and use "
+            "`freshness[].next_update_at` instead of polling."
+        ),
+    ),
+    "internal-error": (
+        "An unexpected server error occurred.",
+        "Retry later; report it to the operator if it persists.",
+    ),
+    "writes-disabled": (
+        "The operator has configured no API keys, so write operations are switched off.",
+        (
+            "A client cannot fix this; the operator must set `FOOTBALL_RESULTS_API_KEYS`. Read "
+            "operations still work."
+        ),
+    ),
+    "service-unavailable": (
+        "A dependency such as the database is unavailable.",
+        "Retry later with backoff.",
+    ),
+}
+
+PLANNED_TOOLS_NOTE = (
+    "A command-line client (`football-results`) and an Agent Skill are planned (roadmap steps "
+    "13 and 14) but not available yet; use curl or the OpenAPI spec meanwhile."
+)
+
+
+# --- Document blocks ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Heading:
+    level: int
+    text: str
+
+
+@dataclass(frozen=True)
+class Paragraph:
+    text: str
+
+
+@dataclass(frozen=True)
+class Quote:
+    text: str
+
+
+@dataclass(frozen=True)
+class Code:
+    text: str
+    language: str = "sh"
+
+
+@dataclass(frozen=True)
+class Bullets:
+    items: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class Table:
+    headers: tuple[str, ...]
+    rows: tuple[tuple[str, ...], ...]
+
+
+Block = Heading | Paragraph | Quote | Code | Bullets | Table
+
+
+def render_markdown(blocks: Iterable[Block]) -> str:
+    return "\n\n".join(_markdown_block(block) for block in blocks) + "\n"
+
+
+def _markdown_block(block: Block) -> str:
+    match block:
+        case Heading(level, text):
+            return f"{'#' * level} {text}"
+        case Paragraph(text):
+            return text
+        case Quote(text):
+            return f"> {text}"
+        case Code(text, language):
+            return f"```{language}\n{text}\n```"
+        case Bullets(items):
+            return "\n".join(f"- {item}" for item in items)
+        case Table(headers, rows):
+            lines = [_markdown_row(headers), _markdown_row(tuple("---" for _ in headers))]
+            lines.extend(_markdown_row(row) for row in rows)
+            return "\n".join(lines)
+
+
+def _markdown_row(cells: Sequence[str]) -> str:
+    return "| " + " | ".join(cell.replace("|", "\\|").replace("\n", " ") for cell in cells) + " |"
+
+
+_CODE_SPAN = re.compile(r"`([^`]+)`")
+_LINK = re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)")
+_BOLD = re.compile(r"\*\*(.+?)\*\*")
+
+
+def inline_html(text: str) -> str:
+    """Render the inline Markdown subset used in blocks: code spans, links, and bold."""
+    parts: list[str] = []
+    position = 0
+    for match in _CODE_SPAN.finditer(text):
+        parts.append(_prose_html(text[position : match.start()]))
+        parts.append(f"<code>{escape(match.group(1))}</code>")
+        position = match.end()
+    parts.append(_prose_html(text[position:]))
+    return "".join(parts)
+
+
+def _prose_html(text: str) -> str:
+    html = escape(text)
+    html = _LINK.sub(lambda match: f'<a href="{match.group(2)}">{match.group(1)}</a>', html)
+    return _BOLD.sub(r"<strong>\1</strong>", html)
+
+
+def render_html(blocks: Iterable[Block], *, title: str, links: Mapping[str, str]) -> str:
+    """A standalone HTML page; ``links`` maps `<link>` relations to absolute URLs."""
+    head_links = "".join(
+        f'<link rel="{relation}"{_link_type(relation)} href="{escape(url)}">'
+        for relation, url in links.items()
+    )
+    body = "\n".join(_html_block(block) for block in blocks)
+    return (
+        '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        f"<title>{escape(title)}</title>\n{head_links}\n<style>{_STYLE}</style>\n</head>\n"
+        f"<body>\n{body}\n</body>\n</html>\n"
+    )
+
+
+def _link_type(relation: str) -> str:
+    return ' type="text/markdown"' if relation == "alternate" else ""
+
+
+_STYLE = (
+    "body{font-family:system-ui,sans-serif;max-width:64rem;margin:2rem auto;padding:0 1rem;"
+    "line-height:1.5}pre{background:#f4f4f4;padding:.75rem;overflow-x:auto}"
+    "code{font-family:ui-monospace,monospace}table{border-collapse:collapse;margin:1rem 0}"
+    "th,td{border:1px solid #ccc;padding:.25rem .5rem;text-align:left;vertical-align:top}"
+    "blockquote{margin-left:0;padding-left:1rem;border-left:4px solid #ccc}"
+)
+
+
+def _html_block(block: Block) -> str:
+    match block:
+        case Heading(level, text):
+            return f"<h{level}>{inline_html(text)}</h{level}>"
+        case Paragraph(text):
+            return f"<p>{inline_html(text)}</p>"
+        case Quote(text):
+            return f"<blockquote><p>{inline_html(text)}</p></blockquote>"
+        case Code(text, language):
+            return f'<pre><code class="language-{language}">{escape(text)}</code></pre>'
+        case Bullets(items):
+            return "<ul>" + "".join(f"<li>{inline_html(item)}</li>" for item in items) + "</ul>"
+        case Table(headers, rows):
+            head = "".join(f"<th>{inline_html(cell)}</th>" for cell in headers)
+            body = "".join(
+                "<tr>" + "".join(f"<td>{inline_html(cell)}</td>" for cell in row) + "</tr>"
+                for row in rows
+            )
+            return f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
+
+
+# --- OpenAPI extraction --------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Parameter:
+    name: str
+    location: str
+    required: bool
+    description: str
+    example: str | None = None
+    default: str | None = None
+    values: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class Operation:
+    operation_id: str
+    method: str
+    path: str
+    tag: str
+    summary: str
+    description: str
+    deprecated: bool
+    requires_api_key: bool
+    parameters: tuple[Parameter, ...]
+    problem_types: tuple[str, ...]
+
+    def parameter(self, name: str) -> Parameter | None:
+        return next((item for item in self.parameters if item.name == name), None)
+
+
+def operations_from_openapi(spec: Mapping[str, Any]) -> tuple[Operation, ...]:
+    schemas = spec.get("components", {}).get("schemas", {})
+    operations = []
+    for path, item in spec.get("paths", {}).items():
+        for method in HTTP_METHODS:
+            operation = item.get(method)
+            if operation is None:
+                continue
+            parameters = [_parameter(value) for value in operation.get("parameters", [])]
+            parameters.extend(_body_parameters(operation.get("requestBody"), schemas))
+            operations.append(
+                Operation(
+                    operation_id=operation["operationId"],
+                    method=method.upper(),
+                    path=path,
+                    tag=(operation.get("tags") or [""])[0],
+                    summary=operation.get("summary", ""),
+                    description=operation.get("description", ""),
+                    deprecated=bool(operation.get("deprecated")),
+                    requires_api_key=bool(operation.get("security")),
+                    parameters=tuple(parameters),
+                    problem_types=_problem_types(operation.get("responses", {})),
+                )
+            )
+    return tuple(operations)
+
+
+def _parameter(value: Mapping[str, Any]) -> Parameter:
+    schema = value.get("schema", {})
+    return Parameter(
+        name=value["name"],
+        location=value["in"],
+        required=bool(value.get("required")),
+        description=value.get("description") or schema.get("description", ""),
+        example=_example(value, schema),
+        default=_text(schema.get("default")),
+        values=_enum(schema),
+    )
+
+
+def _body_parameters(body: Mapping[str, Any] | None, schemas: Mapping[str, Any]) -> list[Parameter]:
+    if not body:
+        return []
+    schema = body.get("content", {}).get("application/json", {}).get("schema", {})
+    if "$ref" in schema:
+        schema = schemas.get(schema["$ref"].rsplit("/", 1)[-1], {})
+    required = set(schema.get("required", []))
+    return [
+        Parameter(
+            name=name,
+            location="body",
+            required=name in required,
+            description=field.get("description", ""),
+            example=_example(field, field),
+            default=_text(field.get("default")),
+            values=_enum(field),
+        )
+        for name, field in schema.get("properties", {}).items()
+    ]
+
+
+def _example(value: Mapping[str, Any], schema: Mapping[str, Any]) -> str | None:
+    for source in (value, schema):
+        if "example" in source:
+            return _text(source["example"])
+        if source.get("examples"):
+            examples = source["examples"]
+            if isinstance(examples, list):
+                return _text(examples[0])
+    return None
+
+
+def _enum(schema: Mapping[str, Any]) -> tuple[str, ...]:
+    for candidate in (schema, *schema.get("anyOf", [])):
+        if "enum" in candidate:
+            return tuple(str(item) for item in candidate["enum"])
+    return ()
+
+
+def _text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return str(value).lower()
+    return str(value)
+
+
+def _problem_types(responses: Mapping[str, Any]) -> tuple[str, ...]:
+    found: list[str] = []
+    for status in sorted(responses):
+        content = responses[status].get("content", {}).get(PROBLEM_MEDIA_TYPE, {})
+        for example in content.get("examples", {}).values():
+            slug = example.get("value", {}).get("type", "").removeprefix("/problems/")
+            if slug in PROBLEM_TYPES and slug not in found:
+                found.append(slug)
+    return tuple(found)
+
+
+# --- Guide ---------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Task:
+    title: str
+    purpose: str
+    operation: Operation
+    query: tuple[tuple[str, str], ...] = ()
+
+    def url(self, base_url: str) -> str:
+        query = "&".join(f"{name}={value}" for name, value in self.query)
+        return f"{base_url}{self.operation.path}" + (f"?{query}" if query else "")
+
+    def curl(self, base_url: str) -> str:
+        return f'curl -s "{self.url(base_url)}"'
+
+
+@dataclass(frozen=True)
+class ToolLink:
+    """A client tool (CLI or Agent Skill) to advertise once it exists."""
+
+    name: str
+    url: str
+    description: str
+
+
+@dataclass(frozen=True)
+class RateLimits:
+    enabled: bool
+    read_per_minute: int
+    write_per_minute: int
+
+
+@dataclass(frozen=True)
+class AgentGuide:
+    title: str
+    version: str
+    summary: str
+    description: str
+    base_url: str
+    tags: tuple[tuple[str, str], ...]
+    operations: tuple[Operation, ...]
+    competitions: tuple[CompetitionSummary, ...]
+    competitions_live: bool
+    tasks: tuple[Task, ...]
+    rate_limits: RateLimits
+    cache_max_age_seconds: int
+    tools: tuple[ToolLink, ...] = ()
+
+    def url(self, path: str) -> str:
+        return f"{self.base_url}{path}"
+
+    def operation(self, operation_id: str) -> Operation:
+        return next(item for item in self.operations if item.operation_id == operation_id)
+
+
+def build_guide(
+    spec: Mapping[str, Any],
+    competitions: Sequence[CompetitionSummary],
+    *,
+    base_url: str,
+    competitions_live: bool,
+    rate_limits: RateLimits,
+    cache_max_age_seconds: int,
+    tools: Sequence[ToolLink] = (),
+) -> AgentGuide:
+    info = spec.get("info", {})
+    description = info.get("description", "").strip()
+    operations = operations_from_openapi(spec)
+    return AgentGuide(
+        title=info.get("title", "API"),
+        version=info.get("version", ""),
+        summary=" ".join(description.split("\n\n", 1)[0].split()),
+        description=description,
+        base_url=base_url.rstrip("/"),
+        tags=tuple((tag["name"], tag.get("description", "")) for tag in spec.get("tags", [])),
+        operations=operations,
+        competitions=tuple(competitions),
+        competitions_live=competitions_live,
+        tasks=top_tasks(operations, competitions),
+        rate_limits=rate_limits,
+        cache_max_age_seconds=cache_max_age_seconds,
+        tools=tuple(tools),
+    )
+
+
+def top_tasks(
+    operations: Sequence[Operation], competitions: Sequence[CompetitionSummary]
+) -> tuple[Task, ...]:
+    """The five most common tasks; raises ``ValueError`` if one uses an undocumented parameter."""
+    by_id = {item.operation_id: item for item in operations}
+    matches = by_id["list_matches"]
+    competition = _example_competition(competitions, matches)
+    team = (matches.parameter("team") or Parameter("team", "query", False, "")).example
+    team = team or "legia-warszawa"
+    tasks = (
+        Task(
+            "Discover competitions and seasons",
+            "Find competition slugs, each current season, and which seasons are stored.",
+            by_id["list_competitions"],
+        ),
+        Task(
+            "Resolve a team slug",
+            "Turn a team name into the canonical `slug` used by the `team` filter.",
+            by_id["list_teams"],
+            (("competition", competition), ("q", team.split("-")[0])),
+        ),
+        Task(
+            "Get a team's latest results",
+            "Newest finished matches first; use a `slug` from the previous task as `team`.",
+            matches,
+            (
+                ("competition", competition),
+                ("team", team),
+                ("status", "finished"),
+                ("order", "desc"),
+                ("limit", "5"),
+                ("fields", "kickoff_at,home_team,away_team,home_goals,away_goals"),
+            ),
+        ),
+        Task(
+            "List upcoming fixtures",
+            "Scheduled matches from today (UTC), soonest first.",
+            matches,
+            (
+                ("competition", competition),
+                ("status", "scheduled"),
+                ("date_from", "$(date -u +%F)"),
+                ("limit", "10"),
+                ("fields", "kickoff_at,round,home_team,away_team"),
+            ),
+        ),
+        Task(
+            "Get the league table",
+            "Positions, points, and form for the current season (pass `season` for another).",
+            by_id["get_standings"],
+            (("competition", competition), ("fields", "position,team_name,played,points,form")),
+        ),
+    )
+    for task in tasks:
+        for name, _ in task.query:
+            if task.operation.parameter(name) is None:
+                raise ValueError(f"{task.operation.operation_id} has no parameter {name!r}")
+    return tasks
+
+
+def _example_competition(competitions: Sequence[CompetitionSummary], matches: Operation) -> str:
+    leagues = [item for item in competitions if item.format == "league" and item.current_season]
+    if leagues or competitions:
+        return (leagues or list(competitions))[0].slug
+    parameter = matches.parameter("competition")
+    return (parameter.example if parameter else None) or "ekstraklasa"
+
+
+# --- Base URL ------------------------------------------------------------------------------
+
+_HOST = re.compile(r"(?:[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*|\[[0-9A-Fa-f:.]+\])(?::\d{1,5})?")
+
+
+def request_base_url(
+    *,
+    scheme: str,
+    host: str | None,
+    root_path: str,
+    peer: str | None,
+    forwarded_proto: str | None,
+    forwarded_host: str | None,
+    trusted_proxies: Sequence[IPv4Network | IPv6Network],
+) -> str:
+    """The public base URL derived from a request (used when no base URL is configured).
+
+    ``X-Forwarded-Proto`` and ``X-Forwarded-Host`` count only when the peer is a trusted proxy;
+    a host that is not a plain host name or IP address falls back to ``localhost``.
+    """
+    if peer is not None and trusted_proxies and is_trusted_proxy(peer, trusted_proxies):
+        proto = _first(forwarded_proto)
+        scheme = proto.lower() if proto and proto.lower() in {"http", "https"} else scheme
+        host = _first(forwarded_host) or host
+    if host is None or _HOST.fullmatch(host) is None:
+        host = "localhost"
+    return f"{scheme}://{host}{root_path.rstrip('/')}"
+
+
+def _first(header: str | None) -> str | None:
+    if not header:
+        return None
+    return header.split(",", 1)[0].strip() or None
+
+
+def link_header(base_url: str, *, alternate: str | None = None) -> str:
+    links = []
+    if alternate is not None:
+        links.append(f'<{base_url}{alternate}>; rel="alternate"; type="text/markdown"')
+    links.append(f'<{base_url}/llms.txt>; rel="describedby"')
+    return ", ".join(links)
+
+
+# --- Pages ---------------------------------------------------------------------------------
+
+
+def llms_txt(guide: AgentGuide) -> str:
+    """`/llms.txt` per llmstxt.org v2: H1, summary blockquote, details, then H2 link lists."""
+    blocks: list[Block] = [
+        Heading(1, guide.title),
+        Quote(guide.summary),
+        Paragraph(
+            f"Base URL: `{guide.base_url}` (API version {guide.version}). JSON over HTTP; "
+            f"the contract is the [OpenAPI spec]({guide.url('/openapi.json')}), and "
+            "operation IDs such as `list_matches` are stable names."
+        ),
+        Paragraph(_auth_text(guide)),
+        Paragraph("Competitions on this instance:"),
+        Bullets(_competition_lines(guide)),
+        Paragraph("Top 5 tasks:"),
+    ]
+    for number, task in enumerate(guide.tasks, start=1):
+        blocks.append(
+            Paragraph(
+                f"Task {number}: **{task.title}** (`{task.operation.operation_id}`). {task.purpose}"
+            )
+        )
+        blocks.append(Code(task.curl(guide.base_url)))
+    blocks.append(Paragraph("Rules:"))
+    blocks.append(Bullets(_rules(guide)))
+    if not guide.tools:
+        blocks.append(Paragraph(PLANNED_TOOLS_NOTE))
+    blocks.extend(
+        [
+            Heading(2, "API reference"),
+            Bullets(
+                (
+                    (
+                        f"[Agent guide]({guide.url('/agents.md')}): every operation with its "
+                        "parameters, auth, and errors, plus the conventions"
+                    ),
+                    (
+                        f"[Full reference]({guide.url('/llms-full.txt')}): the agent guide and "
+                        "every problem type in one file"
+                    ),
+                    (
+                        f"[OpenAPI spec]({guide.url('/openapi.json')}): the machine-readable "
+                        "contract (OpenAPI 3.1)"
+                    ),
+                )
+            ),
+            Heading(2, "Optional"),
+            Bullets(
+                (
+                    (
+                        f"[Problem types]({guide.url('/problems')}): the meaning and fix of every "
+                        "error `type`"
+                    ),
+                    f"[Agent guide (HTML)]({guide.url('/agents')}): the agent guide for people",
+                    f"[Swagger UI]({guide.url('/docs')}): interactive API documentation",
+                )
+            ),
+        ]
+    )
+    if guide.tools:
+        blocks[-2:-2] = _tools_blocks(guide)
+    return render_markdown(blocks)
+
+
+def agent_guide_blocks(guide: AgentGuide) -> list[Block]:
+    """The `/agents` and `/agents.md` page."""
+    blocks: list[Block] = [
+        Heading(1, f"{guide.title}: agent guide"),
+        Quote(guide.summary),
+        Paragraph(
+            f"Version {guide.version}. Base URL: `{guide.base_url}`. "
+            f"[OpenAPI spec]({guide.url('/openapi.json')}) · [llms.txt]({guide.url('/llms.txt')})"
+            f" · [Full reference]({guide.url('/llms-full.txt')})"
+        ),
+        Heading(2, "Quick start"),
+    ]
+    for task in guide.tasks:
+        blocks.extend(
+            [
+                Heading(3, task.title),
+                Paragraph(f"{task.purpose} Operation: `{task.operation.operation_id}`."),
+                Code(task.curl(guide.base_url)),
+            ]
+        )
+    blocks.extend([Heading(2, "Competitions")])
+    if not guide.competitions_live:
+        blocks.append(
+            Paragraph(
+                "**The database is unavailable**, so this list comes from the configuration "
+                "file; current seasons may lag, and stored seasons are unknown."
+            )
+        )
+    blocks.append(
+        Table(
+            ("Slug", "Name", "Country", "Format", "Season format", "Current season", "Stored"),
+            tuple(
+                (
+                    f"`{item.slug}`",
+                    item.name,
+                    item.country or "",
+                    item.format,
+                    item.season_format,
+                    item.current_season or "none",
+                    ", ".join(item.fetched_seasons) or "none",
+                )
+                for item in guide.competitions
+            ),
+        )
+    )
+    blocks.extend(
+        [
+            Heading(2, "Authentication"),
+            Paragraph(_auth_text(guide)),
+            Heading(2, "Conventions"),
+            Bullets(_rules(guide) + _conventions(guide)),
+            Heading(2, "Operations"),
+        ]
+    )
+    for tag, tag_description in guide.tags:
+        operations = [item for item in guide.operations if item.tag == tag]
+        if not operations:
+            continue
+        blocks.extend([Heading(3, tag), Paragraph(tag_description)])
+        for operation in operations:
+            blocks.extend(_operation_blocks(guide, operation))
+    blocks.extend(
+        [
+            Heading(2, "Problem types"),
+            Paragraph(
+                "Errors are RFC 9457 problem details (`application/problem+json`) with `type`, "
+                "`title`, `status`, `detail`, and `instance`, plus `parameter`, `invalid`, "
+                "`valid_values`, `hint`, `examples`, or `errors` when relevant."
+            ),
+            Table(
+                ("Type", "Status", "Meaning"),
+                tuple(
+                    (
+                        f"[/problems/{slug}]({guide.url(f'/problems/{slug}')})",
+                        str(status),
+                        PROBLEM_GUIDANCE[slug][0],
+                    )
+                    for slug, (status, _) in PROBLEM_TYPES.items()
+                ),
+            ),
+        ]
+    )
+    blocks.extend(_tools_blocks(guide))
+    return blocks
+
+
+def agent_guide_markdown(guide: AgentGuide) -> str:
+    return render_markdown(agent_guide_blocks(guide))
+
+
+def agent_guide_html(guide: AgentGuide) -> str:
+    return render_html(
+        agent_guide_blocks(guide),
+        title=f"{guide.title}: agent guide",
+        links={"alternate": guide.url("/agents.md"), "describedby": guide.url("/llms.txt")},
+    )
+
+
+def llms_full_txt(guide: AgentGuide) -> str:
+    blocks = agent_guide_blocks(guide)
+    blocks.append(Heading(2, "Problem type details"))
+    for slug in PROBLEM_TYPES:
+        blocks.extend(_problem_detail_blocks(guide, slug, level=3))
+    return render_markdown(blocks)
+
+
+def problem_index_markdown(guide: AgentGuide) -> str:
+    return render_markdown(
+        [
+            Heading(1, "Problem types"),
+            Quote(
+                f"Every error of {guide.title} is `application/problem+json` (RFC 9457); its "
+                "`type` is one of these URIs. Branch on `type`, never on `detail`."
+            ),
+            Bullets(
+                tuple(
+                    f"[/problems/{slug}]({guide.url(f'/problems/{slug}')}) ({status}): {title}"
+                    for slug, (status, title) in PROBLEM_TYPES.items()
+                )
+            ),
+        ]
+    )
+
+
+def problem_markdown(guide: AgentGuide, slug: str) -> str:
+    return render_markdown(_problem_detail_blocks(guide, slug, level=1))
+
+
+def _problem_detail_blocks(guide: AgentGuide, slug: str, *, level: int) -> list[Block]:
+    status, title = PROBLEM_TYPES[slug]
+    meaning, fix = PROBLEM_GUIDANCE[slug]
+    operations = [item.operation_id for item in guide.operations if slug in item.problem_types]
+    returned_by = (
+        "Documented for " + ", ".join(f"`{item}`" for item in operations) + "."
+        if operations
+        else "Not tied to one operation; any request can receive it."
+    )
+    return [
+        Heading(level, f"{title} ({slug})"),
+        Quote(f"`type`: `/problems/{slug}` · HTTP status {status}"),
+        Paragraph(meaning),
+        Paragraph(f"**How to fix:** {fix}"),
+        Paragraph(returned_by),
+    ]
+
+
+def _operation_blocks(guide: AgentGuide, operation: Operation) -> list[Block]:
+    flags = ["requires `X-API-Key`" if operation.requires_api_key else "no auth"]
+    if operation.deprecated:
+        flags.append("**deprecated**")
+    blocks: list[Block] = [
+        Heading(4, f"`{operation.operation_id}`: {operation.summary}"),
+        Paragraph(f"`{operation.method} {operation.path}` · " + " · ".join(flags)),
+        Paragraph(operation.description),
+    ]
+    if operation.parameters:
+        blocks.append(
+            Table(
+                ("Parameter", "In", "Required", "Description", "Example"),
+                tuple(
+                    (
+                        f"`{item.name}`",
+                        item.location,
+                        "yes" if item.required else "no",
+                        _parameter_description(item),
+                        f"`{item.example}`" if item.example is not None else "",
+                    )
+                    for item in operation.parameters
+                ),
+            )
+        )
+    if operation.problem_types:
+        errors = ", ".join(
+            f"[{slug}]({guide.url(f'/problems/{slug}')}) ({PROBLEM_TYPES[slug][0]})"
+            for slug in operation.problem_types
+        )
+        blocks.append(Paragraph(f"Errors: {errors}."))
+    return blocks
+
+
+def _parameter_description(parameter: Parameter) -> str:
+    sentences = [parameter.description.strip().rstrip(".")] if parameter.description else []
+    if parameter.values:
+        sentences.append("One of: " + ", ".join(f"`{value}`" for value in parameter.values))
+    if parameter.default is not None:
+        sentences.append(f"Default: `{parameter.default}`")
+    return "".join(f"{sentence}. " for sentence in sentences if sentence).strip()
+
+
+def _auth_text(guide: AgentGuide) -> str:
+    protected = [item.operation_id for item in guide.operations if item.requires_api_key]
+    return (
+        "**Auth:** read operations need no authentication. "
+        + ", ".join(f"`{item}`" for item in protected)
+        + " need an `X-API-Key` header with a key issued by the operator; without one they "
+        "return `401` (or `503` when the instance has writes disabled). Use them only when data "
+        "is missing or stale: the scheduler refreshes current seasons automatically."
+    )
+
+
+def _competition_lines(guide: AgentGuide) -> tuple[str, ...]:
+    lines = [
+        f"`{item.slug}`: {item.name} ({item.format}, {item.season_format} seasons, current "
+        f"season {item.current_season or 'none'})"
+        for item in guide.competitions
+    ]
+    if not guide.competitions_live:
+        lines.append("Live data is unavailable; this list comes from the configuration file.")
+    return tuple(lines) or ("None configured.",)
+
+
+def _rules(guide: AgentGuide) -> tuple[str, ...]:
+    limits = guide.rate_limits
+    rate = (
+        f"Rate limits: {limits.read_per_minute} reads and {limits.write_per_minute} writes per "
+        "minute per client (`RateLimit` and `RateLimit-Policy` headers); on `429` wait "
+        "`Retry-After` seconds."
+        if limits.enabled
+        else "Rate limiting is disabled on this instance."
+    )
+    return (
+        (
+            "Errors are `application/problem+json`: branch on `type`, then correct the request with "
+            "`parameter`, `valid_values`, `hint`, and `examples`."
+        ),
+        "Unknown values are `null`, never `0`; a provider may not supply every statistic.",
+        (
+            "List responses are `{data, pagination, freshness}`; follow `pagination.next_cursor` "
+            "with the same filters until it is `null`."
+        ),
+        "Use `fields=` for compact items (`id` is always included).",
+        (
+            "`freshness` reports `data_as_of` and `next_update_at` per competition-season; do not "
+            "poll before `next_update_at`."
+        ),
+        rate,
+    )
+
+
+def _conventions(guide: AgentGuide) -> tuple[str, ...]:
+    return (
+        (
+            "Seasons are strings: `2026-2027` for split seasons, `2026` for calendar-year seasons "
+            "(see `season_format` in `list_competitions`)."
+        ),
+        (
+            "Times are ISO 8601 with an offset; `date_from` and `date_to` take dates or datetimes, "
+            "and naive values are UTC."
+        ),
+        (
+            "Match `status` is `finished`, `scheduled`, or `inactive` (postponed or cancelled); "
+            "`list_matches` covers all of them, while the deprecated `list_results` returns only "
+            "finished matches."
+        ),
+        "Match `id`s and team slugs are stable across refreshes; store them, not names.",
+        (
+            "Read responses carry a weak `ETag`; send it in `If-None-Match` to get `304 Not "
+            f"Modified`. `Cache-Control` allows caching for at most {guide.cache_max_age_seconds} "
+            "seconds, or until the next scheduled update."
+        ),
+    )
+
+
+def _tools_blocks(guide: AgentGuide) -> list[Block]:
+    if not guide.tools:
+        return [Heading(2, "Tools"), Paragraph(PLANNED_TOOLS_NOTE)]
+    return [
+        Heading(2, "Tools"),
+        Bullets(tuple(f"[{item.name}]({item.url}): {item.description}" for item in guide.tools)),
+    ]

@@ -20,6 +20,7 @@ API.
 | `app/contract.py` | API v1.1 request rules: opaque cursors, `fields=`, status and date parsing, limits |
 | `app/problems.py` | RFC 9457 problem details: `ProblemError`, exception handlers for every error |
 | `app/ratelimit.py` | In-process fixed-window rate limiter, `RateLimit` headers, trusted-proxy client IP |
+| `app/agent_docs.py` | Pure generator of `/llms.txt`, `/agents`, `/agents.md`, `/llms-full.txt`, `/problems/<slug>` from the OpenAPI spec and competitions |
 | `app/caching.py` | Weak body-hash `ETag`, `If-None-Match`, and `Cache-Control` rules for read endpoints |
 | `app/standings.py` | Pure league-table calculation and tie-breakers from finished matches |
 | `app/scheduler.py` | Scheduler loop (`python -m app.scheduler`): seed → heartbeat → season checks (discovery/rollover) → claim due seasons → scrape → persist |
@@ -97,12 +98,18 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
   documented.
 - Errors: raise `ProblemError("<slug>", detail, parameter=..., valid_values=..., hint=...)`, never
   `HTTPException`. Slugs (the `type` URI `/problems/<slug>`) are registered in `PROBLEM_TYPES` in
-  `app/models.py` and are public; add new ones, never rename. `detail` is always a string.
+  `app/models.py` and are public; add new ones, never rename, and give each new slug a meaning
+  and fix in `PROBLEM_GUIDANCE` (`app/agent_docs.py`; a test checks). `detail` is always a string.
   Contract parsers raise `ContractError(<slug>, {...})`, converted by `_contract()`.
 - The `rate_limit_and_cache` middleware in `app/main.py` applies rate limits (exempt:
   `EXEMPT_PATHS`), adds `ETag`/`304` to operations in `CACHEABLE_OPERATIONS`, and sets
   `Cache-Control: no-store` on errors and on every other API operation. Routes with freshness set
   their own `Cache-Control` from `next_update_at`. Tests get a fresh limiter per test.
+- Agent docs (`/llms.txt`, `/agents`, ...) are generated from `app.openapi()`, so new operations,
+  parameters, and documented problems appear automatically. The doc routes use
+  `include_in_schema=False` and no operation ID; they get `ETag` through `CACHEABLE_PAGES`. Top-5
+  task examples are validated against the spec (`top_tasks` raises on unknown parameters). The
+  CLI and skill are shown as planned until steps 13–14 pass `ToolLink`s to `build_guide`.
 - Statistics that a provider cannot supply must stay `null` — never default to `0`.
 - 90minut pages are ISO-8859-2 and use Polish month names with Europe/Warsaw time.
 - football-data.org is throttled (`FOOTBALL_DATA_MIN_REQUEST_INTERVAL_SECONDS`, default 6s) and

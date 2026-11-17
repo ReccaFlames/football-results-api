@@ -11,6 +11,7 @@ from app.competitions import competition_summary, source_from_url
 from app.config import load_config
 from app.main import app
 from app.models import (
+    PROBLEM_TYPES,
     Freshness,
     FreshnessSource,
     Match,
@@ -775,7 +776,9 @@ def assert_problem(response, status_code: int, problem_type: str) -> dict:
 
 
 def test_every_operation_has_a_unique_snake_case_operation_id_and_tag() -> None:
-    routes = [route for route in app.routes if isinstance(route, APIRoute)]
+    routes = [
+        route for route in app.routes if isinstance(route, APIRoute) and route.include_in_schema
+    ]
     assert routes
     operation_ids = [route.operation_id for route in routes]
     assert all(operation_ids), [route.path for route in routes if not route.operation_id]
@@ -1039,3 +1042,78 @@ def test_cache_control_follows_freshness_and_never_caches_writes(
     ]:
         assert response.headers["cache-control"] == "no-store"
         assert "etag" not in response.headers
+
+
+AGENT_PAGES = {
+    "/llms.txt": "text/markdown; charset=utf-8",
+    "/llms-full.txt": "text/markdown; charset=utf-8",
+    "/agents.md": "text/markdown; charset=utf-8",
+    "/agents": "text/html; charset=utf-8",
+    "/problems": "text/markdown; charset=utf-8",
+    "/problems/unknown-season": "text/markdown; charset=utf-8",
+}
+
+
+def test_agent_pages_are_typed_linked_cached_and_rate_limited(tmp_path: Path) -> None:
+    client, _ = client_with_empty_store(tmp_path)
+
+    for path, content_type in AGENT_PAGES.items():
+        response = client.get(path)
+        assert response.status_code == 200, path
+        assert response.headers["content-type"] == content_type
+        assert response.headers["cache-control"] == "public, max-age=60"
+        assert response.headers["vary"] == "Host, X-Forwarded-Host, X-Forwarded-Proto"
+        assert response.headers["ratelimit-policy"] == '"read";q=120;w=60'
+        assert '<http://testserver/llms.txt>; rel="describedby"' in response.headers["link"]
+        revalidated = client.get(path, headers={"If-None-Match": response.headers["etag"]})
+        assert revalidated.status_code == 304
+    assert (
+        client.get("/agents")
+        .headers["link"]
+        .startswith('<http://testserver/agents.md>; rel="alternate"; type="text/markdown"')
+    )
+    assert not set(AGENT_PAGES) & set(app.openapi()["paths"])
+
+
+def test_agent_pages_use_the_configured_public_base_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(main_module.settings, "public_base_url", "https://football.example")
+    client, _ = client_with_empty_store(tmp_path)
+
+    response = client.get("/llms.txt", headers={"Host": "attacker.example"})
+
+    assert "vary" not in response.headers
+    assert "attacker.example" not in response.text
+    assert 'curl -s "https://football.example/api/v1/competitions"' in response.text
+    assert "- [OpenAPI spec](https://football.example/openapi.json)" in response.text
+
+
+def test_agent_pages_list_live_competitions_and_survive_a_database_outage(
+    tmp_path: Path,
+) -> None:
+    client, repository = client_with_empty_store(tmp_path)
+    repository.competitions["ekstraklasa"].current_season = "2027-2028"
+    assert "current season 2027-2028" in client.get("/llms.txt").text
+
+    async def unavailable():
+        raise OSError("database down")
+
+    repository.list_competitions = unavailable
+    response = client.get("/agents.md")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert "**The database is unavailable**" in response.text
+    assert "| `ekstraklasa` | PKO BP Ekstraklasa |" in response.text
+
+
+def test_problem_type_uris_resolve_to_pages(tmp_path: Path) -> None:
+    client, _ = client_with_empty_store(tmp_path)
+    problem = Problem.model_validate(client.get("/api/v1/matches?competition=x").json())
+
+    page = client.get(problem.type)
+    assert page.status_code == 200
+    assert page.text.startswith("# Unknown competition (unknown-competition)")
+    body = assert_problem(client.get("/problems/nope"), 404, "not-found")
+    assert body["valid_values"] == list(PROBLEM_TYPES)

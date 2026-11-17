@@ -6,6 +6,7 @@ from importlib.metadata import version
 from ipaddress import IPv4Network, IPv6Network, ip_network
 from pathlib import Path
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import (
@@ -58,12 +59,32 @@ class Settings(BaseSettings):
     rate_limit_write_per_minute: int = Field(default=10, ge=1)
     trusted_proxies: str = ""
     cache_max_age_seconds: int = Field(default=60, ge=0)
+    public_base_url: str | None = None
 
     @field_validator("trusted_proxies")
     @classmethod
     def _validate_trusted_proxies(cls, value: str) -> str:
         parse_networks(value)
         return value
+
+    @field_validator("public_base_url")
+    @classmethod
+    def _validate_public_base_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parts = urlsplit(value.strip())
+        if (
+            parts.scheme not in {"http", "https"}
+            or not parts.hostname
+            or parts.username is not None
+            or parts.password is not None
+            or parts.query
+            or parts.fragment
+        ):
+            raise ValueError(
+                "must be an absolute http(s) URL without credentials, query, or fragment"
+            )
+        return value.strip().rstrip("/")
 
 
 def parse_networks(value: str) -> tuple[IPv4Network | IPv6Network, ...]:

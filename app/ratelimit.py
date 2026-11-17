@@ -83,13 +83,13 @@ def client_ip(
     """
     if peer is None:
         return "unknown"
-    if not trusted_proxies or not _is_trusted(peer, trusted_proxies):
+    if not trusted_proxies or not is_trusted_proxy(peer, trusted_proxies):
         return peer
     hops = [hop.strip() for header in forwarded_for for hop in header.split(",") if hop.strip()]
     for hop in reversed(hops):
         if _parse(hop) is None:
             return peer
-        if not _is_trusted(hop, trusted_proxies):
+        if not is_trusted_proxy(hop, trusted_proxies):
             return hop
     return hops[0] if hops else peer
 
@@ -101,7 +101,7 @@ def _parse(value: str) -> IPv4Address | IPv6Address | None:
         return None
 
 
-def _is_trusted(value: str, trusted_proxies: Sequence[IPv4Network | IPv6Network]) -> bool:
+def is_trusted_proxy(value: str, trusted_proxies: Sequence[IPv4Network | IPv6Network]) -> bool:
     address = _parse(value)
     return address is not None and any(address in network for network in trusted_proxies)
 

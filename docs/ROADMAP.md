@@ -178,10 +178,13 @@ How to use this list:
   - [x] RFC 9457 `application/problem+json` with `hint` and `valid_values`
   - [x] Rate limiting with `RateLimit` and `Retry-After` headers
   - [x] `ETag` / `Cache-Control` on read endpoints
-- [ ] **12. `/llms.txt` and `/agents` page**
-  - [ ] Generated from the OpenAPI spec and competition config
-  - [ ] Purpose, base URL, auth, top 5 tasks with curl and CLI examples
-  - [ ] Links to `/openapi.json`, the CLI and the skill
+- [x] **12. `/llms.txt` and `/agents` page**
+  - [x] Generated from the OpenAPI spec and competition config (`app/agent_docs.py`; also
+        `/agents.md`, `/llms-full.txt`, and `/problems/<slug>` pages)
+  - [x] Purpose, base URL (`FOOTBALL_RESULTS_PUBLIC_BASE_URL`), auth, top 5 tasks with curl
+        examples. CLI examples are deferred: step 13 adds them.
+  - [x] Links to `/openapi.json`. The CLI and the skill are shown as "planned" until steps 13–14
+        pass `ToolLink`s to `build_guide` and add the CLI examples.
 - [ ] **13. CLI (`football-results`)**
   - [ ] Typer app over the HTTP API, installable with `uvx`/`pipx`
   - [ ] Commands: `competitions`, `matches`, `standings`, `teams`, `refresh`, `status`
@@ -190,10 +193,12 @@ How to use this list:
   - [ ] Errors as JSON on stderr
   - [ ] Configured through `FOOTBALL_RESULTS_URL` and `FOOTBALL_RESULTS_API_KEY`
   - [ ] `--help` with examples on every command
+  - [ ] CLI examples and a CLI `ToolLink` in `/llms.txt` and `/agents` (deferred from step 12)
 - [ ] **14. Consumer Agent Skill**
   - [ ] `skills/football-results/SKILL.md` teaching the CLI (when to use, recipes, nulls, freshness)
   - [ ] Served at `/skills/football-results/SKILL.md`
   - [ ] Install instructions (`copilot skill add <url>`) on `/agents` and in the README
+        (a skill `ToolLink` replaces the step 12 "planned" note)
 - [ ] **15. Curated MCP server**
   - [ ] FastMCP mounted at `/mcp`
   - [ ] Read-only tools: `list_competitions`, `find_matches`, `get_standings`, `get_team_form`

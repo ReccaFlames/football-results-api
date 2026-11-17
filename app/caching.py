@@ -8,6 +8,10 @@ from datetime import datetime
 CACHEABLE_OPERATIONS = frozenset(
     {"list_competitions", "list_matches", "get_standings", "list_teams", "list_results"}
 )
+# Agent documentation routes (not in the OpenAPI spec), matched by route path template.
+CACHEABLE_PAGES = frozenset(
+    {"/llms.txt", "/llms-full.txt", "/agents", "/agents.md", "/problems", "/problems/{slug}"}
+)
 
 
 def etag_for(body: bytes) -> str:
