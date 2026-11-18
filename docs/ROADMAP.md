@@ -198,11 +198,12 @@ How to use this list:
   - [x] Configured through `FOOTBALL_RESULTS_URL` and `FOOTBALL_RESULTS_API_KEY`
   - [x] `--help` with examples on every command
   - [x] CLI examples and a CLI `ToolLink` in `/llms.txt` and `/agents` (deferred from step 12)
-- [ ] **14. Consumer Agent Skill**
-  - [ ] `skills/football-results/SKILL.md` teaching the CLI (when to use, recipes, nulls, freshness)
-  - [ ] Served at `/skills/football-results/SKILL.md`
-  - [ ] Install instructions (`copilot skill add <url>`) on `/agents` and in the README
-        (a skill `ToolLink` replaces the step 12 "planned" note)
+- [x] **14. Consumer Agent Skill**
+  - [x] `skills/football-results/SKILL.md` teaching the CLI (when to use, recipes, nulls, freshness)
+  - [x] Served at `/skills/football-results/SKILL.md`
+  - [x] Install instructions (`copilot skill add <url>`, HTTPS only; curl into a skills directory
+        otherwise) on `/agents#skill` and in the README (a skill `ToolLink` replaces the step 12
+        "planned" note)
 - [ ] **15. Curated MCP server**
   - [ ] FastMCP mounted at `/mcp`
   - [ ] Read-only tools: `list_competitions`, `find_matches`, `get_standings`, `get_team_form`

@@ -24,3 +24,6 @@ football-results standings -c ekstraklasa --fields position,team_name,points --j
 
 Run `football-results COMMAND --help` for options and examples. The repository README has the
 full reference ("Command-line client"), and a running server documents the CLI at `/agents#cli`.
+
+For coding agents, the Agent Skill in `skills/football-results/SKILL.md` (also served at
+`/skills/football-results/SKILL.md`) teaches this CLI; see `/agents#skill` for how to install it.

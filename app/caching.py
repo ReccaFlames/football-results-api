@@ -10,7 +10,15 @@ CACHEABLE_OPERATIONS = frozenset(
 )
 # Agent documentation routes (not in the OpenAPI spec), matched by route path template.
 CACHEABLE_PAGES = frozenset(
-    {"/llms.txt", "/llms-full.txt", "/agents", "/agents.md", "/problems", "/problems/{slug}"}
+    {
+        "/llms.txt",
+        "/llms-full.txt",
+        "/agents",
+        "/agents.md",
+        "/problems",
+        "/problems/{slug}",
+        "/skills/football-results/SKILL.md",
+    }
 )
 
 

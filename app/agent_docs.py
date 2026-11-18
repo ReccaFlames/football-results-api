@@ -1,7 +1,7 @@
 """Agent-facing documentation generated from the OpenAPI spec and the competition data.
 
 Backs `/llms.txt` (llmstxt.org v2), `/agents` (HTML), `/agents.md`, `/llms-full.txt`, and the
-`/problems/<slug>` pages. Everything here is pure: callers pass the OpenAPI document, the
+`/problems/<slug>` pages. The Agent Skill is a static file (`SKILL_FILE`) served unchanged. Everything here is pure: callers pass the OpenAPI document, the
 competitions, and the public base URL. Pages are built as `Block`s so that the Markdown and the
 HTML renderings always carry the same content.
 """
@@ -12,6 +12,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from html import escape
 from ipaddress import IPv4Network, IPv6Network
+from pathlib import Path
 from typing import Any, Literal
 
 from app.models import PROBLEM_TYPES, CompetitionSummary
@@ -112,11 +113,6 @@ PROBLEM_GUIDANCE: dict[str, tuple[str, str]] = {
     ),
 }
 
-PLANNED_TOOLS_NOTE = (
-    "An Agent Skill is planned (roadmap step 14) but not available yet; use the "
-    "`football-results` CLI, curl, or the OpenAPI spec meanwhile."
-)
-
 # The `football-results` CLI (`cli/` in the repository). It cannot be imported here (the API does
 # not depend on it), so tests check these names against the CLI itself. All are public.
 CLI_NAME = "football-results"
@@ -158,6 +154,12 @@ CLI_INSTALL = (
     "uv tool install ./cli        # from a checkout of the repository (or: pipx install ./cli)\n"
     "uvx --from ./cli football-results --help   # run once without installing"
 )
+
+# The consumer Agent Skill (agentskills.io format) teaching the CLI. It is a static file served
+# byte for byte at `SKILL_PATH`; tests check its commands, exit codes, and links.
+SKILL_NAME = "football-results"
+SKILL_PATH = f"/skills/{SKILL_NAME}/SKILL.md"
+SKILL_FILE = Path(__file__).resolve().parent.parent / "skills" / SKILL_NAME / "SKILL.md"
 
 
 # --- Document blocks ---------------------------------------------------------------------------
@@ -476,6 +478,18 @@ def cli_tool(base_url: str) -> ToolLink:
     )
 
 
+def skill_tool(base_url: str) -> ToolLink:
+    return ToolLink(
+        "skill",
+        f"{SKILL_NAME} Agent Skill",
+        f"{base_url.rstrip('/')}{SKILL_PATH}",
+        (
+            "SKILL.md teaching coding agents the CLI: when to use it, recipes, nulls, freshness, "
+            "and exit codes; install it with `copilot skill add <this URL>`"
+        ),
+    )
+
+
 @dataclass(frozen=True)
 class RateLimits:
     enabled: bool
@@ -677,8 +691,6 @@ def llms_txt(guide: AgentGuide) -> str:
         blocks.extend(_task_examples(guide, task))
     blocks.append(Paragraph("Rules:"))
     blocks.append(Bullets(_rules(guide)))
-    if not guide.has_tool("skill"):
-        blocks.append(Paragraph(PLANNED_TOOLS_NOTE))
     blocks.extend(
         [
             Heading(2, "API reference"),
@@ -711,8 +723,7 @@ def llms_txt(guide: AgentGuide) -> str:
             ),
         ]
     )
-    if guide.tools:
-        blocks[-2:-2] = _tools_blocks(guide)[:2]
+    blocks[-2:-2] = _tools_blocks(guide)
     return render_markdown(blocks)
 
 
@@ -800,6 +811,7 @@ def agent_guide_blocks(guide: AgentGuide) -> list[Block]:
         ]
     )
     blocks.extend(_cli_blocks(guide))
+    blocks.extend(_skill_blocks(guide))
     blocks.extend(_tools_blocks(guide))
     return blocks
 
@@ -985,14 +997,12 @@ def _conventions(guide: AgentGuide) -> tuple[str, ...]:
 
 
 def _tools_blocks(guide: AgentGuide) -> list[Block]:
-    blocks: list[Block] = [Heading(2, "Tools")]
-    if guide.tools:
-        blocks.append(
-            Bullets(tuple(f"[{item.name}]({item.url}): {item.description}" for item in guide.tools))
-        )
-    if not guide.has_tool("skill"):
-        blocks.append(Paragraph(PLANNED_TOOLS_NOTE))
-    return blocks
+    if not guide.tools:
+        return []
+    return [
+        Heading(2, "Tools"),
+        Bullets(tuple(f"[{item.name}]({item.url}): {item.description}" for item in guide.tools)),
+    ]
 
 
 def _tasks_intro(guide: AgentGuide) -> str:
@@ -1064,5 +1074,37 @@ def _cli_blocks(guide: AgentGuide) -> list[Block]:
                 (f"`{CLI_PROBLEM_PREFIX}{slug}`", str(code), meaning)
                 for slug, (code, meaning) in CLI_PROBLEM_GUIDANCE.items()
             ),
+        ),
+    ]
+
+
+def _skill_blocks(guide: AgentGuide) -> list[Block]:
+    skill = next((item for item in guide.tools if item.kind == "skill"), None)
+    if skill is None:
+        return []
+    home = f"~/.copilot/skills/{SKILL_NAME}"
+    return [
+        Heading(2, "Agent Skill", anchor="skill"),
+        Paragraph(
+            f"The [`{SKILL_NAME}` skill]({skill.url}) is one `SKILL.md` file in the "
+            "[Agent Skills](https://agentskills.io/specification) format. It teaches coding "
+            f"agents to answer football questions with `{CLI_NAME}`: resolving slugs, recipes, "
+            "`null` values, freshness, refresh jobs, and exit codes. Install the CLI too (or the "
+            "skill falls back to curl), and set `FOOTBALL_RESULTS_URL`; the skill reads the API "
+            "URL from it and works offline once installed."
+        ),
+        Code(
+            "# GitHub Copilot CLI (HTTPS URLs only; --project installs into .github/skills)\n"
+            f"copilot skill add {skill.url}\n"
+            "# Any agent: download it into a skills directory\n"
+            f"mkdir -p {home} && curl -fsSL {skill.url} -o {home}/SKILL.md\n"
+            f"export FOOTBALL_RESULTS_URL={guide.base_url}"
+        ),
+        Paragraph(
+            f"The directory must be named `{SKILL_NAME}`, like the skill. GitHub Copilot reads "
+            "personal skills from `~/.copilot/skills/` or `~/.agents/skills/` and project skills "
+            "from `.github/skills/`, `.agents/skills/`, or `.claude/skills/`; Claude Code reads "
+            "`~/.claude/skills/` and `.claude/skills/`. From a checkout of the repository, "
+            f"`copilot skill add ./skills/{SKILL_NAME}/SKILL.md` installs the same file."
         ),
     ]

@@ -20,7 +20,7 @@ API.
 | `app/contract.py` | API v1.1 request rules: opaque cursors, `fields=`, status and date parsing, limits |
 | `app/problems.py` | RFC 9457 problem details: `ProblemError`, exception handlers for every error |
 | `app/ratelimit.py` | In-process fixed-window rate limiter, `RateLimit` headers, trusted-proxy client IP |
-| `app/agent_docs.py` | Pure generator of `/llms.txt`, `/agents`, `/agents.md`, `/llms-full.txt`, `/problems/<slug>` from the OpenAPI spec and competitions |
+| `app/agent_docs.py` | Pure generator of `/llms.txt`, `/agents`, `/agents.md`, `/llms-full.txt`, `/problems/<slug>` from the OpenAPI spec and competitions; `SKILL_PATH`/`SKILL_FILE` for the served skill |
 | `app/caching.py` | Weak body-hash `ETag`, `If-None-Match`, and `Cache-Control` rules for read endpoints |
 | `app/standings.py` | Pure league-table calculation and tie-breakers from finished matches |
 | `app/scheduler.py` | Scheduler loop (`python -m app.scheduler`): seed → heartbeat → season checks (discovery/rollover) → claim due seasons → scrape → persist |
@@ -41,6 +41,7 @@ API.
 | `cli/football_results_cli/client.py` | `Config`, `create_http_client` (test seam), `ApiClient` with GET retries and HTTP → problem mapping |
 | `cli/football_results_cli/output.py` | JSON vs Rich tables (TTY detection), freshness footer, staleness rule |
 | `cli/football_results_cli/problems.py` | Exit codes, CLI problem slugs (`urn:football-results:cli:<slug>`), `exit_code_for` |
+| `skills/football-results/SKILL.md` | Consumer Agent Skill for API users (teaches the CLI), served unchanged at `/skills/football-results/SKILL.md` |
 | `tests/` | pytest; API tests use `FakeRepository` and need no database; `test_cli.py` runs the CLI against the app in-process |
 | `tests/integration/` | Repository and migration tests against real PostgreSQL (skipped without `FOOTBALL_RESULTS_TEST_DATABASE_URL`) |
 
@@ -117,7 +118,15 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
   `include_in_schema=False` and no operation ID; they get `ETag` through `CACHEABLE_PAGES`. Top-5
   task examples are validated against the spec (`top_tasks` raises on unknown parameters) and,
   as CLI commands, against the CLI (`tests/test_agent_docs.py`). `_agent_guide` passes
-  `cli_tool()`; the skill is shown as planned until step 14 passes a skill `ToolLink`.
+  `cli_tool()` and `skill_tool()`, which add the Tools links and the `#cli` and `#skill` sections.
+- Two kinds of skills: `.github/skills/` holds *contributor* skills for working on this repo;
+  `skills/football-results/SKILL.md` is the *consumer* skill for people and agents using the API.
+  The consumer skill is a static, single file (`copilot skill add <url>` installs one file) that
+  reads the API URL from `FOOTBALL_RESULTS_URL`. It must match the CLI: `tests/test_skill.py` runs
+  every `football-results` line in its code blocks, and checks options, exit codes, problem slugs,
+  `$FOOTBALL_RESULTS_URL/...` links, and the agentskills.io frontmatter. Keep instance facts
+  (competition lists, rate limits, thresholds, defaults) out of it; link to `/llms.txt` instead.
+  The Docker image copies `skills/`.
 - The CLI (`cli/`) is a separate package: the API must not import it, and it must not import
   `app`. `CLI_NAME`, `CLI_COMMANDS`, `CLI_EXIT_CODES`, and `CLI_PROBLEM_GUIDANCE` in
   `app/agent_docs.py` mirror the CLI; tests check both sides. Command names, option names, exit
@@ -155,7 +164,8 @@ without the user's agreement, because later items depend on earlier ones.
 
 ## Skills in this repo
 
-Task-specific playbooks live in `.github/skills/`:
+Task-specific contributor playbooks live in `.github/skills/` (not the consumer skill in
+`skills/`):
 
 - `add-competition` – add a competition or season, or roll over the current season.
 - `add-data-provider` – add a new source adapter (website or API).

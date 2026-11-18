@@ -57,7 +57,6 @@ def test_llms_txt_follows_the_llmstxt_format() -> None:
         assert line.startswith("## ") or re.fullmatch(
             rf"- \[[^\]]+\]\({re.escape(BASE_URL)}/[^)\s]*\)(: .+)?", line
         ), line
-    assert agent_docs.PLANNED_TOOLS_NOTE in lines
 
 
 def test_guides_mention_every_operation_and_no_unknown_ones() -> None:
@@ -162,24 +161,30 @@ def test_html_rendering_escapes_text_and_keeps_inline_markup() -> None:
     )
 
 
-def test_tool_links_replace_the_planned_note_once_they_exist() -> None:
-    skill = agent_docs.ToolLink("skill", "Skill", f"{BASE_URL}/skill", "the agent skill")
-    text = agent_docs.llms_txt(guide(tools=[agent_docs.cli_tool(BASE_URL), skill]))
+def test_tool_links_are_listed_in_a_tools_section() -> None:
+    tools = [agent_docs.cli_tool(BASE_URL), agent_docs.skill_tool(BASE_URL)]
+    text = agent_docs.llms_txt(guide(tools=tools))
+    page = agent_docs.agent_guide_markdown(guide(tools=tools))
+    html = agent_docs.agent_guide_html(guide(tools=tools))
 
-    assert agent_docs.PLANNED_TOOLS_NOTE not in text
     assert (
         f"## Tools\n\n- [football-results CLI]({BASE_URL}/agents#cli): command-line client"
     ) in text
-    assert f"- [Skill]({BASE_URL}/skill): the agent skill" in text
+    skill_link = f"- [football-results Agent Skill]({BASE_URL}/skills/football-results/SKILL.md): "
+    assert skill_link in text and skill_link in page
+    assert "## Agent Skill" in page and 'id="skill"' in html
+    assert f"copilot skill add {BASE_URL}/skills/football-results/SKILL.md" in page
+    assert f"export FOOTBALL_RESULTS_URL={BASE_URL}" in page
+    assert "## Tools" not in agent_docs.llms_txt(guide())
+    assert "planned" not in (text + page).lower()
 
 
-def test_cli_tool_adds_cli_examples_and_a_cli_section_but_keeps_the_skill_planned() -> None:
+def test_cli_tool_adds_cli_examples_and_a_cli_section() -> None:
     rendered = guide(tools=[agent_docs.cli_tool(BASE_URL)])
     text = agent_docs.llms_txt(rendered)
     page = agent_docs.render_markdown(agent_docs.agent_guide_blocks(rendered))
     html = agent_docs.render_html(agent_docs.agent_guide_blocks(rendered), title="t", links={})
 
-    assert text.count(agent_docs.PLANNED_TOOLS_NOTE) == 1
     for task in rendered.tasks:
         assert f"```sh\n{task.cli()}\n```" in text
         assert task.cli() in page
@@ -188,15 +193,20 @@ def test_cli_tool_adds_cli_examples_and_a_cli_section_but_keeps_the_skill_planne
     assert 'id="cli"' in html
     assert "## Command-line client" in page and "`urn:football-results:cli:stale-data`" in page
     assert "CLI: `football-results standings`" in page
-    assert "football-results" not in agent_docs.llms_txt(guide()).replace(
-        agent_docs.PLANNED_TOOLS_NOTE, ""
-    )
+    assert "## Agent Skill" not in page
+    assert "football-results" not in agent_docs.llms_txt(guide())
 
 
-def test_served_guides_advertise_the_cli() -> None:
+def test_served_guides_advertise_the_cli_and_the_skill() -> None:
     client = TestClient(app)
-    assert "[football-results CLI](http://testserver/agents#cli)" in client.get("/llms.txt").text
-    assert 'id="cli"' in client.get("/agents").text
+    llms = client.get("/llms.txt").text
+    agents = client.get("/agents").text
+
+    assert "[football-results CLI](http://testserver/agents#cli)" in llms
+    assert (
+        "[football-results Agent Skill](http://testserver/skills/football-results/SKILL.md)" in llms
+    )
+    assert 'id="cli"' in agents and 'id="skill"' in agents
 
 
 def test_cli_names_match_the_cli_package() -> None:

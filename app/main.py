@@ -854,7 +854,8 @@ async def fetch_historical_results(
     return _job_accepted(response, job_id, status)
 
 
-# Agent documentation: `/llms.txt`, `/llms-full.txt`, `/agents`, `/agents.md`, `/problems/...`.
+# Agent documentation: `/llms.txt`, `/llms-full.txt`, `/agents`, `/agents.md`, `/problems/...`,
+# and the static Agent Skill at `agent_docs.SKILL_PATH`.
 # Generated from the OpenAPI spec and the competitions; not part of the OpenAPI spec itself.
 
 
@@ -914,7 +915,7 @@ async def _agent_guide(
             settings.rate_limit_write_per_minute,
         ),
         cache_max_age_seconds=settings.cache_max_age_seconds,
-        tools=(agent_docs.cli_tool(base_url),),
+        tools=(agent_docs.cli_tool(base_url), agent_docs.skill_tool(base_url)),
     )
     return guide, base_url, request_derived
 
@@ -952,6 +953,22 @@ async def agents_page(request: Request) -> Response:
     )
     return Response(
         agent_docs.agent_guide_html(guide), media_type=agent_docs.HTML_MEDIA_TYPE, headers=headers
+    )
+
+
+@lru_cache(maxsize=1)
+def _skill_file() -> bytes:
+    return agent_docs.SKILL_FILE.read_bytes()
+
+
+@app.get(agent_docs.SKILL_PATH, include_in_schema=False)
+async def skill_file(request: Request) -> Response:
+    """The consumer Agent Skill, byte for byte as in the repository."""
+    base_url, derived = _public_base_url(request)
+    return Response(
+        _skill_file(),
+        media_type=agent_docs.MARKDOWN_MEDIA_TYPE,
+        headers=_page_headers(base_url, derived),
     )
 
 

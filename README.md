@@ -23,7 +23,7 @@ league-data API**. This README describes both:
 | Scheduling | Adaptive per-season scheduler driven by fixture times; thresholds from `defaults.schedule` with per-competition overrides | Plus cron-style overrides and global provider quotas |
 | Configuration | Environment variables plus validated YAML for leagues, sources, providers, and schedule defaults | Env vars for infrastructure + one validated config file for leagues, sources, and schedules |
 | Observability | `/health` (DB + scheduler heartbeat), `scrape_run` table, logs; CI with PostgreSQL integration tests | Scheduler/scrape status endpoints, metrics, alerting on stale data |
-| API | Matches of every status with filters, cursor pagination, `fields=` and per-season freshness; computed standings; teams with aliases; manual refresh and historical fetch; RFC 9457 errors, rate limits, and `ETag` caching; generated `/llms.txt` and `/agents` guide; `football-results` CLI | Plus authenticated admin endpoints |
+| API | Matches of every status with filters, cursor pagination, `fields=` and per-season freshness; computed standings; teams with aliases; manual refresh and historical fetch; RFC 9457 errors, rate limits, and `ETag` caching; generated `/llms.txt` and `/agents` guide; `football-results` CLI and Agent Skill | Plus authenticated admin endpoints |
 
 ## Current state
 
@@ -262,6 +262,7 @@ competitions in the database. They are not operations, so they are absent from `
 | `/agents.md` | `text/markdown; charset=utf-8` | The same guide as Markdown (the llms.txt `.md` alternate) |
 | `/llms-full.txt` | `text/markdown; charset=utf-8` | The guide plus every problem type in one file (a common, non-standard convention) |
 | `/problems`, `/problems/<slug>` | `text/markdown; charset=utf-8` | Meaning and fix of each problem `type`, so `type` URIs resolve |
+| `/skills/football-results/SKILL.md` | `text/markdown; charset=utf-8` | The [Agent Skill](#agent-skill), served unchanged from the repository |
 
 - The top 5 tasks are: discover competitions, resolve a team slug, a team's latest results,
   upcoming fixtures, and the league table. Examples use the first configured league.
@@ -275,9 +276,10 @@ competitions in the database. They are not operations, so they are absent from `
   `/llms.txt`; `/agents` also `rel="alternate"` to `/agents.md`).
 - When the database is unavailable the pages still return `200`, listing competitions from
   `config/competitions.yaml` with a note and `Cache-Control: no-store`.
-- The pages link the [`football-results` CLI](#command-line-client-football-results) (a `Tools`
-  section in llms.txt, a "Command-line client" section at `/agents#cli`) and show each top task
-  as curl and as a CLI command. The Agent Skill (roadmap step 14) is listed as planned.
+- The pages link the [`football-results` CLI](#command-line-client-football-results) and the
+  [Agent Skill](#agent-skill) (a `Tools` section in llms.txt; "Command-line client" and "Agent
+  Skill" sections at `/agents#cli` and `/agents#skill`) and show each top task as curl and as a
+  CLI command.
 
 ~~~bash
 curl -s http://localhost:8000/llms.txt
@@ -615,6 +617,42 @@ are never retried.
 
 Exit codes, command and option names, and the CLI problem slugs are public. New ones may be added,
 but existing ones are never renamed or renumbered.
+
+## Agent Skill
+
+[`skills/football-results/SKILL.md`](skills/football-results/SKILL.md) is an
+[Agent Skill](https://agentskills.io/specification) for people and coding agents that *use* the
+API. It teaches the `football-results` CLI: resolving competition and team slugs, recipes for the
+common questions, `null` as unknown, freshness and `--fail-if-stale`, when (not) to queue refresh
+jobs, and branching on exit codes and problem types, with curl and `/llms.txt` as a fallback. The
+contributor skills in `.github/skills/` are a different thing: they are playbooks for working on
+this repository.
+
+The skill is one static file; it reads the API URL from `FOOTBALL_RESULTS_URL` and works offline
+once installed. The API serves it unchanged at `/skills/football-results/SKILL.md` (read rate
+limit, `ETag`, `Link: rel="describedby"` to `/llms.txt`), and the Docker image includes it.
+Install it with one of:
+
+~~~bash
+# GitHub Copilot CLI: from a server over HTTPS (add --project for the repository's .github/skills)
+copilot skill add https://football.example.com/skills/football-results/SKILL.md
+# GitHub Copilot CLI: from a checkout of this repository
+copilot skill add ./skills/football-results/SKILL.md
+# Any agent: copy the file (Claude Code: ~/.claude/skills/football-results/)
+mkdir -p ~/.copilot/skills/football-results
+curl -fsSL http://localhost:8000/skills/football-results/SKILL.md \
+  -o ~/.copilot/skills/football-results/SKILL.md
+export FOOTBALL_RESULTS_URL=http://localhost:8000
+~~~
+
+`copilot skill add <url>` fetches a single `SKILL.md` over HTTPS only, so use `curl` for a plain
+HTTP server such as `localhost`. The directory name must be `football-results`, the skill's
+`name`. GitHub Copilot reads personal skills from `~/.copilot/skills/` or `~/.agents/skills/` and
+project skills from `.github/skills/`, `.agents/skills/`, or `.claude/skills/`; Claude Code reads
+`~/.claude/skills/` and `.claude/skills/`. Install the CLI as well (see
+[Install](#install)). `/agents#skill` shows the same commands with the server's base URL.
+`tests/test_skill.py` keeps the skill in step with the CLI: every command in its code blocks must
+run, and its options, exit codes, problem types, and links must exist.
 
 ## Ubuntu deployment
 
