@@ -1,0 +1,28 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.OWNER/football-results",
+  "title": "Football Results",
+  "description": "Football fixtures, results, league tables, and team form, with data freshness.",
+  "version": "0.15.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://{host}/mcp",
+      "variables": {
+        "host": {
+          "description": "Host (and optional path prefix) of your Football Results API deployment",
+          "isRequired": true,
+          "placeholder": "football.example.com"
+        }
+      },
+      "headers": [
+        {
+          "name": "X-API-Key",
+          "description": "API key; needed only for the request_refresh tool",
+          "isRequired": false,
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}

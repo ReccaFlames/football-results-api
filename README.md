@@ -7,7 +7,7 @@ scheduler, and serves them over a REST API.
 The repository started as an Ekstraklasa-only scraper and is evolving into a **generic, configurable
 league-data API**. This README describes both:
 
-- **[Current state](#current-state)** – what is implemented and works today (version 0.14.0).
+- **[Current state](#current-state)** – what is implemented and works today (version 0.15.0).
 - **[Target state](#target-state-and-roadmap)** – where the project is heading and what is still
   missing.
 
@@ -23,7 +23,7 @@ league-data API**. This README describes both:
 | Scheduling | Adaptive per-season scheduler driven by fixture times; thresholds from `defaults.schedule` with per-competition overrides | Plus cron-style overrides and global provider quotas |
 | Configuration | Environment variables plus validated YAML for leagues, sources, providers, and schedule defaults | Env vars for infrastructure + one validated config file for leagues, sources, and schedules |
 | Observability | `/health` (DB + scheduler heartbeat), `scrape_run` table, logs; CI with PostgreSQL integration tests | Scheduler/scrape status endpoints, metrics, alerting on stale data |
-| API | Matches of every status with filters, cursor pagination, `fields=` and per-season freshness; computed standings; teams with aliases; manual refresh and historical fetch; RFC 9457 errors, rate limits, and `ETag` caching; generated `/llms.txt` and `/agents` guide; `football-results` CLI and Agent Skill | Plus authenticated admin endpoints |
+| API | Matches of every status with filters, cursor pagination, `fields=` and per-season freshness; computed standings; teams with aliases; manual refresh and historical fetch; RFC 9457 errors, rate limits, and `ETag` caching; generated `/llms.txt` and `/agents` guide; `football-results` CLI, Agent Skill, and curated MCP server at `/mcp` | Plus authenticated admin endpoints |
 
 ## Current state
 
@@ -277,9 +277,9 @@ competitions in the database. They are not operations, so they are absent from `
 - When the database is unavailable the pages still return `200`, listing competitions from
   `config/competitions.yaml` with a note and `Cache-Control: no-store`.
 - The pages link the [`football-results` CLI](#command-line-client-football-results) and the
-  [Agent Skill](#agent-skill) (a `Tools` section in llms.txt; "Command-line client" and "Agent
-  Skill" sections at `/agents#cli` and `/agents#skill`) and show each top task as curl and as a
-  CLI command.
+  [Agent Skill](#agent-skill) and the [MCP server](#mcp-server) (a `Tools` section in llms.txt;
+  "Command-line client", "Agent Skill", and "MCP server" sections at `/agents#cli`,
+  `/agents#skill`, and `/agents#mcp`) and show each top task as curl and as a CLI command.
 
 ~~~bash
 curl -s http://localhost:8000/llms.txt
@@ -654,6 +654,60 @@ project skills from `.github/skills/`, `.agents/skills/`, or `.claude/skills/`; 
 `tests/test_skill.py` keeps the skill in step with the CLI: every command in its code blocks must
 run, and its options, exit codes, problem types, and links must exist.
 
+## MCP server
+
+`/mcp` is a curated [Model Context Protocol](https://modelcontextprotocol.io) server for chat
+clients without a shell (ChatGPT, claude.ai, IDE chats). It speaks Streamable HTTP, protocol
+revision 2026-07-28 (stateless, no session ID) and older revisions, with JSON responses. It is
+built with the official `mcp` Python SDK and served by the API process; it is not an OpenAPI
+operation, so it is absent from `/openapi.json`.
+
+| Tool | API operation | Purpose |
+| --- | --- | --- |
+| `list_competitions` | `list_competitions` | Competition slugs, current and stored seasons, scheduler state |
+| `find_matches` | `list_matches` | Fixtures and results with every `/api/v1/matches` filter, cursors, and `fields` |
+| `get_standings` | `get_standings` | League table computed from finished matches |
+| `get_team_form` | `list_teams` + `list_matches` | A team's last 1–20 (default 5) finished matches with W/D/L, points, and a form string |
+| `request_refresh` | `request_refresh` | Queue a re-import of a stale current season (needs an API key) |
+
+- Each tool calls the HTTP API in-process, so validation, `null` statistics, freshness, match IDs,
+  and cursors are identical to the API. Structured results carry an `outputSchema`; the text
+  content is the same JSON.
+- Errors are tool results with `isError: true` whose text is the API's RFC 9457 problem (for
+  example `unknown-competition` with `valid_values`). An ambiguous `get_team_form` team returns
+  `invalid-parameter` with the candidate slugs. An unknown tool name is a JSON-RPC
+  `-32602` error.
+- The four read tools need no key. `request_refresh` sends the `X-API-Key` header of the MCP
+  connection; configure it in the client only if you want refreshes.
+- Each `/mcp` request counts once against the `read` rate limit; `request_refresh` also counts
+  against the caller's `write` limit. Responses are `Cache-Control: no-store`.
+- `Host` and `Origin` are checked against DNS rebinding: `localhost`, `127.0.0.1`, `[::1]`, the
+  host of `FOOTBALL_RESULTS_PUBLIC_BASE_URL`, and the hosts and origins in
+  `FOOTBALL_RESULTS_MCP_ALLOWED_HOSTS` and `FOOTBALL_RESULTS_MCP_ALLOWED_ORIGINS` are allowed
+  (`421` for another host, `403` for another origin; requests without `Origin` pass).
+- Tool names are public; tool descriptions are kept short (`tests/test_mcp.py` caps them).
+
+~~~bash
+# GitHub Copilot CLI (add --header "X-API-Key: <key>" for request_refresh)
+copilot mcp add --transport http football-results https://football.example.com/mcp
+# Claude Code (check `claude mcp add --help` for your version)
+claude mcp add --transport http football-results https://football.example.com/mcp
+~~~
+
+Clients that read a JSON configuration (for example Copilot CLI `~/.copilot/mcp-config.json` or
+a project `.mcp.json`):
+
+~~~json
+{"mcpServers": {"football-results": {"type": "http", "url": "https://football.example.com/mcp"}}}
+~~~
+
+`/agents#mcp` shows the same setup with the server's base URL.
+[`server.json`](server.json) describes the server for the
+[MCP Registry](https://registry.modelcontextprotocol.io) (a remote with a `{host}` variable and an
+optional secret `X-API-Key` header) and is validated against the vendored schema in
+`tests/schemas/`. It is not published yet: replace `OWNER` in its `name` with the GitHub account
+that publishes it, then run `mcp-publisher login github` and `mcp-publisher publish`.
+
 ## Ubuntu deployment
 
 The Compose deployment runs PostgreSQL and the API on the same Ubuntu machine.
@@ -684,7 +738,7 @@ HTTP/HTTPS ports through the Ubuntu firewall. Also set `FOOTBALL_RESULTS_TRUSTED
 proxy connects from as seen by the API container (for a proxy on the host, the Docker network
 gateway, for example `172.16.0.0/12`), and make the proxy set `X-Forwarded-For`. Otherwise every
 client shares one rate-limit quota. Set `FOOTBALL_RESULTS_PUBLIC_BASE_URL` to the public HTTPS URL
-so that `/llms.txt` and `/agents` show the right base URL.
+so that `/llms.txt` and `/agents` show the right base URL and `/mcp` accepts its host.
 
 ### Backups
 
@@ -807,7 +861,9 @@ Application variables:
 | FOOTBALL_RESULTS_RATE_LIMIT_WRITE_PER_MINUTE | `10` | `POST` (and other non-read) requests per client per minute |
 | FOOTBALL_RESULTS_TRUSTED_PROXIES | empty | Comma-separated proxy IPs or CIDRs whose `X-Forwarded-For` is trusted for the client address |
 | FOOTBALL_RESULTS_CACHE_MAX_AGE_SECONDS | `60` | Maximum `Cache-Control` `max-age` of read responses; `0` sends `no-cache` |
-| FOOTBALL_RESULTS_PUBLIC_BASE_URL | empty | Absolute public URL (optionally with a path prefix) used in `/llms.txt` and `/agents` links and examples; empty derives it from the request |
+| FOOTBALL_RESULTS_PUBLIC_BASE_URL | empty | Absolute public URL (optionally with a path prefix) used in `/llms.txt` and `/agents` links and examples; empty derives it from the request. Its host and origin are allowed by `/mcp` |
+| FOOTBALL_RESULTS_MCP_ALLOWED_HOSTS | empty | Extra comma-separated `Host` values accepted by `/mcp` (`host` or `host:port`; `host:*` for any port) |
+| FOOTBALL_RESULTS_MCP_ALLOWED_ORIGINS | empty | Extra comma-separated `Origin` values accepted by `/mcp` (for example `https://chat.example.com`) |
 
 Deployment variables (Docker Compose):
 

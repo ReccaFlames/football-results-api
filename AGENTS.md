@@ -20,7 +20,8 @@ API.
 | `app/contract.py` | API v1.1 request rules: opaque cursors, `fields=`, status and date parsing, limits |
 | `app/problems.py` | RFC 9457 problem details: `ProblemError`, exception handlers for every error |
 | `app/ratelimit.py` | In-process fixed-window rate limiter, `RateLimit` headers, trusted-proxy client IP |
-| `app/agent_docs.py` | Pure generator of `/llms.txt`, `/agents`, `/agents.md`, `/llms-full.txt`, `/problems/<slug>` from the OpenAPI spec and competitions; `SKILL_PATH`/`SKILL_FILE` for the served skill |
+| `app/agent_docs.py` | Pure generator of `/llms.txt`, `/agents`, `/agents.md`, `/llms-full.txt`, `/problems/<slug>` from the OpenAPI spec and competitions; `SKILL_PATH`/`SKILL_FILE` for the served skill; `MCP_TOOLS` (tool → operation) |
+| `app/mcp_server.py` | Curated MCP server (`mcp` SDK `MCPServer`) at `/mcp`: 5 tools calling the API in-process, output models, Host/Origin checks, `McpRoute` |
 | `app/caching.py` | Weak body-hash `ETag`, `If-None-Match`, and `Cache-Control` rules for read endpoints |
 | `app/standings.py` | Pure league-table calculation and tie-breakers from finished matches |
 | `app/scheduler.py` | Scheduler loop (`python -m app.scheduler`): seed → heartbeat → season checks (discovery/rollover) → claim due seasons → scrape → persist |
@@ -42,6 +43,7 @@ API.
 | `cli/football_results_cli/output.py` | JSON vs Rich tables (TTY detection), freshness footer, staleness rule |
 | `cli/football_results_cli/problems.py` | Exit codes, CLI problem slugs (`urn:football-results:cli:<slug>`), `exit_code_for` |
 | `skills/football-results/SKILL.md` | Consumer Agent Skill for API users (teaches the CLI), served unchanged at `/skills/football-results/SKILL.md` |
+| `server.json` | MCP Registry metadata (remote `/mcp`), validated against `tests/schemas/server.schema.json` |
 | `tests/` | pytest; API tests use `FakeRepository` and need no database; `test_cli.py` runs the CLI against the app in-process |
 | `tests/integration/` | Repository and migration tests against real PostgreSQL (skipped without `FOOTBALL_RESULTS_TEST_DATABASE_URL`) |
 
@@ -119,6 +121,14 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
   task examples are validated against the spec (`top_tasks` raises on unknown parameters) and,
   as CLI commands, against the CLI (`tests/test_agent_docs.py`). `_agent_guide` passes
   `cli_tool()` and `skill_tool()`, which add the Tools links and the `#cli` and `#skill` sections.
+- The MCP server (`/mcp`, `app/mcp_server.py`) is stateless Streamable HTTP and not an OpenAPI
+  operation. Tools call the HTTP routes in-process (httpx `ASGITransport`), never the repository,
+  so errors are the API's problems (`isError: true`) and results equal the HTTP bodies. Tool names
+  (`MCP_TOOLS` in `app/agent_docs.py`) are public: add, never rename. Keep tool descriptions within
+  `DESCRIPTION_BUDGET` (a test checks) and every parameter described. Inner reads are not
+  rate-limited again; inner writes count against the outer client's write quota. `server.json`
+  `version` must equal `pyproject.toml` (a test checks). MCP tests need
+  `with TestClient(app, base_url="http://localhost")` so the lifespan starts the session manager.
 - Two kinds of skills: `.github/skills/` holds *contributor* skills for working on this repo;
   `skills/football-results/SKILL.md` is the *consumer* skill for people and agents using the API.
   The consumer skill is a static, single file (`copilot skill add <url>` installs one file) that

@@ -60,6 +60,8 @@ class Settings(BaseSettings):
     trusted_proxies: str = ""
     cache_max_age_seconds: int = Field(default=60, ge=0)
     public_base_url: str | None = None
+    mcp_allowed_hosts: str = ""
+    mcp_allowed_origins: str = ""
 
     @field_validator("trusted_proxies")
     @classmethod

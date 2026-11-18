@@ -6,6 +6,7 @@ competitions, and the public base URL. Pages are built as `Block`s so that the M
 HTML renderings always carry the same content.
 """
 
+import json
 import re
 import shlex
 from collections.abc import Iterable, Mapping, Sequence
@@ -160,6 +161,24 @@ CLI_INSTALL = (
 SKILL_NAME = "football-results"
 SKILL_PATH = f"/skills/{SKILL_NAME}/SKILL.md"
 SKILL_FILE = Path(__file__).resolve().parent.parent / "skills" / SKILL_NAME / "SKILL.md"
+
+# The curated MCP server (`app/mcp_server.py`): tool name -> (API operation, summary). Tool names
+# are public: add, never rename. A test checks them against the server's `tools/list`.
+MCP_SERVER_NAME = "football-results"
+MCP_PATH = "/mcp"
+MCP_TOOLS: dict[str, tuple[str, str]] = {
+    "list_competitions": ("list_competitions", "Competition slugs, seasons, and state"),
+    "find_matches": ("list_matches", "Results and fixtures with every `list_matches` filter"),
+    "get_standings": ("get_standings", "League table with points, goals, and form"),
+    "get_team_form": (
+        "list_teams + list_matches",
+        "A team's latest finished matches with W/D/L, goals, and points",
+    ),
+    "request_refresh": (
+        "request_refresh",
+        "Queue a current-season refresh (needs the `X-API-Key` header)",
+    ),
+}
 
 
 # --- Document blocks ---------------------------------------------------------------------------
@@ -458,9 +477,9 @@ class Task:
 
 @dataclass(frozen=True)
 class ToolLink:
-    """A client tool (CLI or Agent Skill) to advertise once it exists."""
+    """A client tool (CLI, Agent Skill, or MCP server) to advertise once it exists."""
 
-    kind: Literal["cli", "skill"]
+    kind: Literal["cli", "skill", "mcp"]
     name: str
     url: str
     description: str
@@ -486,6 +505,19 @@ def skill_tool(base_url: str) -> ToolLink:
         (
             "SKILL.md teaching coding agents the CLI: when to use it, recipes, nulls, freshness, "
             "and exit codes; install it with `copilot skill add <this URL>`"
+        ),
+    )
+
+
+def mcp_tool(base_url: str) -> ToolLink:
+    return ToolLink(
+        "mcp",
+        f"{MCP_SERVER_NAME} MCP server",
+        f"{base_url.rstrip('/')}/agents#mcp",
+        (
+            f"Streamable HTTP endpoint `{base_url.rstrip('/')}{MCP_PATH}` with "
+            f"{len(MCP_TOOLS)} curated tools for MCP clients without a shell; tools, "
+            "authentication, and client setup"
         ),
     )
 
@@ -812,6 +844,7 @@ def agent_guide_blocks(guide: AgentGuide) -> list[Block]:
     )
     blocks.extend(_cli_blocks(guide))
     blocks.extend(_skill_blocks(guide))
+    blocks.extend(_mcp_blocks(guide))
     blocks.extend(_tools_blocks(guide))
     return blocks
 
@@ -1106,5 +1139,50 @@ def _skill_blocks(guide: AgentGuide) -> list[Block]:
             "from `.github/skills/`, `.agents/skills/`, or `.claude/skills/`; Claude Code reads "
             "`~/.claude/skills/` and `.claude/skills/`. From a checkout of the repository, "
             f"`copilot skill add ./skills/{SKILL_NAME}/SKILL.md` installs the same file."
+        ),
+    ]
+
+
+def _mcp_blocks(guide: AgentGuide) -> list[Block]:
+    if not guide.has_tool("mcp"):
+        return []
+    url = guide.url(MCP_PATH)
+    return [
+        Heading(2, "MCP server", anchor="mcp"),
+        Paragraph(
+            f"`{url}` is a [Model Context Protocol](https://modelcontextprotocol.io) server "
+            "(Streamable HTTP, protocol 2026-07-28 and older revisions; stateless, JSON "
+            "responses) for clients without a shell. Each tool calls this API, so validation, "
+            "`null` values, freshness, IDs, and cursors are the same. `structuredContent` "
+            "matches each tool's `outputSchema`; errors are tool results with `isError: true` "
+            "whose text is the problem JSON (`type`, `hint`, `valid_values`)."
+        ),
+        Table(
+            ("Tool", "API operation", "Summary"),
+            tuple(
+                (f"`{name}`", f"`{operation}`", summary)
+                for name, (operation, summary) in MCP_TOOLS.items()
+            ),
+        ),
+        Paragraph(
+            "Each MCP request counts once against the read rate limit; `request_refresh` also "
+            "counts against the write limit and needs an API key in the `X-API-Key` header of "
+            "the MCP connection. Leave the header out for read-only use."
+        ),
+        Code(
+            "# GitHub Copilot CLI\n"
+            f"copilot mcp add --transport http {MCP_SERVER_NAME} {url}\n"
+            "# with request_refresh\n"
+            f'copilot mcp add --transport http --header "X-API-Key: $KEY" {MCP_SERVER_NAME} '
+            f"{url}\n"
+            "# Claude Code (check `claude mcp add --help` for your version)\n"
+            f"claude mcp add --transport http {MCP_SERVER_NAME} {url}"
+        ),
+        Paragraph(
+            "VS Code and other clients that read `.mcp.json` or `~/.copilot/mcp-config.json`:"
+        ),
+        Code(
+            json.dumps({"mcpServers": {MCP_SERVER_NAME: {"type": "http", "url": url}}}, indent=2),
+            "json",
         ),
     ]

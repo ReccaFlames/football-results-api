@@ -91,7 +91,7 @@ reviewed: 2026-11-14, at version 0.12.1.
 - **MCP.**
   - Needed for chat clients without a shell (ChatGPT, claude.ai, IDE chats).
   - Current spec: 2026-07-28, which is stateless.
-  - Build with FastMCP, mounted in FastAPI.
+  - Build with the official `mcp` SDK (`MCPServer`, formerly FastMCP), served by FastAPI.
   - Curate 4–6 task-oriented tools. Do not auto-convert every endpoint: tool descriptions use up
     context on every turn, and curated servers perform better.
 - **Skip for now.** A2A agent cards, NLWeb and Arazzo matter little for a small data API.
@@ -205,11 +205,12 @@ How to use this list:
         otherwise) on `/agents#skill` and in the README (a skill `ToolLink` replaces the step 12
         "planned" note)
 - [ ] **15. Curated MCP server**
-  - [ ] FastMCP mounted at `/mcp`
-  - [ ] Read-only tools: `list_competitions`, `find_matches`, `get_standings`, `get_team_form`
-  - [ ] Optional authenticated `request_refresh`
-  - [ ] Structured output schemas
-  - [ ] Published to the MCP Registry
+  - [x] FastMCP mounted at `/mcp` (the `mcp` SDK's `MCPServer`, stateless Streamable HTTP route)
+  - [x] Read-only tools: `list_competitions`, `find_matches`, `get_standings`, `get_team_form`
+  - [x] Optional authenticated `request_refresh`
+  - [x] Structured output schemas
+  - [ ] Published to the MCP Registry (`server.json` is ready and schema-validated; set the
+        namespace owner, then `mcp-publisher login github` and `mcp-publisher publish`)
 
 ### Phase 3: Operations and growth
 

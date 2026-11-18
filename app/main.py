@@ -38,6 +38,14 @@ from app.contract import (
     slug_keyset,
 )
 from app.database import session_factory
+from app.mcp_server import (
+    CLIENT_SCOPE_KEY,
+    INTERNAL_SCOPE_KEY,
+    MCP_PATH,
+    McpEndpoint,
+    McpRoute,
+    create_server,
+)
 from app.models import (
     PROBLEM_TYPES,
     Competition,
@@ -157,7 +165,8 @@ def _freshness_cache_control(freshness: list[Freshness]) -> dict[str, str]:
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     config = load_config()
     await store.seed_competitions(config.to_competitions(), config.auto_rollover_slugs())
-    yield
+    async with mcp_endpoint.lifespan():
+        yield
 
 
 app = FastAPI(
@@ -169,6 +178,9 @@ app = FastAPI(
 )
 install_problem_handlers(app)
 docs.install_openapi(app)
+# The MCP server is a plain Starlette route, so it stays out of the OpenAPI spec.
+mcp_endpoint = McpEndpoint(create_server(app), settings)
+app.router.routes.append(McpRoute(mcp_endpoint))
 
 
 _trusted_proxies = lru_cache(maxsize=8)(parse_networks)
@@ -190,15 +202,33 @@ def _rate_limit_policy(method: str) -> RateLimitPolicy:
     return RateLimitPolicy("write", settings.rate_limit_write_per_minute, 60)
 
 
+def _rate_limit_hit(request: Request) -> tuple[RateLimitPolicy, str] | None:
+    """The policy and client to count this request against, or None if it is not limited.
+
+    A `/mcp` request counts once as a read. The tools' in-process API calls are not counted
+    again, except writes, which count against the write quota of the MCP caller.
+    """
+    if not settings.rate_limit_enabled or request.url.path in EXEMPT_PATHS:
+        return None
+    internal_client = request.scope.get(INTERNAL_SCOPE_KEY)
+    if internal_client is not None:
+        if request.method in READ_METHODS or not internal_client:
+            return None
+        return _rate_limit_policy(request.method), internal_client
+    client = _rate_limit_client(request)
+    if request.url.path == MCP_PATH:
+        request.scope[CLIENT_SCOPE_KEY] = client
+        return _rate_limit_policy("GET"), client
+    return _rate_limit_policy(request.method), client
+
+
 @app.middleware("http")
 async def rate_limit_and_cache(
     request: Request, call_next: Callable[[Request], Awaitable[Response]]
 ) -> Response:
     rate_headers: dict[str, str] = {}
-    if settings.rate_limit_enabled and request.url.path not in EXEMPT_PATHS:
-        decision = rate_limiter.hit(
-            _rate_limit_policy(request.method), _rate_limit_client(request), time.monotonic()
-        )
+    if (hit := _rate_limit_hit(request)) is not None:
+        decision = rate_limiter.hit(*hit, time.monotonic())
         rate_headers = decision.headers()
         if not decision.allowed:
             policy = decision.policy
@@ -218,7 +248,8 @@ async def rate_limit_and_cache(
     cacheable = (
         operation_id in CACHEABLE_OPERATIONS or getattr(route, "path", None) in CACHEABLE_PAGES
     )
-    if response.status_code >= 400 or (operation_id is not None and not cacheable):
+    uncached = operation_id is not None or isinstance(route, McpRoute)
+    if response.status_code >= 400 or (uncached and not cacheable):
         response.headers["Cache-Control"] = "no-store"
         return response
     if not cacheable or request.method != "GET" or response.status_code != 200:
@@ -915,7 +946,11 @@ async def _agent_guide(
             settings.rate_limit_write_per_minute,
         ),
         cache_max_age_seconds=settings.cache_max_age_seconds,
-        tools=(agent_docs.cli_tool(base_url), agent_docs.skill_tool(base_url)),
+        tools=(
+            agent_docs.cli_tool(base_url),
+            agent_docs.skill_tool(base_url),
+            agent_docs.mcp_tool(base_url),
+        ),
     )
     return guide, base_url, request_derived
 
