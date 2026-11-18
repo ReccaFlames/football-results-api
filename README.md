@@ -7,7 +7,7 @@ scheduler, and serves them over a REST API.
 The repository started as an Ekstraklasa-only scraper and is evolving into a **generic, configurable
 league-data API**. This README describes both:
 
-- **[Current state](#current-state)** – what is implemented and works today (version 0.13.0).
+- **[Current state](#current-state)** – what is implemented and works today (version 0.14.0).
 - **[Target state](#target-state-and-roadmap)** – where the project is heading and what is still
   missing.
 
@@ -23,7 +23,7 @@ league-data API**. This README describes both:
 | Scheduling | Adaptive per-season scheduler driven by fixture times; thresholds from `defaults.schedule` with per-competition overrides | Plus cron-style overrides and global provider quotas |
 | Configuration | Environment variables plus validated YAML for leagues, sources, providers, and schedule defaults | Env vars for infrastructure + one validated config file for leagues, sources, and schedules |
 | Observability | `/health` (DB + scheduler heartbeat), `scrape_run` table, logs; CI with PostgreSQL integration tests | Scheduler/scrape status endpoints, metrics, alerting on stale data |
-| API | Matches of every status with filters, cursor pagination, `fields=` and per-season freshness; computed standings; teams with aliases; manual refresh and historical fetch; RFC 9457 errors, rate limits, and `ETag` caching; generated `/llms.txt` and `/agents` guide | Plus authenticated admin endpoints |
+| API | Matches of every status with filters, cursor pagination, `fields=` and per-season freshness; computed standings; teams with aliases; manual refresh and historical fetch; RFC 9457 errors, rate limits, and `ETag` caching; generated `/llms.txt` and `/agents` guide; `football-results` CLI | Plus authenticated admin endpoints |
 
 ## Current state
 
@@ -257,7 +257,7 @@ competitions in the database. They are not operations, so they are absent from `
 
 | Path | Content type | Content |
 | --- | --- | --- |
-| `/llms.txt` | `text/markdown; charset=utf-8` | [llms.txt v2](https://llmstxt.org/) index: purpose, base URL, auth, competitions, top 5 tasks with curl, rules, links |
+| `/llms.txt` | `text/markdown; charset=utf-8` | [llms.txt v2](https://llmstxt.org/) index: purpose, base URL, auth, competitions, top 5 tasks with curl and CLI commands, rules, links |
 | `/agents` | `text/html; charset=utf-8` | Agent guide for people: every operation with parameters, auth, and errors, plus conventions |
 | `/agents.md` | `text/markdown; charset=utf-8` | The same guide as Markdown (the llms.txt `.md` alternate) |
 | `/llms-full.txt` | `text/markdown; charset=utf-8` | The guide plus every problem type in one file (a common, non-standard convention) |
@@ -275,7 +275,9 @@ competitions in the database. They are not operations, so they are absent from `
   `/llms.txt`; `/agents` also `rel="alternate"` to `/agents.md`).
 - When the database is unavailable the pages still return `200`, listing competitions from
   `config/competitions.yaml` with a note and `Cache-Control: no-store`.
-- The CLI and the Agent Skill (roadmap steps 13 and 14) are listed as planned until they exist.
+- The pages link the [`football-results` CLI](#command-line-client-football-results) (a `Tools`
+  section in llms.txt, a "Command-line client" section at `/agents#cli`) and show each top task
+  as curl and as a CLI command. The Agent Skill (roadmap step 14) is listed as planned.
 
 ~~~bash
 curl -s http://localhost:8000/llms.txt
@@ -518,6 +520,102 @@ subsequent refreshes do not repeatedly request old match pages. A forced histori
 used to enrich results which were stored before detail parsing was added. Corners and fouls remain
 null because the configured 90minut pages do not publish those figures.
 
+## Command-line client (`football-results`)
+
+`football-results` is a command-line client for this API, aimed at shells, scripts, and coding
+agents. It lives in `cli/` as a separate package, `football-results-cli`, and depends only on
+`httpx` and `typer` (with `rich`); it does not install the server. It needs Python 3.12 or later,
+and its version matches the API's.
+
+### Install
+
+Nothing is published to PyPI or a public Git URL yet, so install from a checkout:
+
+~~~bash
+uv tool install ./cli                     # puts football-results on PATH
+pipx install ./cli                        # the same with pipx
+uvx --from ./cli football-results --help  # run once without installing
+uv run football-results --help            # inside the repository (dev extra)
+~~~
+
+Use `./cli`, not `.`: `uvx --from .` would install the whole API with its dependencies.
+
+### Configuration
+
+| Variable | Option | Default | Purpose |
+| --- | --- | --- | --- |
+| `FOOTBALL_RESULTS_URL` | `--url` | `http://localhost:8000` | API base URL, optionally with a path prefix |
+| `FOOTBALL_RESULTS_API_KEY` | `--api-key` | none | Sent as `X-API-Key`, only by `refresh`, `fetch-season`, and `status` |
+| `FOOTBALL_RESULTS_TIMEOUT` | `--timeout` | `30` | HTTP timeout in seconds |
+
+Global options go before the command (`football-results --url URL matches`). The API key is never
+printed. Redirects are not followed, so the key is only sent to the configured URL. The server
+ignores these three variables; its settings use other names.
+
+### Commands
+
+| Command | Operation | API options |
+| --- | --- | --- |
+| `health` | `get_health` | none |
+| `competitions` | `list_competitions` | none |
+| `matches` | `list_matches` | `-c/--competition`, `-s/--season`, `--status`, `--date-from`, `--date-to`, `--team`, `--round`, `--stage`, `--order`, `--limit`, `--cursor`, `--fields` |
+| `standings` | `get_standings` | `-c/--competition` (required), `-s/--season`, `--stage`, `--fields` |
+| `teams` | `list_teams` | `-c/--competition`, `-s/--season`, `-q/--q`, `--limit`, `--cursor` |
+| `refresh` | `request_refresh` | `-c/--competition` (required), `-s/--season` |
+| `fetch-season` | `fetch_historical_season` | `-c/--competition`, `-s/--season` (both required), `--source-url`, `--force-refresh` |
+| `status JOB_ID` | `get_job` | the job ID |
+
+Options use the API parameter names (`--date-from` is `date_from`). CLI-only options:
+
+- `--json` prints JSON even on a terminal.
+- `--fields` selects item fields. The API applies it for `matches` and `standings`; the CLI applies
+  it for `competitions` and `teams`.
+- `--all` (`matches`, `teams`) follows `next_cursor` and prints one combined response with up to
+  `--max-items` items (default 1000).
+- `--fail-if-stale` (`matches`, `standings`) prints the data, then exits 4 if a competition-season
+  was never fetched or its `next_update_at` is more than 15 minutes in the past.
+- `--wait` (`refresh`, `fetch-season`, `status`) polls the job every `--poll-interval` seconds
+  (default 5). It stops after `--wait-timeout` seconds (default 300).
+
+Every command has `--help` with examples:
+
+~~~bash
+export FOOTBALL_RESULTS_URL=http://localhost:8000
+football-results competitions
+football-results teams -c ekstraklasa -q legia
+football-results matches -c ekstraklasa --team legia-warszawa --status finished --order desc --limit 5
+football-results standings -c ekstraklasa --json | jq '.data[:3]'
+FOOTBALL_RESULTS_API_KEY=... football-results refresh -c ekstraklasa --wait
+~~~
+
+### Output
+
+- **Piped (or with `--json`):** stdout is the API response body, unchanged, as one line of JSON. On
+  a terminal `--json` is indented. List commands keep `pagination` and `freshness`.
+- **On a terminal:** stdout is a table. `null` is shown as `—`, never as `0`. Freshness per
+  competition-season (with a `[stale]` marker) and the next cursor go to stderr.
+
+### Exit codes and errors
+
+| Exit code | Meaning |
+| --- | --- |
+| 0 | Success |
+| 2 | Usage error: invalid option or parameter (HTTP 400, 422, or a local check) |
+| 3 | Not found: unknown competition, season, or job (HTTP 404) |
+| 4 | Upstream or stale: HTTP 409, 429 after retries, or 5xx; network failure or timeout; failed or unfinished job with `--wait`; stale data with `--fail-if-stale` |
+| 5 | Auth: missing or invalid API key (HTTP 401/403) or writes disabled |
+
+Errors are written to stderr as one line of RFC 9457 problem JSON. Problems from the server are
+passed through unchanged. Problems detected by the CLI have `type`
+`urn:football-results:cli:<slug>`, where the slug is one of `usage-error` (2), `connection-failed`,
+`timeout`, `invalid-response`, `stale-data`, `job-failed`, or `wait-timeout` (all 4). These slugs
+are not server problem types. Usage errors include `parameter` and `hint` when known. Read
+commands retry `429` and `503` at most twice, when `Retry-After` is at most 30 seconds. Writes
+are never retried.
+
+Exit codes, command and option names, and the CLI problem slugs are public. New ones may be added,
+but existing ones are never renamed or renumbered.
+
 ## Ubuntu deployment
 
 The Compose deployment runs PostgreSQL and the API on the same Ubuntu machine.
@@ -694,7 +792,9 @@ uv run ruff format --check .
 uv run alembic upgrade head --sql
 ~~~
 
-Unit and API tests use a repository test double and do not require PostgreSQL.
+Unit and API tests use a repository test double and do not require PostgreSQL. CLI tests
+(`tests/test_cli.py`) run the CLI against the FastAPI app in-process or a mock transport, without
+network access.
 
 ### PostgreSQL integration tests
 

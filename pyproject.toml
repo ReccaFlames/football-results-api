@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "football-results-api"
-version = "0.13.0"
+version = "0.14.0"
 description = "Cached multi-competition REST API for football match results"
 requires-python = ">=3.12"
 dependencies = [
@@ -21,10 +21,17 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "football-results-cli",
   "pytest>=8.4,<9",
   "pytest-asyncio>=1.1,<2",
   "ruff>=0.12,<1",
 ]
+
+[tool.uv.workspace]
+members = ["cli"]
+
+[tool.uv.sources]
+football-results-cli = { workspace = true }
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

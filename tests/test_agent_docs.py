@@ -1,8 +1,15 @@
 import re
+import shlex
 from ipaddress import ip_network
 
+import httpx
 import pytest
+from fastapi.testclient import TestClient
+from football_results_cli import client as cli_http
+from football_results_cli import main as cli
+from football_results_cli import problems
 from pydantic import ValidationError
+from typer.testing import CliRunner
 
 from app import agent_docs
 from app.competitions import competition_summary
@@ -156,8 +163,78 @@ def test_html_rendering_escapes_text_and_keeps_inline_markup() -> None:
 
 
 def test_tool_links_replace_the_planned_note_once_they_exist() -> None:
-    tool = agent_docs.ToolLink("CLI", f"{BASE_URL}/cli", "the football-results command")
-    text = agent_docs.llms_txt(guide(tools=[tool]))
+    skill = agent_docs.ToolLink("skill", "Skill", f"{BASE_URL}/skill", "the agent skill")
+    text = agent_docs.llms_txt(guide(tools=[agent_docs.cli_tool(BASE_URL), skill]))
 
     assert agent_docs.PLANNED_TOOLS_NOTE not in text
-    assert f"## Tools\n\n- [CLI]({BASE_URL}/cli): the football-results command" in text
+    assert (
+        f"## Tools\n\n- [football-results CLI]({BASE_URL}/agents#cli): command-line client"
+    ) in text
+    assert f"- [Skill]({BASE_URL}/skill): the agent skill" in text
+
+
+def test_cli_tool_adds_cli_examples_and_a_cli_section_but_keeps_the_skill_planned() -> None:
+    rendered = guide(tools=[agent_docs.cli_tool(BASE_URL)])
+    text = agent_docs.llms_txt(rendered)
+    page = agent_docs.render_markdown(agent_docs.agent_guide_blocks(rendered))
+    html = agent_docs.render_html(agent_docs.agent_guide_blocks(rendered), title="t", links={})
+
+    assert text.count(agent_docs.PLANNED_TOOLS_NOTE) == 1
+    for task in rendered.tasks:
+        assert f"```sh\n{task.cli()}\n```" in text
+        assert task.cli() in page
+    assert "football-results matches --competition ekstraklasa --team" in text
+    assert '--date-from "$(date -u +%F)"' in text
+    assert 'id="cli"' in html
+    assert "## Command-line client" in page and "`urn:football-results:cli:stale-data`" in page
+    assert "CLI: `football-results standings`" in page
+    assert "football-results" not in agent_docs.llms_txt(guide()).replace(
+        agent_docs.PLANNED_TOOLS_NOTE, ""
+    )
+
+
+def test_served_guides_advertise_the_cli() -> None:
+    client = TestClient(app)
+    assert "[football-results CLI](http://testserver/agents#cli)" in client.get("/llms.txt").text
+    assert 'id="cli"' in client.get("/agents").text
+
+
+def test_cli_names_match_the_cli_package() -> None:
+    assert agent_docs.CLI_NAME == cli.PROG_NAME
+    assert agent_docs.CLI_COMMANDS == {
+        operation: command for command, operation in cli.OPERATIONS.items()
+    }
+    assert agent_docs.CLI_PROBLEM_PREFIX == problems.CLI_PROBLEM_PREFIX
+    assert {slug: code for slug, (code, _) in agent_docs.CLI_PROBLEM_GUIDANCE.items()} == {
+        slug: code for slug, (_, code) in problems.CLI_PROBLEM_TYPES.items()
+    }
+    assert [code for code, _ in agent_docs.CLI_EXIT_CODES] == [
+        problems.EXIT_OK,
+        problems.EXIT_USAGE,
+        problems.EXIT_NOT_FOUND,
+        problems.EXIT_UPSTREAM,
+        problems.EXIT_AUTH,
+    ]
+
+
+def test_cli_task_examples_send_the_same_request_as_curl(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        page = {"data": [], "pagination": {"limit": 1, "next_cursor": None}, "freshness": []}
+        return httpx.Response(200, json=[] if request.url.path.endswith("competitions") else page)
+
+    monkeypatch.setattr(
+        cli_http,
+        "create_http_client",
+        lambda config: httpx.Client(transport=httpx.MockTransport(respond), base_url=config.url),
+    )
+    for task in guide().tasks:
+        words = shlex.split(task.cli())
+        assert words[0] == "football-results"
+        result = CliRunner().invoke(cli.app, ["--url", BASE_URL, *words[1:]])
+
+        assert result.exit_code == 0, (task.cli(), result.stderr)
+        assert str(sent[-1].url.copy_with(query=None)) == f"{BASE_URL}{task.operation.path}"
+        assert dict(sent[-1].url.params) == dict(task.query)

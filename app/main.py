@@ -914,6 +914,7 @@ async def _agent_guide(
             settings.rate_limit_write_per_minute,
         ),
         cache_max_age_seconds=settings.cache_max_age_seconds,
+        tools=(agent_docs.cli_tool(base_url),),
     )
     return guide, base_url, request_derived
 

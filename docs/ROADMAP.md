@@ -185,15 +185,19 @@ How to use this list:
         examples. CLI examples are deferred: step 13 adds them.
   - [x] Links to `/openapi.json`. The CLI and the skill are shown as "planned" until steps 13–14
         pass `ToolLink`s to `build_guide` and add the CLI examples.
-- [ ] **13. CLI (`football-results`)**
-  - [ ] Typer app over the HTTP API, installable with `uvx`/`pipx`
-  - [ ] Commands: `competitions`, `matches`, `standings`, `teams`, `refresh`, `status`
-  - [ ] JSON when piped, a table on a TTY, `--json` and `--fields`
-  - [ ] Stable exit codes (0 ok, 2 usage, 3 not found, 4 upstream/stale, 5 auth)
-  - [ ] Errors as JSON on stderr
-  - [ ] Configured through `FOOTBALL_RESULTS_URL` and `FOOTBALL_RESULTS_API_KEY`
-  - [ ] `--help` with examples on every command
-  - [ ] CLI examples and a CLI `ToolLink` in `/llms.txt` and `/agents` (deferred from step 12)
+- [x] **13. CLI (`football-results`)**
+  - [x] Typer app over the HTTP API, installable with `uvx`/`pipx` (separate `cli/` workspace
+        package `football-results-cli`, httpx + typer only; install from a checkout until published)
+  - [x] Commands: `competitions`, `matches`, `standings`, `teams`, `refresh`, `status` (plus
+        `health` and `fetch-season`, so every non-deprecated operation has a command)
+  - [x] JSON when piped, a table on a TTY, `--json` and `--fields` (also `--all`, `--fail-if-stale`,
+        and `--wait`)
+  - [x] Stable exit codes (0 ok, 2 usage, 3 not found, 4 upstream/stale, 5 auth)
+  - [x] Errors as JSON on stderr (server problems unchanged; CLI problems as
+        `urn:football-results:cli:<slug>`)
+  - [x] Configured through `FOOTBALL_RESULTS_URL` and `FOOTBALL_RESULTS_API_KEY`
+  - [x] `--help` with examples on every command
+  - [x] CLI examples and a CLI `ToolLink` in `/llms.txt` and `/agents` (deferred from step 12)
 - [ ] **14. Consumer Agent Skill**
   - [ ] `skills/football-results/SKILL.md` teaching the CLI (when to use, recipes, nulls, freshness)
   - [ ] Served at `/skills/football-results/SKILL.md`

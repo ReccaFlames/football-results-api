@@ -7,11 +7,12 @@ HTML renderings always carry the same content.
 """
 
 import re
+import shlex
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from html import escape
 from ipaddress import IPv4Network, IPv6Network
-from typing import Any
+from typing import Any, Literal
 
 from app.models import PROBLEM_TYPES, CompetitionSummary
 from app.problems import PROBLEM_MEDIA_TYPE
@@ -112,8 +113,50 @@ PROBLEM_GUIDANCE: dict[str, tuple[str, str]] = {
 }
 
 PLANNED_TOOLS_NOTE = (
-    "A command-line client (`football-results`) and an Agent Skill are planned (roadmap steps "
-    "13 and 14) but not available yet; use curl or the OpenAPI spec meanwhile."
+    "An Agent Skill is planned (roadmap step 14) but not available yet; use the "
+    "`football-results` CLI, curl, or the OpenAPI spec meanwhile."
+)
+
+# The `football-results` CLI (`cli/` in the repository). It cannot be imported here (the API does
+# not depend on it), so tests check these names against the CLI itself. All are public.
+CLI_NAME = "football-results"
+CLI_COMMANDS: dict[str, str] = {
+    "get_health": "health",
+    "list_competitions": "competitions",
+    "list_matches": "matches",
+    "get_standings": "standings",
+    "list_teams": "teams",
+    "request_refresh": "refresh",
+    "fetch_historical_season": "fetch-season",
+    "get_job": "status",
+}
+CLI_EXIT_CODES: tuple[tuple[int, str], ...] = (
+    (0, "Success"),
+    (2, "Usage error: invalid option or parameter (HTTP 400, 422, or a local check)"),
+    (3, "Not found: unknown competition, season, or job (HTTP 404)"),
+    (
+        4,
+        (
+            "Upstream or stale: server error, job conflict, rate limit after retries, network "
+            "failure, timeout, failed job, or stale data with `--fail-if-stale`"
+        ),
+    ),
+    (5, "Auth: missing or invalid API key (HTTP 401/403), or writes disabled"),
+)
+CLI_PROBLEM_PREFIX = "urn:football-results:cli:"
+# Problems raised by the CLI itself (never by the server): slug -> (exit code, meaning).
+CLI_PROBLEM_GUIDANCE: dict[str, tuple[int, str]] = {
+    "usage-error": (2, "An unknown command or option, or an invalid option value."),
+    "connection-failed": (4, "The API is unreachable; check `FOOTBALL_RESULTS_URL`."),
+    "timeout": (4, "The API did not answer within `--timeout` seconds."),
+    "invalid-response": (4, "A redirect, or a non-JSON or non-problem response (wrong URL?)."),
+    "stale-data": (4, "With `--fail-if-stale`: a season was never fetched or is overdue."),
+    "job-failed": (4, "With `--wait`: the job failed or was cancelled."),
+    "wait-timeout": (4, "With `--wait`: the job did not finish within `--wait-timeout`."),
+}
+CLI_INSTALL = (
+    "uv tool install ./cli        # from a checkout of the repository (or: pipx install ./cli)\n"
+    "uvx --from ./cli football-results --help   # run once without installing"
 )
 
 
@@ -124,6 +167,7 @@ PLANNED_TOOLS_NOTE = (
 class Heading:
     level: int
     text: str
+    anchor: str | None = None
 
 
 @dataclass(frozen=True)
@@ -162,7 +206,7 @@ def render_markdown(blocks: Iterable[Block]) -> str:
 
 def _markdown_block(block: Block) -> str:
     match block:
-        case Heading(level, text):
+        case Heading(level, text, _):
             return f"{'#' * level} {text}"
         case Paragraph(text):
             return text
@@ -235,8 +279,9 @@ _STYLE = (
 
 def _html_block(block: Block) -> str:
     match block:
-        case Heading(level, text):
-            return f"<h{level}>{inline_html(text)}</h{level}>"
+        case Heading(level, text, anchor):
+            identifier = f' id="{escape(anchor)}"' if anchor else ""
+            return f"<h{level}{identifier}>{inline_html(text)}</h{level}>"
         case Paragraph(text):
             return f"<p>{inline_html(text)}</p>"
         case Quote(text):
@@ -400,14 +445,35 @@ class Task:
     def curl(self, base_url: str) -> str:
         return f'curl -s "{self.url(base_url)}"'
 
+    def cli(self) -> str:
+        """The same request as a `football-results` command (options are the parameter names)."""
+        words = [CLI_NAME, CLI_COMMANDS[self.operation.operation_id]]
+        for name, value in self.query:
+            quoted = f'"{value}"' if "$(" in value else shlex.quote(value)
+            words.append(f"--{name.replace('_', '-')} {quoted}")
+        return " ".join(words)
+
 
 @dataclass(frozen=True)
 class ToolLink:
     """A client tool (CLI or Agent Skill) to advertise once it exists."""
 
+    kind: Literal["cli", "skill"]
     name: str
     url: str
     description: str
+
+
+def cli_tool(base_url: str) -> ToolLink:
+    return ToolLink(
+        "cli",
+        f"{CLI_NAME} CLI",
+        f"{base_url.rstrip('/')}/agents#cli",
+        (
+            "command-line client: JSON when piped, tables on a terminal, stable exit codes, "
+            "and errors as JSON on stderr; installation, commands, and exit codes"
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -438,6 +504,9 @@ class AgentGuide:
 
     def operation(self, operation_id: str) -> Operation:
         return next(item for item in self.operations if item.operation_id == operation_id)
+
+    def has_tool(self, kind: str) -> bool:
+        return any(item.kind == kind for item in self.tools)
 
 
 def build_guide(
@@ -597,7 +666,7 @@ def llms_txt(guide: AgentGuide) -> str:
         Paragraph(_auth_text(guide)),
         Paragraph("Competitions on this instance:"),
         Bullets(_competition_lines(guide)),
-        Paragraph("Top 5 tasks:"),
+        Paragraph(_tasks_intro(guide)),
     ]
     for number, task in enumerate(guide.tasks, start=1):
         blocks.append(
@@ -605,10 +674,10 @@ def llms_txt(guide: AgentGuide) -> str:
                 f"Task {number}: **{task.title}** (`{task.operation.operation_id}`). {task.purpose}"
             )
         )
-        blocks.append(Code(task.curl(guide.base_url)))
+        blocks.extend(_task_examples(guide, task))
     blocks.append(Paragraph("Rules:"))
     blocks.append(Bullets(_rules(guide)))
-    if not guide.tools:
+    if not guide.has_tool("skill"):
         blocks.append(Paragraph(PLANNED_TOOLS_NOTE))
     blocks.extend(
         [
@@ -643,7 +712,7 @@ def llms_txt(guide: AgentGuide) -> str:
         ]
     )
     if guide.tools:
-        blocks[-2:-2] = _tools_blocks(guide)
+        blocks[-2:-2] = _tools_blocks(guide)[:2]
     return render_markdown(blocks)
 
 
@@ -658,13 +727,14 @@ def agent_guide_blocks(guide: AgentGuide) -> list[Block]:
             f" · [Full reference]({guide.url('/llms-full.txt')})"
         ),
         Heading(2, "Quick start"),
+        Paragraph(_tasks_intro(guide)),
     ]
     for task in guide.tasks:
         blocks.extend(
             [
                 Heading(3, task.title),
                 Paragraph(f"{task.purpose} Operation: `{task.operation.operation_id}`."),
-                Code(task.curl(guide.base_url)),
+                *_task_examples(guide, task),
             ]
         )
     blocks.extend([Heading(2, "Competitions")])
@@ -729,6 +799,7 @@ def agent_guide_blocks(guide: AgentGuide) -> list[Block]:
             ),
         ]
     )
+    blocks.extend(_cli_blocks(guide))
     blocks.extend(_tools_blocks(guide))
     return blocks
 
@@ -797,6 +868,9 @@ def _operation_blocks(guide: AgentGuide, operation: Operation) -> list[Block]:
     flags = ["requires `X-API-Key`" if operation.requires_api_key else "no auth"]
     if operation.deprecated:
         flags.append("**deprecated**")
+    command = CLI_COMMANDS.get(operation.operation_id)
+    if command and guide.has_tool("cli"):
+        flags.append(f"CLI: `{CLI_NAME} {command}`")
     blocks: list[Block] = [
         Heading(4, f"`{operation.operation_id}`: {operation.summary}"),
         Paragraph(f"`{operation.method} {operation.path}` · " + " · ".join(flags)),
@@ -911,9 +985,84 @@ def _conventions(guide: AgentGuide) -> tuple[str, ...]:
 
 
 def _tools_blocks(guide: AgentGuide) -> list[Block]:
-    if not guide.tools:
-        return [Heading(2, "Tools"), Paragraph(PLANNED_TOOLS_NOTE)]
+    blocks: list[Block] = [Heading(2, "Tools")]
+    if guide.tools:
+        blocks.append(
+            Bullets(tuple(f"[{item.name}]({item.url}): {item.description}" for item in guide.tools))
+        )
+    if not guide.has_tool("skill"):
+        blocks.append(Paragraph(PLANNED_TOOLS_NOTE))
+    return blocks
+
+
+def _tasks_intro(guide: AgentGuide) -> str:
+    if not guide.has_tool("cli"):
+        return "Top 5 tasks:"
+    return (
+        f"Top 5 tasks, each as curl and as the equivalent `{CLI_NAME}` command (set "
+        f"`FOOTBALL_RESULTS_URL={guide.base_url}` for the CLI):"
+    )
+
+
+def _task_examples(guide: AgentGuide, task: Task) -> list[Block]:
+    blocks: list[Block] = [Code(task.curl(guide.base_url))]
+    if guide.has_tool("cli"):
+        blocks.append(Code(task.cli()))
+    return blocks
+
+
+def _cli_blocks(guide: AgentGuide) -> list[Block]:
+    if not guide.has_tool("cli"):
+        return []
+    commands = {command: operation for operation, command in CLI_COMMANDS.items()}
     return [
-        Heading(2, "Tools"),
-        Bullets(tuple(f"[{item.name}]({item.url}): {item.description}" for item in guide.tools)),
+        Heading(2, "Command-line client", anchor="cli"),
+        Paragraph(
+            f"`{CLI_NAME}` wraps this API for shells and coding agents. It prints the JSON "
+            "response body when stdout is not a terminal (or with `--json`) and a table "
+            "otherwise; errors are RFC 9457 problem details as one JSON line on stderr. Every "
+            "command has `--help` with examples. It needs Python 3.12 or later."
+        ),
+        Code(CLI_INSTALL),
+        Paragraph(
+            "Configure it with environment variables (or `--url`, `--api-key`, `--timeout`). The "
+            "API key is sent only for `refresh`, `fetch-season`, and `status`."
+        ),
+        Code(
+            f"export FOOTBALL_RESULTS_URL={guide.base_url}\n"
+            "export FOOTBALL_RESULTS_API_KEY=...   # only for refresh, fetch-season, status"
+        ),
+        Table(
+            ("Command", "Operation", "Summary"),
+            tuple(
+                (
+                    f"`{CLI_NAME} {command}`",
+                    f"`{operation}`",
+                    guide.operation(operation).summary,
+                )
+                for command, operation in commands.items()
+                if any(item.operation_id == operation for item in guide.operations)
+            ),
+        ),
+        Paragraph(
+            "Options use the API parameter names (`--date-from` is `date_from`). `--fields` "
+            "selects item fields; `--all` follows `next_cursor` up to `--max-items` (1000); "
+            "`--fail-if-stale` exits 4 when a season was never fetched or its update is more "
+            "than 15 minutes overdue; `--wait` polls a job until it finishes."
+        ),
+        Table(
+            ("Exit code", "Meaning"),
+            tuple((str(code), meaning) for code, meaning in CLI_EXIT_CODES),
+        ),
+        Paragraph(
+            "Server errors are passed through unchanged. Problems detected by the CLI itself use "
+            f"`type` `{CLI_PROBLEM_PREFIX}<slug>`:"
+        ),
+        Table(
+            ("Type", "Exit code", "Meaning"),
+            tuple(
+                (f"`{CLI_PROBLEM_PREFIX}{slug}`", str(code), meaning)
+                for slug, (code, meaning) in CLI_PROBLEM_GUIDANCE.items()
+            ),
+        ),
     ]

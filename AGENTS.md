@@ -36,7 +36,12 @@ API.
 | `app/config.py` | `Settings` from env vars with prefix `FOOTBALL_RESULTS_` |
 | `migrations/` | Alembic migrations (schema changes go here only; no `create_all`) |
 | `docs/PROVIDERS.md` | Provider contract: `scrape`, `discover_seasons`, capabilities, URL rules |
-| `tests/` | pytest; API tests use `FakeRepository` and need no database |
+| `cli/` | Separate uv workspace package `football-results-cli` (httpx + typer only): the `football-results` CLI |
+| `cli/football_results_cli/main.py` | Typer commands, `OPERATIONS` (command → operation ID), `CLI_ONLY_OPTIONS`, JSON usage errors |
+| `cli/football_results_cli/client.py` | `Config`, `create_http_client` (test seam), `ApiClient` with GET retries and HTTP → problem mapping |
+| `cli/football_results_cli/output.py` | JSON vs Rich tables (TTY detection), freshness footer, staleness rule |
+| `cli/football_results_cli/problems.py` | Exit codes, CLI problem slugs (`urn:football-results:cli:<slug>`), `exit_code_for` |
+| `tests/` | pytest; API tests use `FakeRepository` and need no database; `test_cli.py` runs the CLI against the app in-process |
 | `tests/integration/` | Repository and migration tests against real PostgreSQL (skipped without `FOOTBALL_RESULTS_TEST_DATABASE_URL`) |
 
 ## Commands
@@ -48,6 +53,8 @@ uv run pytest -q                    # unit tests; integration tests skip without
 uv run ruff check .                 # lint (line length 100)
 uv run ruff format --check .        # formatting (enforced in CI)
 uv run alembic upgrade head --sql   # validate migrations offline
+uv run football-results --help      # CLI from the workspace (FOOTBALL_RESULTS_URL, default :8000)
+uvx --from ./cli football-results --help   # CLI install smoke test (not `--from .`)
 
 # PostgreSQL integration tests (repository + migrations), disposable DB on port 55432
 docker compose --profile test up -d --wait test-db
@@ -108,8 +115,22 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
 - Agent docs (`/llms.txt`, `/agents`, ...) are generated from `app.openapi()`, so new operations,
   parameters, and documented problems appear automatically. The doc routes use
   `include_in_schema=False` and no operation ID; they get `ETag` through `CACHEABLE_PAGES`. Top-5
-  task examples are validated against the spec (`top_tasks` raises on unknown parameters). The
-  CLI and skill are shown as planned until steps 13–14 pass `ToolLink`s to `build_guide`.
+  task examples are validated against the spec (`top_tasks` raises on unknown parameters) and,
+  as CLI commands, against the CLI (`tests/test_agent_docs.py`). `_agent_guide` passes
+  `cli_tool()`; the skill is shown as planned until step 14 passes a skill `ToolLink`.
+- The CLI (`cli/`) is a separate package: the API must not import it, and it must not import
+  `app`. `CLI_NAME`, `CLI_COMMANDS`, `CLI_EXIT_CODES`, and `CLI_PROBLEM_GUIDANCE` in
+  `app/agent_docs.py` mirror the CLI; tests check both sides. Command names, option names, exit
+  codes (0 ok, 2 usage, 3 not found, 4 upstream/stale, 5 auth), and CLI problem slugs are public:
+  add, never rename or renumber. A new API operation or parameter needs a CLI command/option with
+  the same name (`--date-from` = `date_from`); a test compares commands with the OpenAPI spec.
+- CLI output: stdout is only data (the API body unchanged as JSON, or a table on a TTY); notes,
+  freshness, and errors go to stderr, errors as one-line problem JSON. Server problems are passed
+  through unchanged. `FOOTBALL_RESULTS_URL`, `FOOTBALL_RESULTS_API_KEY`, and
+  `FOOTBALL_RESULTS_TIMEOUT` belong to the CLI; never add `url`, `api_key`, or `timeout` fields to
+  the server `Settings` (a test checks). Send the API key only on job/write operations.
+- Both packages share one version; bump `pyproject.toml` and `cli/pyproject.toml` together (a test
+  checks). The Docker image installs only the API (`uv sync --frozen --no-dev`), not `cli/`.
 - Statistics that a provider cannot supply must stay `null` — never default to `0`.
 - 90minut pages are ISO-8859-2 and use Polish month names with Europe/Warsaw time.
 - football-data.org is throttled (`FOOTBALL_DATA_MIN_REQUEST_INTERVAL_SECONDS`, default 6s) and
