@@ -212,6 +212,7 @@ class ScrapeRunRow(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     matches_found: Mapped[int | None] = mapped_column(Integer)
     error_message: Mapped[str | None] = mapped_column(Text)
+    worker_id: Mapped[str | None] = mapped_column(String(200))
 
     competition_season: Mapped[CompetitionSeasonRow] = relationship(back_populates="scrape_runs")
 

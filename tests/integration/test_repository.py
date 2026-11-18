@@ -1,5 +1,6 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
+from unittest.mock import ANY
 
 import pytest
 from sqlalchemy import select, update
@@ -9,11 +10,17 @@ from app.db_models import (
     CompetitionRow,
     CompetitionSeasonRow,
     MatchRow,
+    SchedulerHeartbeatRow,
     ScrapeRunRow,
     TeamAliasRow,
 )
 from app.models import Competition, MatchQuery, ScrapedMatch, SeasonSource
-from app.repository import ActiveScrapeJobConflict, PostgresResultRepository
+from app.repository import (
+    AbandonedScrapeRun,
+    ActiveScrapeJobConflict,
+    PostgresResultRepository,
+    ScheduledRefresh,
+)
 from app.scheduling import SchedulePolicy
 from app.standings import compute_standings
 
@@ -587,6 +594,96 @@ async def test_scheduler_heartbeat(repository: PostgresResultRepository) -> None
     await repository.heartbeat("worker-1", started)
     second = await repository.latest_scheduler_heartbeat()
     assert first is not None and second is not None and second >= first
+
+
+async def test_runs_of_a_dead_worker_are_failed_and_the_season_is_claimed_again(
+    repository: PostgresResultRepository, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    competition = league()
+    await repository.seed_competitions({"test-league": competition, "test-cup": cup()})
+    await set_next_check(sessions, "test-league", datetime.now(UTC) - timedelta(hours=1))
+    await set_next_check(sessions, "test-cup", datetime.now(UTC) + timedelta(days=1))
+    await repository.enqueue_scrape(competition, competition.seasons["2025-2026"])
+    started = datetime.now(UTC) - timedelta(days=3)
+    await repository.heartbeat("dead-worker", started)
+    await repository.heartbeat("live-worker", started)
+    [scheduled] = await repository.claim_due_seasons(10, worker_id="dead-worker")
+    [queued] = await repository.claim_queued_scrape_runs(10, worker_id="dead-worker")
+    async with sessions.begin() as session:
+        await session.execute(
+            update(SchedulerHeartbeatRow)
+            .where(SchedulerHeartbeatRow.worker_id == "dead-worker")
+            .values(heartbeat_at=started)
+        )
+    await set_next_check(sessions, "test-league", datetime.now(UTC) - timedelta(hours=1))
+    assert await repository.claim_due_seasons(10, worker_id="live-worker") == []
+    assert await repository.next_scheduled_refresh() == ScheduledRefresh(
+        "test-league", "2026-2027", ANY, scheduled.run_id
+    )
+
+    abandoned = await repository.fail_abandoned_scrape_runs(timedelta(minutes=5))
+
+    assert sorted(abandoned) == sorted(
+        [
+            AbandonedScrapeRun(scheduled.run_id, "test-league", "2026-2027", "dead-worker"),
+            AbandonedScrapeRun(queued.run_id, "test-league", "2025-2026", "dead-worker"),
+        ]
+    )
+    for run_id in (scheduled.run_id, queued.run_id):
+        job = await repository.get_scrape_job(run_id)
+        assert job is not None and job.status == "failed" and job.completed_at is not None
+        assert "dead-worker" in (job.error_message or "")
+    [reclaimed] = await repository.claim_due_seasons(10, worker_id="live-worker")
+    assert reclaimed.competition.slug == "test-league"
+    assert await repository.next_scheduled_refresh() == ScheduledRefresh(
+        "test-league", "2026-2027", ANY, reclaimed.run_id
+    )
+
+
+async def test_runs_of_live_workers_are_not_failed(
+    repository: PostgresResultRepository, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    await repository.seed_competitions({"test-league": league()})
+    await set_next_check(sessions, "test-league", datetime.now(UTC) - timedelta(hours=1))
+    await repository.heartbeat("live-worker", datetime.now(UTC))
+    [target] = await repository.claim_due_seasons(10, worker_id="live-worker")
+    async with sessions.begin() as session:
+        await session.execute(
+            update(ScrapeRunRow)
+            .where(ScrapeRunRow.id == target.run_id)
+            .values(started_at=datetime.now(UTC) - timedelta(hours=2))
+        )
+
+    assert await repository.fail_abandoned_scrape_runs(timedelta(minutes=5)) == []
+    job = await repository.get_scrape_job(target.run_id)
+    assert job is not None and job.status == "running"
+
+
+async def test_running_runs_without_a_worker_fail_after_the_timeout(
+    repository: PostgresResultRepository, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    await repository.seed_competitions({"test-league": league(), "test-cup": cup()})
+    await set_next_check(sessions, "test-league", datetime.now(UTC) - timedelta(hours=1))
+    await set_next_check(sessions, "test-cup", datetime.now(UTC) - timedelta(hours=2))
+    old, recent = await repository.claim_due_seasons(10)
+    async with sessions.begin() as session:
+        await session.execute(
+            update(ScrapeRunRow)
+            .where(ScrapeRunRow.id == old.run_id)
+            .values(started_at=datetime.now(UTC) - timedelta(hours=2))
+        )
+
+    abandoned = await repository.fail_abandoned_scrape_runs(timedelta(minutes=5))
+
+    assert [run.run_id for run in abandoned] == [old.run_id]
+    job = await repository.get_scrape_job(recent.run_id)
+    assert job is not None and job.status == "running"
+
+
+async def test_next_scheduled_refresh_is_none_without_automatic_refresh(
+    repository: PostgresResultRepository,
+) -> None:
+    assert await repository.next_scheduled_refresh() is None
 
 
 ROLLOVER_DAY = datetime(2027, 7, 5, 12, tzinfo=UTC)

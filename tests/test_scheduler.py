@@ -2,8 +2,8 @@ from datetime import UTC, datetime, timedelta
 
 from app.config import load_config
 from app.models import Competition, SeasonSource
-from app.repository import SeasonCheckResult
-from app.scheduler import check_seasons
+from app.repository import ScheduledRefresh, SeasonCheckResult
+from app.scheduler import check_seasons, describe_idle
 from app.scraper import ProviderCapabilities, ScraperRegistry
 
 CONFIG = load_config()
@@ -80,3 +80,20 @@ async def test_failed_discovery_retries_after_the_longest_failure_backoff() -> N
     [(_, discovered, next_check_at)] = repository.calls
     assert discovered == []
     assert before + timedelta(minutes=60) <= next_check_at < before + timedelta(minutes=61)
+
+
+NOW = datetime(2026, 11, 18, 20, 0, tzinfo=UTC)
+
+
+def test_idle_message_names_the_next_refresh_or_what_blocks_an_overdue_one() -> None:
+    upcoming = ScheduledRefresh("ekstraklasa", "2026-2027", NOW + timedelta(hours=1), None)
+    blocked = ScheduledRefresh("ekstraklasa", "2026-2027", NOW - timedelta(days=3), 7)
+
+    assert describe_idle(upcoming, NOW) == (
+        "idle; next refresh ekstraklasa 2026-2027 at 2026-11-18T21:00:00+00:00"
+    )
+    assert describe_idle(blocked, NOW) == (
+        "idle; ekstraklasa 2026-2027 was due at 2026-11-15T20:00:00+00:00 "
+        "and waits for scrape job 7"
+    )
+    assert "no current season" in describe_idle(None, NOW)

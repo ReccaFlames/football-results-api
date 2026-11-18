@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import (
     DateTime,
     Select,
+    and_,
     cast,
     exists,
     func,
@@ -148,6 +149,24 @@ class RefreshTarget:
 
 class ActiveScrapeJobConflict(ValueError):
     pass
+
+
+@dataclass(frozen=True, order=True)
+class AbandonedScrapeRun:
+    run_id: int
+    competition: str
+    season: str
+    worker_id: str | None
+
+
+@dataclass(frozen=True)
+class ScheduledRefresh:
+    """The current season the scheduler refreshes next, and the job that holds it, if any."""
+
+    competition: str
+    season: str
+    next_check_at: datetime
+    active_run_id: int | None
 
 
 @dataclass(frozen=True)
@@ -701,7 +720,9 @@ class PostgresResultRepository:
                 error_message=run.error_message,
             )
 
-    async def claim_queued_scrape_runs(self, limit: int) -> list[RefreshTarget]:
+    async def claim_queued_scrape_runs(
+        self, limit: int, worker_id: str | None = None
+    ) -> list[RefreshTarget]:
         now = _now()
         async with self.sessions.begin() as session:
             rows = (
@@ -726,6 +747,7 @@ class PostgresResultRepository:
             for run, season, competition_row in rows:
                 run.status = "running"
                 run.started_at = now
+                run.worker_id = worker_id
                 competition = self._competition(competition_row)
                 source = SeasonSource(
                     season=season.season,
@@ -960,7 +982,9 @@ class PostgresResultRepository:
                     )
                 )
 
-    async def claim_due_seasons(self, limit: int) -> list[RefreshTarget]:
+    async def claim_due_seasons(
+        self, limit: int, worker_id: str | None = None
+    ) -> list[RefreshTarget]:
         now = _now()
         async with self.sessions.begin() as session:
             rows = (
@@ -1012,6 +1036,7 @@ class PostgresResultRepository:
                     completed_at=None,
                     matches_found=None,
                     error_message=None,
+                    worker_id=worker_id,
                 )
                 session.add(run)
                 await session.flush()
@@ -1160,6 +1185,90 @@ class PostgresResultRepository:
                 )
             else:
                 row.heartbeat_at = now
+
+    async def fail_abandoned_scrape_runs(
+        self, stale_after: timedelta, now: datetime | None = None
+    ) -> list[AbandonedScrapeRun]:
+        """Fail running scrape jobs whose scheduler worker stopped heartbeating.
+
+        A worker that dies mid-scrape leaves its job ``running``; claims skip seasons with an
+        active job, so without this the season would never be refreshed again. Jobs without a
+        worker (created before workers were recorded) are abandoned once they are older than
+        ``stale_after``.
+        """
+        current_time = now or _now()
+        cutoff = current_time - stale_after
+        live_worker = (
+            select(SchedulerHeartbeatRow.worker_id)
+            .where(
+                SchedulerHeartbeatRow.worker_id == ScrapeRunRow.worker_id,
+                SchedulerHeartbeatRow.heartbeat_at >= cutoff,
+            )
+            .exists()
+        )
+        async with self.sessions.begin() as session:
+            rows = (
+                await session.execute(
+                    select(ScrapeRunRow, CompetitionSeasonRow.season, CompetitionRow.slug)
+                    .join(
+                        CompetitionSeasonRow,
+                        ScrapeRunRow.competition_season_id == CompetitionSeasonRow.id,
+                    )
+                    .join(CompetitionRow, CompetitionSeasonRow.competition_id == CompetitionRow.id)
+                    .where(
+                        ScrapeRunRow.status == "running",
+                        or_(
+                            and_(ScrapeRunRow.worker_id.is_not(None), ~live_worker),
+                            and_(
+                                ScrapeRunRow.worker_id.is_(None),
+                                ScrapeRunRow.started_at < cutoff,
+                            ),
+                        ),
+                    )
+                    .order_by(ScrapeRunRow.id)
+                    .with_for_update(skip_locked=True, of=ScrapeRunRow)
+                )
+            ).all()
+            abandoned = []
+            for run, season, slug in rows:
+                worker = f"scheduler worker {run.worker_id}" if run.worker_id else "scheduler"
+                run.status = "failed"
+                run.completed_at = current_time
+                run.error_message = f"Abandoned: the {worker} stopped before the scrape finished"
+                abandoned.append(AbandonedScrapeRun(run.id, slug, season, run.worker_id))
+            return abandoned
+
+    async def next_scheduled_refresh(self) -> ScheduledRefresh | None:
+        """Return the enabled current season that is due first, with its active job, if any."""
+        active_run = (
+            select(func.min(ScrapeRunRow.id))
+            .where(
+                ScrapeRunRow.competition_season_id == CompetitionSeasonRow.id,
+                ScrapeRunRow.status.in_(("queued", "running")),
+            )
+            .scalar_subquery()
+        )
+        async with self.sessions() as session:
+            row = (
+                await session.execute(
+                    select(
+                        CompetitionRow.slug,
+                        CompetitionSeasonRow.season,
+                        CompetitionSeasonRow.next_check_at,
+                        active_run,
+                    )
+                    .join(CompetitionRow, CompetitionSeasonRow.competition_id == CompetitionRow.id)
+                    .where(
+                        CompetitionRow.is_enabled.is_(True),
+                        CompetitionSeasonRow.is_current,
+                        CompetitionSeasonRow.automatic_refresh_enabled,
+                        CompetitionSeasonRow.next_check_at.is_not(None),
+                    )
+                    .order_by(CompetitionSeasonRow.next_check_at, CompetitionRow.slug)
+                    .limit(1)
+                )
+            ).first()
+            return None if row is None else ScheduledRefresh(*row)
 
     async def latest_scheduler_heartbeat(self) -> datetime | None:
         async with self.sessions() as session:

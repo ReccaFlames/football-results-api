@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     )
     scheduler_loop_seconds: float = 30.0
     scheduler_claim_limit: int = 5
+    # Running scrape jobs of a worker without a heartbeat for this long are failed as abandoned.
+    scheduler_worker_timeout_seconds: float = Field(default=300.0, gt=0)
     api_keys: str = ""
     football_data_api_token: str | None = None
     football_data_min_request_interval_seconds: float | None = Field(default=None, ge=0)

@@ -2,12 +2,13 @@ import asyncio
 import logging
 import os
 import socket
-from datetime import UTC, datetime
+import uuid
+from datetime import UTC, datetime, timedelta
 
 from app.config import CompetitionFile, ConfigFileWatcher, settings
 from app.database import session_factory
 from app.models import Competition, SeasonSource
-from app.repository import PostgresResultRepository
+from app.repository import PostgresResultRepository, ScheduledRefresh
 from app.scheduling import SchedulePolicy
 from app.scraper import ScraperRegistry, create_scraper_registry
 
@@ -80,6 +81,50 @@ async def check_seasons(
         )
 
 
+def worker_name() -> str:
+    # Containers restarted in place keep their hostname and PID 1, so add a per-process suffix:
+    # a restarted worker must not look alive to recovery of the jobs its predecessor abandoned.
+    return f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+
+
+async def keep_heartbeat(
+    repository: PostgresResultRepository, worker_id: str, started_at: datetime, interval: float
+) -> None:
+    """Heartbeat independently of the cycle, so long scrapes do not look like a dead worker."""
+    while True:
+        try:
+            await repository.heartbeat(worker_id, started_at)
+        except Exception:
+            logger.exception("scheduler heartbeat failed; will retry")
+        await asyncio.sleep(interval)
+
+
+async def recover_abandoned_runs(repository: PostgresResultRepository) -> None:
+    stale_after = timedelta(seconds=settings.scheduler_worker_timeout_seconds)
+    for run in await repository.fail_abandoned_scrape_runs(stale_after):
+        logger.warning(
+            "failed abandoned scrape job %d for %s %s (worker %s stopped heartbeating)",
+            run.run_id,
+            run.competition,
+            run.season,
+            run.worker_id or "unknown",
+        )
+
+
+def describe_idle(next_refresh: ScheduledRefresh | None, now: datetime) -> str:
+    if next_refresh is None:
+        return "idle; no current season has automatic refresh enabled"
+    name = f"{next_refresh.competition} {next_refresh.season}"
+    due = next_refresh.next_check_at.isoformat(timespec="seconds")
+    if next_refresh.next_check_at > now:
+        return f"idle; next refresh {name} at {due}"
+    if next_refresh.active_run_id is not None:
+        return (
+            f"idle; {name} was due at {due} and waits for scrape job {next_refresh.active_run_id}"
+        )
+    return f"idle; {name} was due at {due} and is claimed by another worker"
+
+
 async def run() -> None:
     repository = PostgresResultRepository(session_factory)
     config_watcher = ConfigFileWatcher(settings.config_file)
@@ -88,8 +133,23 @@ async def run() -> None:
     config_watcher.mark_applied()
     scraper = _create_scraper(config)
     schedules: dict[str, SchedulePolicy] = config.schedules()
-    worker_id = f"{socket.gethostname()}:{os.getpid()}"
+    worker_id = worker_name()
     started_at = datetime.now(UTC)
+    heartbeat_interval = min(
+        settings.scheduler_loop_seconds, settings.scheduler_worker_timeout_seconds / 3
+    )
+    await repository.heartbeat(worker_id, started_at)
+    heartbeat = asyncio.create_task(
+        keep_heartbeat(repository, worker_id, started_at, heartbeat_interval)
+    )
+    logger.info(
+        "scheduler worker %s started (cycle every %ss, claim limit %d, abandoned jobs after %ss)",
+        worker_id,
+        settings.scheduler_loop_seconds,
+        settings.scheduler_claim_limit,
+        settings.scheduler_worker_timeout_seconds,
+    )
+    last_idle_message = None
     while True:
         try:
             config, changed = config_watcher.load_if_changed()
@@ -100,15 +160,25 @@ async def run() -> None:
                 config_watcher.mark_applied()
                 scraper = _create_scraper(config)
                 schedules = config.schedules()
-            await repository.heartbeat(worker_id, started_at)
+            await recover_abandoned_runs(repository)
             for competition in await repository.claim_season_checks(settings.scheduler_claim_limit):
                 try:
                     await check_seasons(repository, scraper, config, competition)
                 except Exception:
                     logger.exception("season check failed for %s", competition.slug)
-            targets = await repository.claim_queued_scrape_runs(settings.scheduler_claim_limit)
-            targets.extend(await repository.claim_due_seasons(settings.scheduler_claim_limit))
+            targets = await repository.claim_queued_scrape_runs(
+                settings.scheduler_claim_limit, worker_id
+            )
+            targets.extend(
+                await repository.claim_due_seasons(settings.scheduler_claim_limit, worker_id)
+            )
             for target in targets:
+                logger.info(
+                    "refreshing %s %s (job %s)",
+                    target.competition.slug,
+                    target.source.season,
+                    target.run_id,
+                )
                 policy = schedules.get(target.competition.slug, SchedulePolicy())
                 try:
                     matches = await scraper.scrape(target.competition, target.source)
@@ -129,15 +199,36 @@ async def run() -> None:
                     logger.exception(
                         "refresh failed for %s %s", target.competition.slug, target.source.season
                     )
-                    await repository.record_scrape_failure(
-                        target.competition,
-                        target.source,
-                        error,
-                        run_id=target.run_id,
-                        policy=policy,
-                    )
+                    # Keep going: one unrecorded failure must not strand the other claimed jobs.
+                    try:
+                        await repository.record_scrape_failure(
+                            target.competition,
+                            target.source,
+                            error,
+                            run_id=target.run_id,
+                            policy=policy,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "could not record the failed refresh of %s %s",
+                            target.competition.slug,
+                            target.source.season,
+                        )
+            if targets:
+                last_idle_message = None
+            else:
+                message = describe_idle(
+                    await repository.next_scheduled_refresh(), datetime.now(UTC)
+                )
+                if message != last_idle_message:
+                    logger.info(message)
+                    last_idle_message = message
         except Exception:
             logger.exception("scheduler cycle failed; will retry")
+        if heartbeat.done():
+            heartbeat = asyncio.create_task(
+                keep_heartbeat(repository, worker_id, started_at, heartbeat_interval)
+            )
         await asyncio.sleep(settings.scheduler_loop_seconds)
 
 
