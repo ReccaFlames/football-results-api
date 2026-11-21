@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     football_data_min_request_interval_seconds: float | None = Field(default=None, ge=0)
     ninety_minut_min_request_interval_seconds: float | None = Field(default=None, ge=0)
     ninety_minut_detail_cache_max_entries: int = Field(default=512, ge=0)
+    espn_min_request_interval_seconds: float | None = Field(default=None, ge=0)
     rate_limit_enabled: bool = True
     rate_limit_read_per_minute: int = Field(default=120, ge=1)
     rate_limit_write_per_minute: int = Field(default=10, ge=1)
@@ -231,6 +232,18 @@ class CompetitionConfig(BaseModel):
     current_season: str | None = None
     seasons: dict[str, SeasonConfig] = Field(default_factory=dict)
     schedule: ScheduleOverride | None = None
+    # Provider team name -> canonical team name, applied before matches are stored.
+    team_aliases: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("team_aliases")
+    @classmethod
+    def non_empty_team_aliases(cls, value: dict[str, str]) -> dict[str, str]:
+        for alias, name in value.items():
+            if not alias.strip() or not name.strip():
+                raise ValueError("team_aliases names must not be empty")
+            if alias == name:
+                raise ValueError(f"team alias {alias!r} maps to itself")
+        return value
 
     @field_validator("current_season", mode="before")
     @classmethod
@@ -347,6 +360,14 @@ class CompetitionFile(BaseModel):
         return {
             competition.slug: self.schedule_for(competition.slug)
             for competition in self.competitions
+        }
+
+    def team_aliases(self) -> dict[str, dict[str, str]]:
+        """Configured team aliases per competition slug."""
+        return {
+            competition.slug: competition.team_aliases
+            for competition in self.competitions
+            if competition.team_aliases
         }
 
     def auto_rollover_slugs(self) -> frozenset[str]:

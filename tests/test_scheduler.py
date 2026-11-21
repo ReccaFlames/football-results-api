@@ -10,8 +10,8 @@ CONFIG = load_config()
 COMPETITIONS = CONFIG.to_competitions()
 NEXT_SEASON = SeasonSource(
     season="2027-2028",
-    source_url="https://api.football-data.org/v4/competitions/PL/matches?season=2027",
-    provider="football-data",
+    source_url="https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard?season=2027",
+    provider="espn",
 )
 
 
@@ -48,7 +48,7 @@ def registry(*providers: FakeProvider) -> ScraperRegistry:
 
 
 async def test_season_check_passes_discovered_seasons_to_the_repository() -> None:
-    provider = FakeProvider("football-data", discovery=True)
+    provider = FakeProvider("espn", discovery=True)
     repository = FakeRepository()
     before = datetime.now(UTC)
 
@@ -71,7 +71,7 @@ async def test_season_check_without_discovery_still_evaluates_rollover() -> None
 
 
 async def test_failed_discovery_retries_after_the_longest_failure_backoff() -> None:
-    provider = FakeProvider("football-data", discovery=True, error=RuntimeError("HTTP 429"))
+    provider = FakeProvider("espn", discovery=True, error=RuntimeError("HTTP 429"))
     repository = FakeRepository()
     before = datetime.now(UTC)
 

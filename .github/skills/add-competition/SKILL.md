@@ -15,9 +15,13 @@ removed from the file are disabled, not deleted.
 | --- | --- |
 | `90minut` | `http://www.90minut.pl/liga/1/liga<ID>.html` (ID is per season) |
 | `football-data` | `https://api.football-data.org/v4/competitions/<CODE>/matches?season=<start year>` |
+| `espn` | `https://site.api.espn.com/apis/site/v2/sports/soccer/<league>/scoreboard?season=<start year>` |
 
-football-data.org accepts any competition code (`PL`, `BL1`, `SA`, `PD`, `CL`, `BSA`, ...); all
-seasons of one competition must use the same code. If the source is neither provider, use the
+football-data.org accepts any competition code (`PL`, `BL1`, `SA`, `PD`, `CL`, `BSA`, ...) and ESPN
+any league (`eng.1`, `ger.1`, ...); all seasons of one competition must use the same code or
+league. ESPN has corners, fouls, cards, and goal events without a token but no rounds;
+football-data.org's free plan has rounds but no cards or goal events. When a provider's team names
+differ from names already stored, add `team_aliases` (provider name → stored name). If the source is neither provider, use the
 `add-data-provider` skill. The provider contract is in `docs/PROVIDERS.md`.
 
 ## 2. Edit `config/competitions.yaml`
@@ -44,8 +48,8 @@ Rules:
   (which omit the year) fall in.
 - `current_season` must exist in `seasons`; only the current season is auto-refreshed.
 - A competition uses a single provider; historical fetches reject other providers and other
-  football-data.org codes.
-- Rollover is automatic by default (`schedule.season_rollover: auto`): football-data.org seasons
+  football-data.org codes or ESPN leagues.
+- Rollover is automatic by default (`schedule.season_rollover: auto`): football-data.org and ESPN seasons
   are discovered, and the scheduler switches to a known newer season once it has started and the
   current season has no pending fixtures. For 90minut, add the next season's entry in advance and
   leave `current_season` alone. `current_season` is then a minimum: raising it rolls over

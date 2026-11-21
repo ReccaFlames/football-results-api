@@ -339,6 +339,46 @@ async def test_match_ids_survive_provider_id_upserts(
     assert second[0].id == first[0].id
 
 
+async def test_match_ids_and_rounds_survive_a_switch_to_a_provider_without_rounds(
+    repository: PostgresResultRepository,
+) -> None:
+    competition = league()
+    season = competition.seasons["2026-2027"]
+    await repository.seed_competitions({"test-league": competition})
+    kickoff = datetime.now(UTC) - timedelta(days=10)
+    old = [
+        match("Legia", "Lech", kickoff, (2, 1), round_number=1),
+        match("Lech", "Legia", kickoff + timedelta(days=7), (0, 0), round_number=2),
+    ]
+    for index, item in enumerate(old):
+        item.provider_match_id = f"old-{index}"
+    await repository.replace_competition(competition, season, old)
+    before, _ = await repository.get_results(competition="test-league")
+
+    switched = [
+        item.model_copy(
+            update={"provider_match_id": f"new-{index}", "round": None, "stage": "Test League"}
+        )
+        for index, item in enumerate(old)
+    ]
+    added = match("Legia", "Wisła", kickoff + timedelta(days=8), (1, 1)).model_copy(
+        update={"provider_match_id": "new-2", "round": None, "stage": "Test League"}
+    )
+    await repository.replace_competition(competition, season, [*switched, added])
+    after, _ = await repository.get_results(competition="test-league")
+
+    kept = {(item.home_team, item.away_team): item for item in after}
+    assert {item.id for item in before} < {item.id for item in after}
+    for item in before:
+        assert kept[(item.home_team, item.away_team)].id == item.id
+        assert kept[(item.home_team, item.away_team)].round == item.round
+        assert kept[(item.home_team, item.away_team)].stage == item.stage
+    assert (kept[("Legia", "Wisła")].round, kept[("Legia", "Wisła")].stage) == (
+        None,
+        "Test League",
+    )
+
+
 async def test_fallback_match_identity_aliases_and_escaped_search(
     repository: PostgresResultRepository,
     sessions: async_sessionmaker[AsyncSession],

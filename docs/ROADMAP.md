@@ -220,6 +220,26 @@ How to use this list:
   - [x] Alerts when data goes stale (Prometheus + Grafana OSS profile, Telegram contact point)
   - [x] Structured JSON logs
 - [ ] **17. More providers and fallback sources** (use the `add-data-provider` skill)
+  - [x] 17a. ESPN provider as the Premier League primary source
+        ([ADR 0001](adr/0001-espn-primary-source-for-premier-league.md))
+    - [x] `espn` provider: full season via calendar-year scoreboard requests filtered by season;
+          goals, half-time split, cards, fouls, corners, first goal; season discovery
+    - [x] Status mapping: full time → `finished`; postponed, cancelled, abandoned, suspended →
+          `inactive`; live → `scheduled`
+    - [x] Cards are `0` without card events only when the goal events add up to the score
+    - [x] Source URL allow-list
+          `https://site.api.espn.com/apis/site/v2/sports/soccer/<league>/scoreboard?season=<start year>`
+    - [x] Throttle with `FOOTBALL_RESULTS_ESPN_MIN_REQUEST_INTERVAL_SECONDS` (default 2s)
+    - [x] Per-competition `team_aliases` in `competitions.yaml`, applied before persisting
+    - [x] Match IDs survive a provider switch (fallback key: season + home + away when unique);
+          a refresh without a round keeps the stored round and stage
+    - [x] Premier League switched to `espn` for 2024–25, 2025–26, and 2026–27; documented one-off
+          historical re-fetch of the past seasons
+    - [x] football-data: count `YELLOW_RED` as two cards; `PROVIDERS.md` notes goals and bookings
+          need a paid plan
+    - [x] Docs (README with ESPN terms caveat, `PROVIDERS.md`); version 0.17.0
+  - [ ] 17b. Fallback sources (football-data.org as the Premier League fallback source)
+  - [ ] 17c. More primary providers
 - [ ] **18. Optional hosted access**
   - [ ] OAuth for remote MCP
   - [ ] Per-key quotas

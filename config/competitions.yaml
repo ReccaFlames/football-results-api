@@ -22,6 +22,8 @@ providers:
     min_request_interval_seconds: 2
   football-data:
     min_request_interval_seconds: 6
+  espn:
+    min_request_interval_seconds: 2
 
 competitions:
   - slug: ekstraklasa
@@ -59,16 +61,44 @@ competitions:
       "2026-2027":
         source_url: http://www.90minut.pl/liga/1/liga14681.html
 
+  # ESPN's undocumented scoreboard API (personal, non-commercial use); see
+  # docs/adr/0001-espn-primary-source-for-premier-league.md.
   - slug: premier-league
     name: Premier League
     country: England
     format: league
-    provider: football-data
+    provider: espn
     current_season: 2026-2027
     seasons:
       "2024-2025":
-        source_url: https://api.football-data.org/v4/competitions/PL/matches?season=2024
+        source_url: https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard?season=2024
       "2025-2026":
-        source_url: https://api.football-data.org/v4/competitions/PL/matches?season=2025
+        source_url: https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard?season=2025
       "2026-2027":
-        source_url: https://api.football-data.org/v4/competitions/PL/matches?season=2026
+        source_url: https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard?season=2026
+    # ESPN team name -> the existing team name, so team names, slugs, and match IDs stay stable.
+    team_aliases:
+      Arsenal: Arsenal FC
+      Aston Villa: Aston Villa FC
+      Brentford: Brentford FC
+      Brighton & Hove Albion: Brighton & Hove Albion FC
+      Burnley: Burnley FC
+      Chelsea: Chelsea FC
+      Coventry City: Coventry City FC
+      Crystal Palace: Crystal Palace FC
+      Everton: Everton FC
+      Fulham: Fulham FC
+      Hull City: Hull City AFC
+      Ipswich Town: Ipswich Town FC
+      Leeds United: Leeds United FC
+      Leicester City: Leicester City FC
+      Liverpool: Liverpool FC
+      Manchester City: Manchester City FC
+      Manchester United: Manchester United FC
+      Newcastle United: Newcastle United FC
+      Nottingham Forest: Nottingham Forest FC
+      Southampton: Southampton FC
+      Sunderland: Sunderland AFC
+      Tottenham Hotspur: Tottenham Hotspur FC
+      West Ham United: West Ham United FC
+      Wolverhampton Wanderers: Wolverhampton Wanderers FC

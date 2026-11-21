@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 def _create_scraper(config: CompetitionFile) -> ScraperRegistry:
     ninety_minut = config.providers.get("90minut")
     football_data = config.providers.get("football-data")
+    espn = config.providers.get("espn")
     return create_scraper_registry(
         settings.request_timeout_seconds,
         settings.user_agent,
@@ -30,6 +31,10 @@ def _create_scraper(config: CompetitionFile) -> ScraperRegistry:
         if settings.ninety_minut_min_request_interval_seconds is not None
         else (2.0 if ninety_minut is None else ninety_minut.min_request_interval_seconds),
         settings.ninety_minut_detail_cache_max_entries,
+        settings.espn_min_request_interval_seconds
+        if settings.espn_min_request_interval_seconds is not None
+        else (2.0 if espn is None else espn.min_request_interval_seconds),
+        config.team_aliases(),
     )
 
 

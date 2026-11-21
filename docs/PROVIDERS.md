@@ -20,7 +20,7 @@ class CompetitionScraper(Protocol):
 
 ### `name`
 
-A short, stable, lowercase identifier (`90minut`, `football-data`). It is persisted in
+A short, stable, lowercase identifier (`90minut`, `football-data`, `espn`). It is persisted in
 `competition_season.provider`, so renaming it requires a data migration.
 
 ### `capabilities`
@@ -40,8 +40,22 @@ Current providers:
 | --- | --- | --- | --- |
 | `90minut` | goals, half-time split, cards, first scorer and minute | no | no |
 | `football-data` | goals, half-time split, cards, first scorer and minute | yes | yes |
+| `espn` | goals, half-time split, cards, first scorer and minute, corners, fouls | yes | no |
 
-Corners and fouls are declared by neither provider and therefore always `null`.
+football-data.org declares cards and first scorer, but its free plan omits goal and booking events,
+so those fields stay `null` without a paid plan. Corners and fouls come only from `espn`.
+
+`espn` reads `site.api.espn.com/apis/site/v2/sports/soccer/<league>/scoreboard` with one request
+per calendar year (`?dates=YYYY&limit=1000`) and keeps events whose `season.year` is the season's
+start year; a full page is treated as truncated and fails the scrape. ESPN has no matchweek, so
+`round` is `None` and `stage` is the competition name. Requests are throttled by
+`providers.espn.min_request_interval_seconds` (default 2 s). ESPN answers `403` to User-Agents
+containing an email address, so the adapter sends the contact address in the `From` header instead.
+
+Statistic rules shared by providers: a card count is yellow plus red cards, so a second yellow
+counts as 2; an own goal belongs to the team whose score it raised; a goalless match has no first
+goal. Provider team names can differ from stored names; map them with per-competition
+`team_aliases` in `config/competitions.yaml`, which the registry applies to every scraped match.
 
 ### `scrape(competition, source)`
 
@@ -103,8 +117,9 @@ endpoint against SSRF, so never accept arbitrary hosts or paths. Accepted today:
 | --- | --- |
 | `90minut` | `http(s)://(www.)90minut.pl/liga/1/liga<ID>.html` |
 | `football-data` | `https://api.football-data.org/v4/competitions/<CODE>/matches?season=<start year>` (`<CODE>` is 2–10 uppercase letters or digits, e.g. `PL`, `BL1`, `CL`, `BSA`) |
+| `espn` | `https://site.api.espn.com/apis/site/v2/sports/soccer/<league>/scoreboard?season=<start year>` (`<league>` such as `eng.1`, `ger.1`, `uefa.champions`) |
 
-All football-data.org sources of one competition must use the same `<CODE>`; the configuration
+All football-data.org sources (or ESPN sources) of one competition must use the same `<CODE>` (or `<league>`); the configuration
 check and the historical fetch endpoint reject mixed codes.
 
 ## Adding a provider

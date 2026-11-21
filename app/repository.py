@@ -1,5 +1,6 @@
 import hashlib
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -805,21 +806,38 @@ class PostgresResultRepository:
                 for match in previous
                 if match.provider_match_id is not None
             }
+            # Last resort after a provider switch (new match IDs, maybe no round): a league
+            # pairing that occurs once in the season on both sides is the same match.
+            previous_pairs = Counter((match.home_team_id, match.away_team_id) for match in previous)
+            by_pair = {
+                (match.home_team_id, match.away_team_id): match
+                for match in previous
+                if previous_pairs[(match.home_team_id, match.away_team_id)] == 1
+            }
+            fresh_pairs = Counter((match.home_team, match.away_team) for match in fresh)
             retained_ids: set[int] = set()
             team_ids: dict[str, int] = {}
             additions: list[MatchRow] = []
             for match in fresh:
                 home_team_id = await self._ensure_team(session, match.home_team, team_ids, now)
                 away_team_id = await self._ensure_team(session, match.away_team, team_ids, now)
-                source_key = _source_key(match, home_team_id, away_team_id)
                 existing = (
                     by_provider_id.get(match.provider_match_id)
                     if match.provider_match_id is not None
                     else None
                 )
-                existing = existing or by_key.get(source_key)
+                existing = existing or by_key.get(_source_key(match, home_team_id, away_team_id))
+                if existing is None and fresh_pairs[(match.home_team, match.away_team)] == 1:
+                    candidate = by_pair.get((home_team_id, away_team_id))
+                    if candidate is not None and candidate.id not in retained_ids:
+                        existing = candidate
+                if match.round is None and existing is not None and existing.round is not None:
+                    # Providers without rounds (ESPN) keep the round a previous source stored.
+                    match = match.model_copy(
+                        update={"round": existing.round, "stage": existing.stage}
+                    )
                 values = {
-                    "source_key": source_key,
+                    "source_key": _source_key(match, home_team_id, away_team_id),
                     "provider_match_id": match.provider_match_id
                     or (None if existing is None else existing.provider_match_id),
                     "home_team_id": home_team_id,

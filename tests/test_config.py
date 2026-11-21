@@ -177,6 +177,27 @@ def test_config_rejects_inconsistent_season_settings(
         load_config(write_config(tmp_path, calendar_competition(**overrides)))
 
 
+def test_team_aliases_are_returned_per_competition(tmp_path: Path) -> None:
+    path = write_config(tmp_path, calendar_competition(team_aliases={"Flamengo": "CR Flamengo"}))
+
+    assert load_config(path).team_aliases()["brasileirao"] == {"Flamengo": "CR Flamengo"}
+
+
+@pytest.mark.parametrize(
+    ("aliases", "message"),
+    [
+        ({"": "CR Flamengo"}, "empty"),
+        ({"Flamengo": " "}, "empty"),
+        ({"Flamengo": "Flamengo"}, "maps to itself"),
+    ],
+)
+def test_config_rejects_invalid_team_aliases(
+    tmp_path: Path, aliases: dict[str, str], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        load_config(write_config(tmp_path, calendar_competition(team_aliases=aliases)))
+
+
 def test_shipped_schedule_defaults_match_the_built_in_policy() -> None:
     config = load_config(DEFAULT_CONFIG)
 

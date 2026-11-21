@@ -5,20 +5,25 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Protocol
+from typing import Literal, Protocol
 from zoneinfo import ZoneInfo
 
 import httpx
 from bs4 import BeautifulSoup
 
-from app.competitions import football_data_source_url, provider_competition_code
+from app.competitions import (
+    ESPN_HOST,
+    espn_source_url,
+    football_data_source_url,
+    provider_competition_code,
+)
 from app.models import (
     Competition,
     MatchResult,
     ScrapedMatch,
     SeasonSource,
 )
-from app.seasons import season_year_for_month
+from app.seasons import season_year_for_month, season_years
 
 logger = logging.getLogger(__name__)
 
@@ -491,8 +496,8 @@ def parse_football_data_matches(
         home_second_half = raw_home_score - home_first_half if finished and has_half_time else None
         away_second_half = raw_away_score - away_first_half if finished and has_half_time else None
         bookings = raw_match.get("bookings")
-        home_cards = _team_event_count(bookings, home) if finished else None
-        away_cards = _team_event_count(bookings, away) if finished else None
+        home_cards = _team_card_count(bookings, home) if finished else None
+        away_cards = _team_card_count(bookings, away) if finished else None
         first_team_to_score, first_goal_minute = (
             _first_goal(raw_match.get("goals")) if finished else (None, None)
         )
@@ -582,20 +587,21 @@ def parse_football_data_seasons(
     return [sources[season] for season in sorted(sources, reverse=True)]
 
 
-def _team_event_count(events: object, team: dict[object, object]) -> int | None:
-    if not isinstance(events, list):
+def _team_card_count(bookings: object, team: dict[object, object]) -> int | None:
+    """Count a team's cards; a second yellow (``YELLOW_RED``) is one yellow and one red card."""
+    if not isinstance(bookings, list):
         return None
     team_id = team.get("id")
     team_name = team.get("name")
     count = 0
-    for event in events:
-        event_team = event.get("team") if isinstance(event, dict) else None
-        if not isinstance(event_team, dict):
+    for booking in bookings:
+        booking_team = booking.get("team") if isinstance(booking, dict) else None
+        if not isinstance(booking_team, dict):
             continue
-        id_matches = team_id is not None and event_team.get("id") == team_id
-        name_matches = team_name is not None and event_team.get("name") == team_name
+        id_matches = team_id is not None and booking_team.get("id") == team_id
+        name_matches = team_name is not None and booking_team.get("name") == team_name
         if id_matches or name_matches:
-            count += 1
+            count += 2 if booking.get("card") == "YELLOW_RED" else 1
     return count
 
 
@@ -694,9 +700,310 @@ class FootballDataScraper:
         return parse_football_data_seasons(payload, competition, code)
 
 
+ESPN_SCOREBOARD_LIMIT = 1000
+ESPN_MINUTE_RE = re.compile(r"^(\d{1,3})'?(?:\s*\+\s*(\d{1,2})'?)?$")
+ESPN_INACTIVE_STATUSES = frozenset(
+    {
+        "STATUS_POSTPONED",
+        "STATUS_CANCELED",
+        "STATUS_CANCELLED",
+        "STATUS_ABANDONED",
+        "STATUS_SUSPENDED",
+    }
+)
+EspnSide = Literal["home", "away"]
+
+
+def parse_espn_matches(
+    payloads: list[dict[str, object]],
+    competition: Competition,
+    source: SeasonSource,
+) -> list[ScrapedMatch]:
+    """Map ESPN scoreboard responses (one per calendar year) to one season's fixtures.
+
+    ESPN has no matchweek, so ``round`` is ``None`` and ``stage`` is the competition name.
+    """
+    start_year, _ = season_years(source.season)
+    matches: dict[str, ScrapedMatch] = {}
+    for payload in payloads:
+        events = payload.get("events")
+        if not isinstance(events, list):
+            raise TypeError("ESPN scoreboard response does not contain an events list")
+        for event in events:
+            match = _parse_espn_event(event, competition, source, start_year)
+            if match is not None and match.provider_match_id is not None:
+                matches[match.provider_match_id] = match
+    return sorted(matches.values(), key=lambda item: item.played_at)
+
+
+def _parse_espn_event(
+    event: object, competition: Competition, source: SeasonSource, start_year: int
+) -> ScrapedMatch | None:
+    if not isinstance(event, dict):
+        return None
+    event_season = event.get("season")
+    if not isinstance(event_season, dict) or event_season.get("year") != start_year:
+        return None
+    event_id = event.get("id")
+    raw_date = event.get("date")
+    status = event.get("status")
+    status_type = status.get("type") if isinstance(status, dict) else None
+    competitions = event.get("competitions")
+    fixture = competitions[0] if isinstance(competitions, list) and competitions else None
+    if (
+        not isinstance(event_id, str)
+        or not event_id.isdigit()
+        or not isinstance(raw_date, str)
+        or not isinstance(status_type, dict)
+        or not isinstance(fixture, dict)
+    ):
+        return None
+    try:
+        played_at = datetime.fromisoformat(raw_date)
+    except ValueError:
+        return None
+    competitors = _espn_competitors(fixture)
+    if played_at.tzinfo is None or competitors is None:
+        return None
+    home, away = competitors
+    home_score = _espn_int(home.get("score"))
+    away_score = _espn_int(away.get("score"))
+    inactive = status_type.get("name") in ESPN_INACTIVE_STATUSES
+    finished = (
+        not inactive
+        and status_type.get("completed") is True
+        and home_score is not None
+        and away_score is not None
+    )
+    statistics = (
+        _espn_statistics(fixture, home, away, home_score, away_score)
+        if finished and home_score is not None and away_score is not None
+        else {}
+    )
+    return ScrapedMatch(
+        competition=competition.slug,
+        season=source.season,
+        stage=competition.name,
+        round=None,
+        home_team=home["team"]["displayName"],
+        away_team=away["team"]["displayName"],
+        status="finished" if finished else "inactive" if inactive else "scheduled",
+        home_score=home_score if finished else None,
+        away_score=away_score if finished else None,
+        played_at=played_at,
+        source_url=f"https://www.espn.com/soccer/match/_/gameId/{event_id}",
+        provider_match_id=event_id,
+        **statistics,
+    )
+
+
+def _espn_competitors(
+    fixture: dict[object, object],
+) -> tuple[dict[object, object], dict[object, object]] | None:
+    competitors = fixture.get("competitors")
+    if not isinstance(competitors, list):
+        return None
+    sides = {
+        item.get("homeAway"): item
+        for item in competitors
+        if isinstance(item, dict)
+        and isinstance(item.get("team"), dict)
+        and isinstance(item["team"].get("displayName"), str)
+    }
+    home, away = sides.get("home"), sides.get("away")
+    return None if home is None or away is None else (home, away)
+
+
+def _espn_int(value: object) -> int | None:
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _espn_minute(detail: dict[object, object]) -> tuple[int, int] | None:
+    clock = detail.get("clock")
+    display = clock.get("displayValue") if isinstance(clock, dict) else None
+    match = ESPN_MINUTE_RE.fullmatch(display.strip()) if isinstance(display, str) else None
+    return None if match is None else (int(match.group(1)), int(match.group(2) or 0))
+
+
+def _espn_team_statistic(competitor: dict[object, object], name: str) -> int | None:
+    statistics = competitor.get("statistics")
+    for statistic in statistics if isinstance(statistics, list) else []:
+        if isinstance(statistic, dict) and statistic.get("name") == name:
+            return _espn_int(statistic.get("displayValue"))
+    return None
+
+
+def _espn_statistics(
+    fixture: dict[object, object],
+    home: dict[object, object],
+    away: dict[object, object],
+    home_score: int,
+    away_score: int,
+) -> dict[str, object]:
+    sides: dict[object, EspnSide] = {home["team"].get("id"): "home", away["team"].get("id"): "away"}
+    details = fixture.get("details")
+    goals: list[tuple[EspnSide | None, tuple[int, int] | None]] = []
+    cards: dict[EspnSide, int] = {"home": 0, "away": 0}
+    has_card_events = False
+    for detail in details if isinstance(details, list) else []:
+        if not isinstance(detail, dict):
+            continue
+        team = detail.get("team")
+        side = sides.get(team.get("id")) if isinstance(team, dict) else None
+        if detail.get("scoringPlay") is True and detail.get("shootout") is not True:
+            # ESPN credits an own goal to the team whose score it raised.
+            goals.append((side, _espn_minute(detail)))
+        elif detail.get("yellowCard") is True or detail.get("redCard") is True:
+            # A second yellow arrives as a yellow card event plus a red card event.
+            has_card_events = True
+            if side is not None:
+                cards[side] += 1
+    scorers = [side for side, _ in goals]
+    goals_add_up = (
+        len(goals) == home_score + away_score
+        and scorers.count("home") == home_score
+        and scorers.count("away") == away_score
+    )
+    timed = [(minute, side) for side, minute in goals if minute is not None and side is not None]
+    goals_timed = goals_add_up and len(timed) == len(goals)
+    first_half = {
+        side: sum(1 for minute, scorer in timed if scorer == side and minute[0] <= 45)
+        for side in ("home", "away")
+    }
+    first_goal = min(timed) if goals_timed and timed else None
+    first_team = None if first_goal is None else (home if first_goal[1] == "home" else away)
+    # Without card events, zero cards is only credible when the events cover every goal.
+    cards_known = has_card_events or goals_add_up
+    return {
+        "home_goals": home_score,
+        "away_goals": away_score,
+        "home_goals_first_half": first_half["home"] if goals_timed else None,
+        "away_goals_first_half": first_half["away"] if goals_timed else None,
+        "home_goals_second_half": home_score - first_half["home"] if goals_timed else None,
+        "away_goals_second_half": away_score - first_half["away"] if goals_timed else None,
+        "home_cards": cards["home"] if cards_known else None,
+        "away_cards": cards["away"] if cards_known else None,
+        "home_fouls": _espn_team_statistic(home, "foulsCommitted"),
+        "away_fouls": _espn_team_statistic(away, "foulsCommitted"),
+        "home_corners": _espn_team_statistic(home, "wonCorners"),
+        "away_corners": _espn_team_statistic(away, "wonCorners"),
+        "first_team_to_score": None if first_team is None else first_team["team"]["displayName"],
+        "first_goal_minute": None if first_goal is None else _espn_minute_label(first_goal[0]),
+    }
+
+
+def _espn_minute_label(minute: tuple[int, int]) -> str:
+    base, added = minute
+    return f"{base}+{added}" if added else str(base)
+
+
+def parse_espn_current_season(payload: dict[str, object], competition: Competition) -> str | None:
+    """Return the season an ESPN scoreboard reports as current, in the competition's format."""
+    leagues = payload.get("leagues")
+    league = leagues[0] if isinstance(leagues, list) and leagues else None
+    season = league.get("season") if isinstance(league, dict) else None
+    year = season.get("year") if isinstance(season, dict) else None
+    if not isinstance(year, int) or isinstance(year, bool):
+        return None
+    return str(year) if competition.season_format == "calendar" else f"{year}-{year + 1}"
+
+
+EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+
+
+def espn_request_headers(user_agent: str) -> dict[str, str]:
+    """ESPN rejects (403) User-Agents containing an email address; send it as `From` instead."""
+    emails = EMAIL_RE.findall(user_agent)
+    if not emails:
+        return {"User-Agent": user_agent}
+    return {"User-Agent": EMAIL_RE.sub("see From header", user_agent), "From": emails[0]}
+
+
+class EspnScraper:
+    """ESPN's public, undocumented scoreboard JSON (see docs/adr/0001)."""
+
+    name = "espn"
+    capabilities = ProviderCapabilities(
+        statistics=DERIVED_GOAL_STATISTICS
+        | {"home_cards", "away_cards", "home_fouls", "away_fouls", "home_corners", "away_corners"},
+        season_discovery=True,
+    )
+
+    def __init__(self, timeout: float, user_agent: str, min_interval_seconds: float) -> None:
+        self.timeout = timeout
+        self.user_agent = user_agent
+        self.min_interval_seconds = min_interval_seconds
+        self._lock = asyncio.Lock()
+        self._last_request_at = 0.0
+
+    async def _get_json(self, url: str) -> dict[str, object]:
+        async with self._lock:
+            delay = self.min_interval_seconds - (time.monotonic() - self._last_request_at)
+            if delay > 0:
+                await asyncio.sleep(delay)
+            async with httpx.AsyncClient(
+                timeout=self.timeout,
+                headers=espn_request_headers(self.user_agent),
+                follow_redirects=False,
+            ) as client:
+                response = await client.get(url)
+            self._last_request_at = time.monotonic()
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise TypeError("ESPN response is not a JSON object")
+        return payload
+
+    @staticmethod
+    def _scoreboard_url(league: str) -> str:
+        return f"https://{ESPN_HOST}/apis/site/v2/sports/soccer/{league}/scoreboard"
+
+    async def scrape(self, competition: Competition, source: SeasonSource) -> list[ScrapedMatch]:
+        league = provider_competition_code(source)
+        if source.provider != self.name or league is None:
+            raise ValueError(f"not an ESPN scoreboard source: {source.source_url}")
+        payloads: list[dict[str, object]] = []
+        # ESPN ignores ?season=, so a split season needs one request per calendar year.
+        for year in sorted(set(season_years(source.season))):
+            payload = await self._get_json(
+                f"{self._scoreboard_url(league)}?dates={year}&limit={ESPN_SCOREBOARD_LIMIT}"
+            )
+            events = payload.get("events")
+            if isinstance(events, list) and len(events) >= ESPN_SCOREBOARD_LIMIT:
+                raise ValueError(f"ESPN {league} {year} returned a truncated list of events")
+            payloads.append(payload)
+        return parse_espn_matches(payloads, competition, source)
+
+    async def discover_seasons(self, competition: Competition) -> list[SeasonSource]:
+        leagues = {
+            league
+            for source in competition.seasons.values()
+            if source.provider == self.name
+            and (league := provider_competition_code(source)) is not None
+        }
+        if len(leagues) != 1:
+            raise ValueError(f"cannot determine the ESPN league for {competition.slug}")
+        league = leagues.pop()
+        payload = await self._get_json(self._scoreboard_url(league))
+        season = parse_espn_current_season(payload, competition)
+        if season is None:
+            return []
+        return [
+            SeasonSource(season=season, source_url=espn_source_url(league, season), provider="espn")
+        ]
+
+
 class ScraperRegistry:
-    def __init__(self, scrapers: dict[str, CompetitionScraper]) -> None:
+    def __init__(
+        self,
+        scrapers: dict[str, CompetitionScraper],
+        team_aliases: dict[str, dict[str, str]] | None = None,
+    ) -> None:
         self.scrapers = scrapers
+        # Competition slug -> {provider team name: canonical team name}.
+        self.team_aliases = team_aliases or {}
 
     def provider(self, name: str) -> CompetitionScraper:
         scraper = self.scrapers.get(name)
@@ -705,7 +1012,28 @@ class ScraperRegistry:
         return scraper
 
     async def scrape(self, competition: Competition, source: SeasonSource) -> list[ScrapedMatch]:
-        return await self.provider(source.provider).scrape(competition, source)
+        matches = await self.provider(source.provider).scrape(competition, source)
+        return apply_team_aliases(matches, self.team_aliases.get(competition.slug, {}))
+
+
+def apply_team_aliases(matches: list[ScrapedMatch], aliases: dict[str, str]) -> list[ScrapedMatch]:
+    """Rename provider team names to the configured canonical team names."""
+    if not aliases:
+        return matches
+
+    def canonical(name: str | None) -> str | None:
+        return None if name is None else aliases.get(name, name)
+
+    return [
+        match.model_copy(
+            update={
+                "home_team": canonical(match.home_team),
+                "away_team": canonical(match.away_team),
+                "first_team_to_score": canonical(match.first_team_to_score),
+            }
+        )
+        for match in matches
+    ]
 
 
 def create_scraper_registry(
@@ -715,6 +1043,8 @@ def create_scraper_registry(
     football_data_min_interval_seconds: float,
     ninety_minut_min_interval_seconds: float = 2.0,
     ninety_minut_detail_cache_max_entries: int = 512,
+    espn_min_interval_seconds: float = 2.0,
+    team_aliases: dict[str, dict[str, str]] | None = None,
 ) -> ScraperRegistry:
     providers: list[CompetitionScraper] = [
         NinetyMinutScraper(
@@ -729,5 +1059,6 @@ def create_scraper_registry(
             football_data_api_token,
             football_data_min_interval_seconds,
         ),
+        EspnScraper(timeout, user_agent, espn_min_interval_seconds),
     ]
-    return ScraperRegistry({provider.name: provider for provider in providers})
+    return ScraperRegistry({provider.name: provider for provider in providers}, team_aliases)

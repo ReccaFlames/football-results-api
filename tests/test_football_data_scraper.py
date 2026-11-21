@@ -10,12 +10,26 @@ from app.scraper import (
     parse_football_data_seasons,
 )
 
-COMPETITIONS = load_config().to_competitions()
+PREMIER_LEAGUE = (
+    load_config()
+    .to_competitions()["premier-league"]
+    .model_copy(
+        update={
+            "seasons": {
+                season: source_from_url(
+                    season,
+                    f"https://api.football-data.org/v4/competitions/PL/matches?season={season[:4]}",
+                )
+                for season in ("2025-2026", "2026-2027")
+            }
+        }
+    )
+)
+COMPETITIONS = {"premier-league": PREMIER_LEAGUE}
 
 
 def source():
-    competition = COMPETITIONS["premier-league"]
-    return competition.seasons[competition.current_season]
+    return PREMIER_LEAGUE.seasons[PREMIER_LEAGUE.current_season]
 
 
 def match(status: str, home_score=None, away_score=None) -> dict[str, object]:
@@ -41,7 +55,7 @@ def match(status: str, home_score=None, away_score=None) -> dict[str, object]:
         "bookings": [
             {"minute": 25, "team": {"id": 64, "name": "Liverpool FC"}},
             {"minute": 82, "team": {"id": 57, "name": "Arsenal FC"}},
-            {"minute": 89, "team": {"id": 57, "name": "Arsenal FC"}},
+            {"minute": 89, "team": {"id": 57, "name": "Arsenal FC"}, "card": "YELLOW_RED"},
         ],
     }
 
@@ -68,7 +82,7 @@ def test_parses_finished_match() -> None:
     assert parsed.home_goals_second_half == 1
     assert parsed.away_goals_second_half == 1
     assert parsed.home_cards == 1
-    assert parsed.away_cards == 2
+    assert parsed.away_cards == 3  # a second yellow is one yellow plus one red
     assert parsed.first_team_to_score == "Liverpool FC"
     assert parsed.first_goal_minute == "45+2"
     assert parsed.home_corners is None

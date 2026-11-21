@@ -467,7 +467,7 @@ def test_historical_source_rejects_arbitrary_url(tmp_path: Path) -> None:
         headers=AUTH_HEADERS,
     )
     assert response.status_code == 422
-    assert "90minut page or football-data.org" in response.json()["detail"]
+    assert "supported 90minut page" in response.json()["detail"]
 
 
 def test_historical_source_rejects_provider_from_another_competition(
@@ -533,19 +533,21 @@ def test_calendar_historical_season_is_queued(tmp_path: Path) -> None:
     assert (summary["season_format"], summary["available_seasons"]) == ("calendar", ["2025"])
 
 
-def test_historical_source_rejects_another_football_data_competition(tmp_path: Path) -> None:
+def test_historical_source_rejects_another_provider_competition(tmp_path: Path) -> None:
     client, _ = client_with_empty_store(tmp_path)
     response = client.post(
         "/api/v1/results/history/fetch",
         json={
             "competition": "premier-league",
             "season": "2023-2024",
-            "source_url": "https://api.football-data.org/v4/competitions/BL1/matches?season=2023",
+            "source_url": (
+                "https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard?season=2023"
+            ),
         },
         headers=AUTH_HEADERS,
     )
     assert response.status_code == 422
-    assert "code BL1 is not configured" in response.json()["detail"]
+    assert "code ger.1 is not configured" in response.json()["detail"]
 
 
 KICKOFF = datetime(2026, 8, 1, 18, 0, tzinfo=UTC)

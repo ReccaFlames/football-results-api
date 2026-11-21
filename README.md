@@ -1,13 +1,13 @@
 # Football Results API
 
-FastAPI service that imports football fixtures and results from public sources (90minut.pl and
-football-data.org), stores them in PostgreSQL, keeps current seasons up to date with an adaptive
+FastAPI service that imports football fixtures and results from public sources (90minut.pl,
+football-data.org, and ESPN), stores them in PostgreSQL, keeps current seasons up to date with an adaptive
 scheduler, and serves them over a REST API.
 
 The repository started as an Ekstraklasa-only scraper and is evolving into a **generic, configurable
 league-data API**. This README describes both:
 
-- **[Current state](#current-state)** – what is implemented and works today (version 0.16.0).
+- **[Current state](#current-state)** – what is implemented and works today (version 0.17.0).
 - **[Target state](#target-state-and-roadmap)** – where the project is heading and what is still
   missing.
 
@@ -16,10 +16,10 @@ league-data API**. This README describes both:
 | Capability | Current state | Target state |
 | --- | --- | --- |
 | Competitions | 4 declared in `config/competitions.yaml`: Ekstraklasa, I liga, Europa League, Premier League | Any league/cup, declared in a config file or through an admin API |
-| Data providers | `90minut` (HTML scraping) and `football-data` (JSON API, any competition code) behind a [documented provider contract](docs/PROVIDERS.md) | More sources and fallback providers |
+| Data providers | `90minut` (HTML scraping), `football-data` (JSON API, any competition code), and `espn` (public scoreboard JSON, Premier League) behind a [documented provider contract](docs/PROVIDERS.md) | More sources and fallback providers |
 | Adding a competition/season | Edit `config/competitions.yaml`; the scheduler applies changes | Edit configuration (no code), hot-reloaded |
 | Seasons | Split (`2026-2027`) or calendar-year (`2026`) per competition, with a configurable start month | Same |
-| Season rollover | Automatic: providers with discovery (football-data) add new seasons; the scheduler switches `current_season` once the new season has started and the old one is finished. 90minut sources are added to YAML by hand | Same, with more discovering providers |
+| Season rollover | Automatic: providers with discovery (football-data, espn) add new seasons; the scheduler switches `current_season` once the new season has started and the old one is finished. 90minut sources are added to YAML by hand | Same, with more discovering providers |
 | Scheduling | Adaptive per-season scheduler driven by fixture times; thresholds from `defaults.schedule` with per-competition overrides | Plus cron-style overrides and global provider quotas |
 | Configuration | Environment variables plus validated YAML for leagues, sources, providers, and schedule defaults | Env vars for infrastructure + one validated config file for leagues, sources, and schedules |
 | Observability | `/health`; authenticated admin endpoints for import jobs and scheduler state; Prometheus `/metrics`; optional Prometheus + Grafana stack with Telegram alerts on stale seasons; JSON logs | Same, plus per-provider quotas and fallback alerts |
@@ -36,7 +36,8 @@ Scheduler (app.scheduler) ──┬──▶ ScraperRegistry ──▶ sources
 ~~~
 
 - FastAPI provides the HTTP API (`app/main.py`).
-- Provider-specific adapters (`app/scraper.py`) parse 90minut pages and football-data.org JSON.
+- Provider-specific adapters (`app/scraper.py`) parse 90minut pages, football-data.org JSON, and ESPN
+  scoreboard JSON.
   They implement the `CompetitionScraper` provider contract (`scrape`, `discover_seasons`, and
   declared capabilities; see [docs/PROVIDERS.md](docs/PROVIDERS.md)) and are selected by
   `ScraperRegistry` using the season's `provider` value.
@@ -70,14 +71,20 @@ scheduler_heartbeat, and alembic_version.
 | `ekstraklasa` | PKO BP Ekstraklasa | 90minut | 2025-2026, 2026-2027 | 2026-2027 |
 | `pierwsza-liga` | Betclic I liga | 90minut | 2025-2026, 2026-2027 | 2026-2027 |
 | `europa-league` | UEFA Europa League (cup) | 90minut | 2025-2026, 2026-2027 | 2026-2027 |
-| `premier-league` | Premier League | football-data | 2024-2025 – 2026-2027 | 2026-2027 |
+| `premier-league` | Premier League | espn | 2024-2025 – 2026-2027 | 2026-2027 |
 
 ### Known limitations
 
-- Source URLs are validated against the currently supported 90minut and football-data.org endpoints.
+- Source URLs are validated against the currently supported 90minut, football-data.org, and ESPN
+  endpoints.
 - football-data.org sources must use `/v4/competitions/<CODE>/matches?season=<start year>`, and
   all sources of one competition must share the same `<CODE>`.
-- Season discovery is implemented for football-data.org only; new 90minut seasons must be added to
+- ESPN sources must use
+  `https://site.api.espn.com/apis/site/v2/sports/soccer/<league>/scoreboard?season=<start year>`.
+  ESPN publishes no matchweek, so ESPN matches have `round: null` unless a round was already stored
+  for the same match by an earlier provider. The ESPN endpoint is public but undocumented and
+  unofficial; it can change without notice, and its terms of use apply to how you use the data.
+- Season discovery is implemented for football-data.org and ESPN only; new 90minut seasons must be added to
   the YAML by hand (rollover to them is then automatic).
 - 90minut source URLs must match `http(s)://(www.)90minut.pl/liga/1/ligaNNNNN.html`.
 - Standings use points (3/1/0), then goal difference, goals for, wins, and team name. Head-to-head
@@ -107,15 +114,17 @@ cp .env.example .env
 Change POSTGRES_PASSWORD in .env. Keep the password in
 FOOTBALL_RESULTS_DATABASE_URL synchronized when running the API outside Docker.
 
-Premier League data requires a free football-data.org token. Register at
-https://www.football-data.org/client/register and put the generated token in `.env`:
+Competitions that use football-data.org require a free football-data.org token. The shipped
+configuration has none (the Premier League uses ESPN, which needs no token), so this is only needed
+when you add one. Register at https://www.football-data.org/client/register and put the generated
+token in `.env`:
 
 ~~~dotenv
 FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN=your-token-here
 ~~~
 
 Do not commit the token. The API can start without it and the 90minut competitions continue to
-work, but Premier League refreshes will report a clear configuration error until it is configured.
+work, but football-data.org refreshes will report a clear configuration error until it is configured.
 
 Protect refresh and history-fetch requests by setting one or more comma-separated API keys:
 
@@ -200,7 +209,7 @@ accidentally running.
 Every `season_check_interval` (default daily) the scheduler claims each enabled competition for a
 season check:
 
-1. **Discovery.** If the provider supports it (football-data.org), `discover_seasons` lists the
+1. **Discovery.** If the provider supports it (football-data.org, ESPN), `discover_seasons` lists the
    provider's seasons. Only seasons newer than the newest known season are stored; existing
    seasons, including their source URLs, are never changed. Failed discovery is retried after the
    longest failure backoff.
@@ -405,11 +414,12 @@ curl -X POST http://localhost:8000/api/v1/results/history/fetch \
 New historical fetches return `202 Accepted` and a job status URL. Cached seasons return their
 results immediately unless `force_refresh` is true. The competition-season row and matches are
 committed together. The season then appears in GET /api/v1/competitions. The season must use the
-competition's `season_format` (`2024-2025` or `2024`); football-data.org URLs must use the
-competition's configured code. The supplied URL must use
+competition's `season_format` (`2024-2025` or `2024`); football-data.org and ESPN URLs must use
+the competition's configured code or league. The supplied URL must use
 a provider already configured for that competition.
 
-Premier League historical sources use season-specific football-data.org URLs, for example:
+Premier League historical sources use season-specific ESPN URLs (`season` is the start year), for
+example:
 
 ~~~bash
 curl -X POST http://localhost:8000/api/v1/results/history/fetch \
@@ -418,9 +428,17 @@ curl -X POST http://localhost:8000/api/v1/results/history/fetch \
   -d '{
     "competition":"premier-league",
     "season":"2024-2025",
-    "source_url":"https://api.football-data.org/v4/competitions/PL/matches?season=2024"
+    "source_url":"https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard?season=2024",
+    "force_refresh":true
   }'
 ~~~
+
+The Premier League switched from football-data.org to ESPN in 0.17.0 (see
+[ADR 0001](docs/adr/0001-espn-primary-source-for-premier-league.md)). The current season is
+refreshed by the scheduler automatically. Seasons stored earlier from football-data.org keep their
+data until you re-fetch them once with `force_refresh` as above (2024-2025 and 2025-2026). Match
+IDs and rounds are kept: a refresh matches existing rows by provider ID, then by round and teams,
+then by a home/away pair that is unique in the season.
 
 Query results:
 
@@ -504,14 +522,22 @@ curl 'http://localhost:8000/api/v1/teams?q=wisla'
 Finished results include nullable statistics. Fields stay null when the configured provider does
 not supply enough information; the API never invents a zero for unavailable data.
 
-| Fields | 90minut | football-data.org |
-| --- | --- | --- |
-| home_goals, away_goals | yes | yes |
-| first-half goals | derived from match-page goal events | yes, when supplied |
-| second-half goals | derived from match-page goal events | derived from full-time minus half-time |
-| home_cards, away_cards | match-page card markers | booking-event count |
-| first_team_to_score, first_goal_minute | match-page goal events | unfolded goal events |
-| corners and fouls | unavailable | unavailable |
+| Fields | 90minut | football-data.org | ESPN |
+| --- | --- | --- | --- |
+| home_goals, away_goals | yes | yes | yes |
+| first-half goals | derived from match-page goal events | yes, when supplied | derived from goal events |
+| second-half goals | derived from match-page goal events | derived from full-time minus half-time | derived from goal events |
+| home_cards, away_cards | match-page card markers | booking-event count (paid plan only) | yellow and red card events |
+| first_team_to_score, first_goal_minute | match-page goal events | goal events (paid plan only) | goal events |
+| corners and fouls | unavailable | unavailable | `wonCorners`, `foulsCommitted` |
+
+A card count is yellow plus red cards; a second yellow counts as one yellow and one red (2). An own
+goal counts for the team whose score it raised, including as the first goal. A goalless match has
+null first-goal fields. ESPN goal-derived fields stay null when the goal events do not add up to
+the final score; cards are then null too, because missing events cannot be told apart from none.
+
+football-data.org's free plan omits goal and booking events, so these fields stay null for
+football-data competitions unless your token has a paid plan with them.
 
 `home_score` and `away_score` remain in the response for backward compatibility and have the same
 values as the full-time goal fields. Stoppage-time first goals use strings such as `45+2` so the
@@ -858,8 +884,8 @@ uv run python -m app.config check
 
 The check can target an alternate file with `--config-file`. Invalid YAML, unsupported source URLs,
 undeclared providers, duplicate slugs, inconsistent season/provider declarations, seasons that do
-not match the competition's `season_format`, and mixed football-data.org competition codes fail
-validation.
+not match the competition's `season_format`, mixed football-data.org competition codes or ESPN leagues, and
+invalid `team_aliases` fail validation.
 
 Per-competition season settings:
 
@@ -886,6 +912,20 @@ A calendar-year football-data.org competition, for example the Brazilian Série 
 football-data.org source URLs accept any competition code (`PL`, `BL1`, `SA`, `PD`, `CL`, ...);
 `season` is the season's start year. Which codes your token can read depends on your
 football-data.org plan.
+
+A competition may map provider team names to the names already stored, so switching providers
+does not create duplicate teams. Keys are the provider's names; values are the stored names:
+
+~~~yaml
+  - slug: premier-league
+    provider: espn
+    team_aliases:
+      Fulham: Fulham FC
+      Crystal Palace: Crystal Palace FC
+~~~
+
+ESPN sources use `https://site.api.espn.com/apis/site/v2/sports/soccer/<league>/scoreboard?season=<start year>`
+(`eng.1` is the Premier League). One season is fetched with one request per calendar year it spans.
 
 #### Schedule settings
 
@@ -922,14 +962,15 @@ Application variables:
 | FOOTBALL_RESULTS_DATABASE_URL | `postgresql+psycopg_async://football:football@localhost:5432/football` | PostgreSQL connection |
 | FOOTBALL_RESULTS_CONFIG_FILE | `config/competitions.yaml` locally; `/app/config/competitions.yaml` in Docker | Validated competition configuration file |
 | FOOTBALL_RESULTS_REQUEST_TIMEOUT_SECONDS | `20` | HTTP timeout for source requests |
-| FOOTBALL_RESULTS_USER_AGENT | `FootballResultsAPI/<package version> (contact: ...)` | Sent to sources; default version comes from package metadata; include a contact address |
+| FOOTBALL_RESULTS_USER_AGENT | `FootballResultsAPI/<package version> (contact: ...)` | Sent to sources; default version comes from package metadata; include a contact address (ESPN rejects emails in the User-Agent, so for ESPN the address is sent in the `From` header) |
 | FOOTBALL_RESULTS_SCHEDULER_LOOP_SECONDS | `30` | Pause between scheduler cycles |
 | FOOTBALL_RESULTS_SCHEDULER_CLAIM_LIMIT | `5` | Max queued jobs and due seasons claimed per cycle (each limit applies separately) |
 | FOOTBALL_RESULTS_SCHEDULER_WORKER_TIMEOUT_SECONDS | `300` | A scheduler worker without a heartbeat for this long is treated as dead: its `running` scrape jobs are marked `failed` so their seasons are claimed again |
 | FOOTBALL_RESULTS_API_KEYS | empty | Comma-separated API keys; required for write endpoints, job status, admin endpoints, and `/metrics` |
 | FOOTBALL_RESULTS_LOG_FORMAT | `text` | `text` or `json` (one JSON object per line on stderr, including uvicorn access logs); Docker Compose sets `json` |
-| FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN | empty | football-data.org token (needed for football-data competitions such as the Premier League) |
+| FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN | empty | football-data.org token (needed only for football-data competitions) |
 | FOOTBALL_RESULTS_FOOTBALL_DATA_MIN_REQUEST_INTERVAL_SECONDS | `6` (from YAML) | Optional environment override for the football-data.org throttle (free tier: 10 req/min) |
+| FOOTBALL_RESULTS_ESPN_MIN_REQUEST_INTERVAL_SECONDS | `2` (from YAML) | Optional environment override for the minimum delay between ESPN requests |
 | FOOTBALL_RESULTS_NINETY_MINUT_MIN_REQUEST_INTERVAL_SECONDS | `2` (from YAML) | Optional environment override for the minimum delay between requests to each 90minut host; set to `0` to disable |
 | FOOTBALL_RESULTS_NINETY_MINUT_DETAIL_CACHE_MAX_ENTRIES | `512` | Maximum successful 90minut detail responses kept in the process-local LRU cache; set to `0` to disable |
 | FOOTBALL_RESULTS_RATE_LIMIT_ENABLED | `true` | Per-client API rate limiting; set to `false` to disable |
@@ -1038,6 +1079,8 @@ providers:
     min_request_interval_seconds: 2
   football-data:
     min_request_interval_seconds: 6
+  espn:
+    min_request_interval_seconds: 2
 
 competitions:
   - slug: ekstraklasa
@@ -1056,11 +1099,13 @@ competitions:
     name: Premier League
     country: England
     format: league
-    provider: football-data
+    provider: espn
     current_season: 2026-2027
+    team_aliases:
+      Fulham: Fulham FC
     seasons:
       "2026-2027":
-        source_url: https://api.football-data.org/v4/competitions/PL/matches?season=2026
+        source_url: https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard?season=2026
 ~~~
 
 Configuration behaviour:

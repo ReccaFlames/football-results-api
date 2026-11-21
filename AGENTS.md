@@ -6,7 +6,8 @@ Guidance for AI coding agents working **on** this repository. For how to *use* t
 ## Project in one paragraph
 
 Football Results API (repo: `ekstraklasa-results-api`, package: `football-results-api`) imports
-fixtures and results from external sources (90minut.pl HTML, football-data.org JSON), stores them in
+fixtures and results from external sources (90minut.pl HTML, football-data.org JSON,
+ESPN scoreboard JSON), stores them in
 PostgreSQL, and serves them through FastAPI. A separate scheduler process refreshes current seasons
 adaptively based on kickoff times. Goal: a generic, easy-to-configure, AI-agent-first league data
 API.
@@ -165,7 +166,11 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
 - Statistics that a provider cannot supply must stay `null` — never default to `0`.
 - 90minut pages are ISO-8859-2 and use Polish month names with Europe/Warsaw time.
 - football-data.org is throttled (`FOOTBALL_DATA_MIN_REQUEST_INTERVAL_SECONDS`, default 6s) and
-  needs `FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN`. Never commit tokens or `.env`.
+  needs `FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN`; its free plan omits goal and booking events.
+  Never commit tokens or `.env`.
+- ESPN (`espn`, Premier League primary source, ADR 0001) is throttled
+  (`FOOTBALL_RESULTS_ESPN_MIN_REQUEST_INTERVAL_SECONDS`, default 2s) and has no rounds. Provider
+  team names are mapped to stored names by per-competition `team_aliases`.
 - Tests must not hit the network. Parser tests use inline HTML/JSON fixtures.
 - The integration test database name must contain `test`; the fixtures truncate all tables and
   the migration test downgrades to `base`.
