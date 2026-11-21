@@ -16,6 +16,9 @@ defaults:
     # finished; current_season below then acts as a minimum. manual: current_season is exact.
     season_rollover: auto
     season_check_interval: 1d
+    # After this many primary source failures in a row, each scheduled check of a current season
+    # falls back to the competition's fallback source (if any) for that one refresh.
+    fallback_after_failures: 3
 
 providers:
   90minut:
@@ -68,14 +71,20 @@ competitions:
     country: England
     format: league
     provider: espn
+    # football-data.org fills in fixtures, status, kickoff times, and scores while ESPN fails;
+    # it needs FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN. See docs/adr/0002-fallback-source-refreshes.md.
+    fallback_provider: football-data
     current_season: 2026-2027
     seasons:
       "2024-2025":
         source_url: https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard?season=2024
+        fallback_url: https://api.football-data.org/v4/competitions/PL/matches?season=2024
       "2025-2026":
         source_url: https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard?season=2025
+        fallback_url: https://api.football-data.org/v4/competitions/PL/matches?season=2025
       "2026-2027":
         source_url: https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard?season=2026
+        fallback_url: https://api.football-data.org/v4/competitions/PL/matches?season=2026
     # ESPN team name -> the existing team name, so team names, slugs, and match IDs stay stable.
     team_aliases:
       Arsenal: Arsenal FC

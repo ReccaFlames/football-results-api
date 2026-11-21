@@ -238,7 +238,22 @@ How to use this list:
     - [x] football-data: count `YELLOW_RED` as two cards; `PROVIDERS.md` notes goals and bookings
           need a paid plan
     - [x] Docs (README with ESPN terms caveat, `PROVIDERS.md`); version 0.17.0
-  - [ ] 17b. Fallback sources (football-data.org as the Premier League fallback source)
+  - [x] 17b. Fallback sources (football-data.org as the Premier League fallback source;
+        [ADR 0002](adr/0002-fallback-source-refreshes.md))
+    - [x] Config: competition `fallback_provider`, season `fallback_url`, validated by
+          `config check`; missing token is a warning, not an error
+    - [x] `fallback_after_failures` (default 3) in `defaults.schedule` and `SchedulePolicy`;
+          primary failure = error or empty result for a season with stored matches
+    - [x] Scheduler: primary first, then fallback in the same run after the threshold; scheduled
+          current seasons only; first primary success switches back
+    - [x] Fallback merge updates fixture fields and adds matches only; keeps provider IDs, rounds,
+          statistics; never deletes
+    - [x] Migration 0011: season fallback source, primary-failure counter, last-success source;
+          `scrape_run.provider` and `fallback`
+    - [x] `freshness.source` = last successful import; admin fields; metrics
+          `season_fallback_active`, `season_primary_consecutive_failures`; 24 h Grafana warning
+    - [x] Season check discovers missing fallback URLs
+    - [x] Docs (README, `PROVIDERS.md`, ADR 0002, glossary); version 0.18.0
   - [ ] 17c. More primary providers
 - [ ] **18. Optional hosted access**
   - [ ] OAuth for remote MCP

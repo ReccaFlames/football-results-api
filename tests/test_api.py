@@ -1166,6 +1166,8 @@ def scrape_run(job_id: int, status: str, competition: str = "ekstraklasa") -> Sc
         matches_found=9 if status == "completed" else None,
         error_message="HTTP 503" if status == "failed" else None,
         source_url="http://www.90minut.pl/liga/1/liga14000.html",
+        provider="90minut",
+        fallback=False,
         worker_id="host:1:abc",
     )
 

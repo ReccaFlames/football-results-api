@@ -65,6 +65,21 @@ def _source_key(match: ScrapedMatch, home_team_id: int, away_team_id: int) -> st
     return f"{match.season}|{match.round}|{home_team_id}|{away_team_id}"
 
 
+# Fixture fields a fallback refresh overwrites on stored matches; it keeps every other value.
+FALLBACK_FIELDS = (
+    "status",
+    "played_at",
+    "home_score",
+    "away_score",
+    "home_goals",
+    "away_goals",
+    "home_goals_first_half",
+    "away_goals_first_half",
+    "home_goals_second_half",
+    "away_goals_second_half",
+)
+
+
 def _normalize_team_alias(name: str) -> str:
     return " ".join(name.lower().split())
 
@@ -148,10 +163,26 @@ class RefreshTarget:
     competition: Competition
     source: SeasonSource
     run_id: int | None = None
+    # A scheduled check of a current season (not a queued job); only these may use the fallback.
+    scheduled: bool = False
+
+
+def _season_source(row: CompetitionSeasonRow) -> SeasonSource:
+    return SeasonSource(
+        season=row.season,
+        source_url=row.source_url,
+        provider=row.provider,
+        fallback_provider=row.fallback_provider,
+        fallback_url=row.fallback_url,
+    )
 
 
 class ActiveScrapeJobConflict(ValueError):
     pass
+
+
+class EmptySeasonError(ValueError):
+    """A source returned no matches for a season that has stored matches (a primary failure)."""
 
 
 @dataclass(frozen=True, order=True)
@@ -180,6 +211,8 @@ class SeasonCheckResult:
     rolled_over_to: str | None = None
     # The season that has started by date but has no known source yet.
     missing_season: str | None = None
+    # Known seasons that got a discovered fallback source.
+    fallback_seasons: list[str] = field(default_factory=list)
 
 
 def _season_start(season: str) -> int:
@@ -301,6 +334,8 @@ class PostgresResultRepository:
                                 season=season_name,
                                 source_url=source.source_url,
                                 provider=source.provider,
+                                fallback_provider=source.fallback_provider,
+                                fallback_url=source.fallback_url,
                                 is_current=is_current,
                                 fetched_at=None,
                                 automatic_refresh_enabled=is_current,
@@ -320,12 +355,15 @@ class PostgresResultRepository:
                         item.is_current = is_current
                         item.source_url = source.source_url
                         item.provider = source.provider
+                        item.fallback_provider = source.fallback_provider
+                        item.fallback_url = source.fallback_url
                         item.updated_at = now
                         if is_current:
                             item.automatic_refresh_enabled = True
                             if source_changed:
                                 item.next_check_at = now
                                 item.consecutive_failures = 0
+                                item.primary_consecutive_failures = 0
                                 item.scheduler_state = "waiting_for_schedule"
                             else:
                                 item.next_check_at = item.next_check_at or now
@@ -581,7 +619,10 @@ class PostgresResultRepository:
                 ),
                 automatic_refresh=row.is_current and row.automatic_refresh_enabled,
                 scheduler_state=row.scheduler_state,
-                source=FreshnessSource(provider=row.provider, url=row.source_url),
+                source=FreshnessSource(
+                    provider=row.last_success_provider or row.provider,
+                    url=row.last_success_url or row.source_url,
+                ),
             )
             for row, slug in rows
         ]
@@ -686,6 +727,7 @@ class PostgresResultRepository:
                 competition_season_id=season.id,
                 status="queued",
                 source_url=source.source_url,
+                provider=source.provider,
                 queued_at=now,
                 started_at=None,
                 completed_at=None,
@@ -755,7 +797,7 @@ class PostgresResultRepository:
                 source = SeasonSource(
                     season=season.season,
                     source_url=run.source_url,
-                    provider=season.provider,
+                    provider=run.provider or season.provider,
                 )
                 result.append(RefreshTarget(competition, source, run.id))
             return result
@@ -767,8 +809,16 @@ class PostgresResultRepository:
         fresh: list[ScrapedMatch],
         run_id: int | None = None,
         policy: SchedulePolicy = DEFAULT_POLICY,
+        fallback: SeasonSource | None = None,
     ) -> datetime:
+        """Store a refresh of one competition-season in one transaction.
+
+        ``source`` is the season's primary source. With ``fallback`` (the source ``fresh`` came
+        from), the refresh is a fallback refresh (ADR 0002): it updates only the fixture fields of
+        stored matches, adds new ones, never deletes, and never writes provider match IDs.
+        """
         started = _now()
+        used = fallback or source
         async with self.sessions.begin() as session:
             row = await session.scalar(
                 select(CompetitionRow).where(CompetitionRow.slug == competition.slug)
@@ -780,7 +830,9 @@ class PostgresResultRepository:
                 run = ScrapeRunRow(
                     competition_season_id=season.id,
                     status="running",
-                    source_url=source.source_url,
+                    source_url=used.source_url,
+                    provider=used.provider,
+                    fallback=fallback is not None,
                     queued_at=started,
                     started_at=started,
                     completed_at=None,
@@ -800,6 +852,11 @@ class PostgresResultRepository:
                     )
                 ).all()
             )
+            if not fresh and previous:
+                raise EmptySeasonError(
+                    f"{used.provider} returned no matches for {source.season}, "
+                    f"which has {len(previous)} stored matches"
+                )
             by_key = {match.source_key: match for match in previous}
             by_provider_id = {
                 match.provider_match_id: match
@@ -823,7 +880,7 @@ class PostgresResultRepository:
                 away_team_id = await self._ensure_team(session, match.away_team, team_ids, now)
                 existing = (
                     by_provider_id.get(match.provider_match_id)
-                    if match.provider_match_id is not None
+                    if match.provider_match_id is not None and fallback is None
                     else None
                 )
                 existing = existing or by_key.get(_source_key(match, home_team_id, away_team_id))
@@ -836,9 +893,17 @@ class PostgresResultRepository:
                     match = match.model_copy(
                         update={"round": existing.round, "stage": existing.stage}
                     )
+                if fallback is not None and existing is not None:
+                    for name in FALLBACK_FIELDS:
+                        setattr(existing, name, getattr(match, name))
+                    existing.updated_at = now
+                    retained_ids.add(existing.id)
+                    continue
                 values = {
                     "source_key": _source_key(match, home_team_id, away_team_id),
-                    "provider_match_id": match.provider_match_id
+                    "provider_match_id": None
+                    if fallback is not None
+                    else match.provider_match_id
                     or (None if existing is None else existing.provider_match_id),
                     "home_team_id": home_team_id,
                     "away_team_id": away_team_id,
@@ -880,11 +945,14 @@ class PostgresResultRepository:
                         setattr(existing, field, value)
                     retained_ids.add(existing.id)
             session.add_all(additions)
-            for stale_match in previous:
-                if stale_match.id not in retained_ids:
-                    await session.delete(stale_match)
+            if fallback is None:
+                for stale_match in previous:
+                    if stale_match.id not in retained_ids:
+                        await session.delete(stale_match)
+                season.primary_consecutive_failures = 0
             season.fetched_at = season.last_checked_at = season.last_successful_check_at = now
             season.consecutive_failures, season.updated_at = 0, now
+            season.last_success_provider, season.last_success_url = used.provider, used.source_url
             if season.is_current and season.automatic_refresh_enabled:
                 decision = calculate_next_check(fresh, competition.format, now, policy)
                 season.scheduler_state, season.next_check_at = (
@@ -962,8 +1030,15 @@ class PostgresResultRepository:
         error: Exception,
         run_id: int | None = None,
         policy: SchedulePolicy = DEFAULT_POLICY,
-    ) -> None:
+        fallback: SeasonSource | None = None,
+    ) -> int:
+        """Record a failed refresh and return the season's primary failures in a row.
+
+        ``source`` is the season's primary source. A failed ``fallback`` refresh is only recorded
+        as a run: the primary failure before it already counted and scheduled the retry.
+        """
         now = _now()
+        used = fallback or source
         async with self.sessions.begin() as session:
             row = await session.scalar(
                 select(CompetitionRow).where(CompetitionRow.slug == competition.slug)
@@ -971,11 +1046,13 @@ class PostgresResultRepository:
             if row is None:
                 if run_id is not None:
                     raise ValueError(f"Unknown competition: {competition.slug}")
-                return
+                return 0
             season = await self._ensure_season(session, row, competition, source, now)
             season.last_checked_at, season.updated_at = now, now
-            season.consecutive_failures += 1
-            if season.is_current and season.automatic_refresh_enabled:
+            if fallback is None:
+                season.consecutive_failures += 1
+                season.primary_consecutive_failures += 1
+            if fallback is None and season.is_current and season.automatic_refresh_enabled:
                 season.scheduler_state = "retrying"
                 season.next_check_at = now + failure_backoff(season.consecutive_failures, policy)
             if run_id is not None:
@@ -993,7 +1070,9 @@ class PostgresResultRepository:
                     ScrapeRunRow(
                         competition_season_id=season.id,
                         status="failed",
-                        source_url=source.source_url,
+                        source_url=used.source_url,
+                        provider=used.provider,
+                        fallback=fallback is not None,
                         queued_at=now,
                         started_at=now,
                         completed_at=now,
@@ -1001,6 +1080,7 @@ class PostgresResultRepository:
                         error_message=str(error)[:4000],
                     )
                 )
+            return season.primary_consecutive_failures
 
     async def claim_due_seasons(
         self, limit: int, worker_id: str | None = None
@@ -1032,11 +1112,7 @@ class PostgresResultRepository:
             result = []
             for season, competition in rows:
                 season.next_check_at = now + timedelta(minutes=10)
-                source = SeasonSource(
-                    season=season.season,
-                    source_url=season.source_url,
-                    provider=season.provider,
-                )
+                source = _season_source(season)
                 value = Competition(
                     slug=competition.slug,
                     name=competition.name,
@@ -1051,6 +1127,7 @@ class PostgresResultRepository:
                     competition_season_id=season.id,
                     status="running",
                     source_url=source.source_url,
+                    provider=source.provider,
                     queued_at=now,
                     started_at=now,
                     completed_at=None,
@@ -1060,7 +1137,7 @@ class PostgresResultRepository:
                 )
                 session.add(run)
                 await session.flush()
-                result.append(RefreshTarget(value, source, run.id))
+                result.append(RefreshTarget(value, source, run.id, scheduled=True))
             return result
 
     async def claim_season_checks(
@@ -1096,12 +1173,15 @@ class PostgresResultRepository:
         next_check_at: datetime,
         policy: SchedulePolicy = DEFAULT_POLICY,
         now: datetime | None = None,
+        fallbacks: list[SeasonSource] | None = None,
     ) -> SeasonCheckResult:
         """Store newly discovered seasons and roll the current season over when it is due.
 
         Only seasons newer than the newest known season are added; existing seasons (configured,
-        discovered earlier, or fetched on request) are never modified. Rollover follows
-        ``app.scheduling.rollover_target`` and runs only for ``season_rollover: auto``.
+        discovered earlier, or fetched on request) are never modified, except that ``fallbacks``
+        (sources discovered from the fallback provider) fill in a missing fallback source of a
+        known season. Rollover follows ``app.scheduling.rollover_target`` and runs only for
+        ``season_rollover: auto``.
         """
         current_time = now or _now()
         async with self.sessions.begin() as session:
@@ -1117,6 +1197,7 @@ class PostgresResultRepository:
             newest = max((_season_start(season) for season in known), default=None)
             added: list[str] = []
             rejected: list[str] = []
+            filled: list[str] = []
             for source in discovered:
                 try:
                     validate_season(source.season, row.season_format)
@@ -1146,6 +1227,21 @@ class PostgresResultRepository:
                 row.seasons.append(item)
                 known[source.season] = item
                 added.append(source.season)
+            for source in fallbacks or ():
+                item = known.get(source.season)
+                if item is None or item.fallback_url is not None:
+                    continue
+                try:
+                    if source_from_url(source.season, source.source_url) != source:
+                        raise ValueError("source does not match its URL")
+                except ValueError:
+                    rejected.append(source.season)
+                    continue
+                if source.provider == item.provider:
+                    continue
+                item.fallback_provider, item.fallback_url = source.provider, source.source_url
+                item.updated_at = current_time
+                filled.append(source.season)
             await session.flush()
 
             current = next((item for item in known.values() if item.is_current), None)
@@ -1189,9 +1285,10 @@ class PostgresResultRepository:
                 new_current.scheduler_state = "waiting_for_schedule"
                 new_current.next_check_at = current_time
                 new_current.consecutive_failures = 0
+                new_current.primary_consecutive_failures = 0
                 new_current.updated_at = current_time
             row.next_season_check_at = next_check_at
-            return SeasonCheckResult(added, rejected, rolled_from, target, missing)
+            return SeasonCheckResult(added, rejected, rolled_from, target, missing, filled)
 
     async def heartbeat(self, worker_id: str, started_at: datetime) -> None:
         now = _now()
@@ -1336,6 +1433,8 @@ class PostgresResultRepository:
                 matches_found=run.matches_found,
                 error_message=run.error_message,
                 source_url=run.source_url,
+                provider=run.provider,
+                fallback=run.fallback,
                 worker_id=run.worker_id,
             )
             for run, season_name, slug in rows
@@ -1384,6 +1483,9 @@ class PostgresResultRepository:
                 next_check_at=row.next_check_at,
                 last_checked_at=row.last_checked_at,
                 consecutive_failures=row.consecutive_failures,
+                primary_consecutive_failures=row.primary_consecutive_failures,
+                fallback_active=row.last_success_url is not None
+                and row.last_success_url != row.source_url,
                 active_job_id=active_job_id,
             )
             for row, slug, active_job_id in rows
@@ -1425,6 +1527,8 @@ class PostgresResultRepository:
                 season=source.season,
                 source_url=source.source_url,
                 provider=source.provider,
+                fallback_provider=source.fallback_provider,
+                fallback_url=source.fallback_url,
                 is_current=current,
                 fetched_at=None,
                 automatic_refresh_enabled=current,
@@ -1455,12 +1559,5 @@ class PostgresResultRepository:
             season_format=row.season_format,
             season_start_month=row.season_start_month,
             current_season=None if current is None else current.season,
-            seasons={
-                s.season: SeasonSource(
-                    season=s.season,
-                    source_url=s.source_url,
-                    provider=s.provider,
-                )
-                for s in row.seasons
-            },
+            seasons={s.season: _season_source(s) for s in row.seasons},
         )

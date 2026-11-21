@@ -654,8 +654,12 @@ class FootballDataScraper:
         self._lock = asyncio.Lock()
         self._last_request_at = 0.0
 
+    @property
+    def available(self) -> bool:
+        return bool(self.api_token and self.api_token.strip())
+
     async def _get_json(self, url: str) -> dict[str, object]:
-        if not self.api_token or not self.api_token.strip():
+        if not self.available:
             raise ValueError(
                 "FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN is required for football-data.org"
             )
@@ -1010,6 +1014,11 @@ class ScraperRegistry:
         if scraper is None:
             raise ValueError(f"Unsupported source provider: {name}")
         return scraper
+
+    def available(self, name: str) -> bool:
+        """Whether the provider exists and is usable, e.g. has its API token."""
+        scraper = self.scrapers.get(name)
+        return scraper is not None and bool(getattr(scraper, "available", True))
 
     async def scrape(self, competition: Competition, source: SeasonSource) -> list[ScrapedMatch]:
         matches = await self.provider(source.provider).scrape(competition, source)

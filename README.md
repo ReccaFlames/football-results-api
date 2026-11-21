@@ -71,7 +71,7 @@ scheduler_heartbeat, and alembic_version.
 | `ekstraklasa` | PKO BP Ekstraklasa | 90minut | 2025-2026, 2026-2027 | 2026-2027 |
 | `pierwsza-liga` | Betclic I liga | 90minut | 2025-2026, 2026-2027 | 2026-2027 |
 | `europa-league` | UEFA Europa League (cup) | 90minut | 2025-2026, 2026-2027 | 2026-2027 |
-| `premier-league` | Premier League | espn | 2024-2025 – 2026-2027 | 2026-2027 |
+| `premier-league` | Premier League | espn (fallback: football-data) | 2024-2025 – 2026-2027 | 2026-2027 |
 
 ### Known limitations
 
@@ -199,6 +199,25 @@ come from `defaults.schedule` in `config/competitions.yaml` and can be overridde
 - with no published schedule: once daily (`idle_interval`);
 - after source errors: 5, 15, 30, then 60 minutes (`failure_backoff_minutes`).
 
+### Fallback sources
+
+A competition can name a `fallback_provider` and give seasons a `fallback_url` (see
+[ADR 0002](docs/adr/0002-fallback-source-refreshes.md)). The Premier League uses ESPN as its
+primary source and football-data.org as its fallback. A **primary failure** is an error from the
+primary source, or an empty result for a season that already has matches (an empty result never
+deletes stored matches). After `fallback_after_failures` primary failures in a row (default 3),
+each scheduled check tries the primary first and, if it fails again, refreshes from the fallback in
+the same run. The primary is always tried first, so the first primary success switches back.
+
+A fallback refresh only updates fixture fields (status, kickoff, full-time and half-time scores) and
+adds missing matches. It never deletes matches and never overwrites provider match IDs, rounds, or
+statistics (cards, fouls, corners, first goal) stored from the primary. Fallbacks apply only to
+scheduled refreshes of current seasons; queued refreshes and historical fetches use the primary.
+`freshness.source` shows the provider and URL of the last successful import, so it names the
+fallback while one is in use. Without `FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN` a football-data
+fallback is unavailable: `config check` and the services log a warning, and only the primary is
+used.
+
 Manual current-season refreshes are queued and use the same scheduling calculation when completed.
 Historical seasons are never scheduled automatically; they remain available through the queued
 historical fetch endpoint. PostgreSQL row locking makes claims safe if more than one worker is
@@ -220,6 +239,9 @@ season check:
    season stops being refreshed and stays readable. A competition without a `current_season` is
    never rolled over. If the new season has started but no source is known (for example a 90minut
    competition), the scheduler logs a hint to add it to the YAML.
+
+If the competition has a `fallback_provider` (and, for football-data.org, a token), the season
+check also runs the fallback's discovery and fills `fallback_url` for known seasons that have none.
 
 Interaction with `config/competitions.yaml`, which stays authoritative:
 
@@ -788,13 +810,18 @@ about 200 MB of RAM. Terms such as *stale season* and *stalled scheduler* are de
   - `football_results_scheduler_stalled`, `football_results_scheduler_heartbeat_age_seconds`
   - per `{competition, season}` of every current, automatically refreshed season:
     `football_results_season_stale`, `_season_overdue_seconds`, `_season_consecutive_failures`,
-    `_season_data_age_seconds`, `_season_next_update_timestamp_seconds`
+    `_season_data_age_seconds`, `_season_next_update_timestamp_seconds`,
+    `_season_primary_consecutive_failures`, and `_season_fallback_active` (1 while the last
+    successful import came from the fallback source)
   - `football_results_scrape_runs{competition, status}` (stored import jobs)
   - `football_results_http_requests_total{operation, method, status}` and
     `football_results_http_request_duration_seconds{operation}` (labelled by operation ID, so paths
     with IDs do not create new series), `football_results_build_info{version}`, and `process_*`
 - Admin endpoints (`X-API-Key`): `list_scrape_runs` and `get_scheduler_status`, also available as
-  `football-results scrape-runs` and `football-results scheduler`. They are not MCP tools.
+  `football-results scrape-runs` and `football-results scheduler`. They are not MCP tools. Import
+  jobs include their `provider` and a `fallback` flag; a fallback refresh records the failed
+  primary run and the fallback run separately. Scheduler seasons include
+  `primary_consecutive_failures` and `fallback_active`.
 - `FOOTBALL_RESULTS_LOG_FORMAT=json` (the Compose default) writes one JSON object per line. Compose
   rotates container logs (`json-file`, 3 × 10 MB per container); read them with
   `docker compose logs api scheduler`.
@@ -834,6 +861,7 @@ contact point that `compose.yaml` renders from `TELEGRAM_BOT_TOKEN` and `TELEGRA
 | Stale season | `football_results_season_stale` is 1 for a season (for 1 minute) |
 | Stalled scheduler | `football_results_scheduler_stalled` is 1 for 2 minutes |
 | Failing season | `football_results_season_consecutive_failures` is 3 or more (retries back off, so the season is not yet overdue) |
+| Season on fallback source | `football_results_season_fallback_active` is 1 for 24 hours (warning; the primary source keeps failing) |
 | API down | Prometheus cannot scrape `/metrics` for 2 minutes (API down or the Prometheus key rejected) |
 
 Without Telegram settings the stack still starts and alerts show in Grafana, but notifications fail.
@@ -927,6 +955,20 @@ does not create duplicate teams. Keys are the provider's names; values are the s
 ESPN sources use `https://site.api.espn.com/apis/site/v2/sports/soccer/<league>/scoreboard?season=<start year>`
 (`eng.1` is the Premier League). One season is fetched with one request per calendar year it spans.
 
+A fallback source is declared with `fallback_provider` on the competition and `fallback_url` per
+season. The fallback provider must be declared, differ from `provider`, and every `fallback_url`
+must be a valid source of that provider (with one competition code):
+
+~~~yaml
+  - slug: premier-league
+    provider: espn
+    fallback_provider: football-data
+    seasons:
+      2026-2027:
+        source_url: https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard?season=2026
+        fallback_url: https://api.football-data.org/v4/competitions/PL/matches?season=2026
+~~~
+
 #### Schedule settings
 
 `defaults.schedule` sets the scheduler thresholds for every competition. A competition may add a
@@ -945,6 +987,7 @@ per format). Durations use `s`, `m`, `h`, or `d` suffixes.
 | `failure_backoff_minutes` | `[5, 15, 30, 60]` | Retry delays after consecutive source errors |
 | `season_rollover` | `auto` | `auto` or `manual`; see [Season discovery and rollover](#season-discovery-and-rollover) |
 | `season_check_interval` | `1d` | How often seasons are discovered and rollover is evaluated |
+| `fallback_after_failures` | `3` | Primary failures in a row before scheduled checks use the fallback source; see [Fallback sources](#fallback-sources) |
 
 ~~~yaml
   - slug: europa-league

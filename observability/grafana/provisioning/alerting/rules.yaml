@@ -128,6 +128,49 @@ groups:
             type: gt
             params:
             - 2
+  - uid: football-results-season-fallback
+    title: Season on fallback source
+    condition: C
+    for: 24h
+    noDataState: OK
+    execErrState: Alerting
+    labels:
+      service: football-results
+      severity: warning
+    annotations:
+      summary: '{{ $labels.competition }} {{ $labels.season }} has been refreshed from its fallback
+        source for more than 24 hours; the primary source keeps failing. Check: football-results
+        scrape-runs -c {{ $labels.competition }} --status failed'
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: football-results-prometheus
+      model:
+        refId: A
+        expr: football_results_season_fallback_active
+        instant: true
+        intervalMs: 30000
+        maxDataPoints: 43200
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: reduce
+        expression: A
+        reducer: last
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
   - uid: football-results-api-down
     title: API down
     condition: C

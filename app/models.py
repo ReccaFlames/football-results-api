@@ -10,6 +10,16 @@ class SeasonSource(BaseModel):
     season: str
     source_url: str
     provider: str = "90minut"
+    # The fallback source of this season, if any (see GLOSSARY.md and ADR 0002).
+    fallback_provider: str | None = None
+    fallback_url: str | None = None
+
+    def fallback(self) -> "SeasonSource | None":
+        if self.fallback_provider is None or self.fallback_url is None:
+            return None
+        return SeasonSource(
+            season=self.season, source_url=self.fallback_url, provider=self.fallback_provider
+        )
 
 
 class Competition(BaseModel):
@@ -182,6 +192,9 @@ class MatchQuery(BaseModel):
 
 
 class FreshnessSource(BaseModel):
+    """Source of the last successful import (the fallback source when it filled in); the
+    configured primary source when the season was never fetched."""
+
     provider: str
     url: str
 
@@ -278,6 +291,10 @@ SCRAPE_RUN_STATUSES = ("queued", "running", "completed", "failed", "cancelled")
 
 class ScrapeRun(ScrapeJobStatus):
     source_url: str
+    provider: str | None = Field(
+        description="Provider of `source_url`; differs from the season's when it is a fallback run"
+    )
+    fallback: bool = Field(description="Whether the job refreshed from the fallback source")
     worker_id: str | None = Field(description="Scheduler worker that ran the job, if any")
 
 
@@ -305,6 +322,12 @@ class SeasonSchedule(BaseModel):
         description="Never fetched, or the update is more than the grace period overdue"
     )
     consecutive_failures: int
+    primary_consecutive_failures: int = Field(
+        description="Primary source failures in a row; only a primary success resets it"
+    )
+    fallback_active: bool = Field(
+        description="Whether the last successful import came from the fallback source"
+    )
     active_job_id: int | None = Field(description="Queued or running job of this season")
 
 

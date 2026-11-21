@@ -248,3 +248,48 @@ def test_config_rejects_invalid_schedule_overrides(
 def test_config_requires_a_match_duration_for_each_format(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="does not define it"):
         load_config(write_config(tmp_path, calendar_competition(format="playoff")))
+
+
+def premier_league_config(tmp_path: Path, **changes: object) -> Path:
+    data = yaml.safe_load(DEFAULT_CONFIG.read_text())
+    competition = next(item for item in data["competitions"] if item["slug"] == "premier-league")
+    for key, value in changes.items():
+        if value is None:
+            competition.pop(key, None)
+        else:
+            competition[key] = value
+    path = tmp_path / "competitions.yaml"
+    path.write_text(yaml.safe_dump(data))
+    return path
+
+
+def test_seasons_carry_their_fallback_source() -> None:
+    source = load_config(DEFAULT_CONFIG).to_competitions()["premier-league"].seasons["2026-2027"]
+
+    assert source.fallback() is not None
+    assert source.fallback().provider == "football-data"
+    assert source.fallback().source_url.endswith("/competitions/PL/matches?season=2026")
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"fallback_provider": None}, "fallback_url but no fallback_provider"),
+        ({"fallback_provider": "espn"}, "must differ from provider"),
+        ({"fallback_provider": "90minut"}, "fallback_url uses provider 'football-data'"),
+        ({"fallback_provider": "unknown"}, "undeclared fallback_provider"),
+    ],
+)
+def test_config_rejects_invalid_fallback_sources(
+    tmp_path: Path, changes: dict[str, object], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        load_config(premier_league_config(tmp_path, **changes))
+
+
+def test_fallback_without_an_api_token_is_only_a_warning() -> None:
+    config = load_config(DEFAULT_CONFIG)
+
+    assert config.fallback_warnings("token") == []
+    [warning] = config.fallback_warnings(None)
+    assert "premier-league" in warning and "FOOTBALL_DATA_API_TOKEN" in warning

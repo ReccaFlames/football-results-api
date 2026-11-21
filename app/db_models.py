@@ -77,6 +77,8 @@ class CompetitionSeasonRow(Base):
     season: Mapped[str] = mapped_column(String(9))
     source_url: Mapped[str] = mapped_column(Text)
     provider: Mapped[str] = mapped_column(String(30), default="90minut")
+    fallback_provider: Mapped[str | None] = mapped_column(String(30))
+    fallback_url: Mapped[str | None] = mapped_column(Text)
     is_current: Mapped[bool] = mapped_column(Boolean, default=False)
     fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     automatic_refresh_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -85,6 +87,13 @@ class CompetitionSeasonRow(Base):
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_successful_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
+    # Only a primary success resets this; it decides when the fallback source is tried.
+    primary_consecutive_failures: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0")
+    )
+    # Source of the last successful import: the primary or the fallback source.
+    last_success_provider: Mapped[str | None] = mapped_column(String(30))
+    last_success_url: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
@@ -207,6 +216,9 @@ class ScrapeRunRow(Base):
     )
     status: Mapped[str] = mapped_column(String(20))
     source_url: Mapped[str] = mapped_column(Text)
+    # NULL only for runs created before revision 0011.
+    provider: Mapped[str | None] = mapped_column(String(30))
+    fallback: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
     queued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

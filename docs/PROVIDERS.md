@@ -122,6 +122,16 @@ endpoint against SSRF, so never accept arbitrary hosts or paths. Accepted today:
 All football-data.org sources (or ESPN sources) of one competition must use the same `<CODE>` (or `<league>`); the configuration
 check and the historical fetch endpoint reject mixed codes.
 
+## Fallback sources
+
+A competition may name a `fallback_provider` with a `fallback_url` per season (ADR 0002). Any
+provider can be a fallback; nothing in the contract changes. The scheduler calls the same
+`scrape(competition, source)` with the fallback source after `fallback_after_failures` primary
+failures, and the season check calls the fallback's `discover_seasons` to fill missing fallback
+URLs. A fallback import only updates status, kickoff, and scores and adds missing matches. A
+provider that needs credentials should expose `available` (false without them, as
+`FootballDataScraper` does) so the scheduler skips it instead of failing.
+
 ## Adding a provider
 
 Follow the `add-data-provider` skill in `.github/skills/`. Tests must use inline fixtures and never

@@ -56,7 +56,10 @@ for automatic rollover, so every returned URL must pass `source_from_url` (exten
    match, missing data stays `None`, malformed payload raises, URL validation accepts/rejects, and
    parsed statistics stay within the declared capabilities.
    Never hit the network in tests.
-7. Update the README statistics-coverage table and the capability table in `docs/PROVIDERS.md`.
+7. If the provider needs credentials, add an `available` property (see `FootballDataScraper`) so
+   it can serve as a fallback source (`fallback_provider` in the YAML; see ADR 0002 and
+   `docs/PROVIDERS.md`); `fallback_warnings` in `app/config.py` warns about missing tokens.
+8. Update the README statistics-coverage table and the capability table in `docs/PROVIDERS.md`.
 
 ~~~bash
 uv run pytest -q && uv run ruff check .

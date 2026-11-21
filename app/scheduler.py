@@ -9,7 +9,7 @@ from app.config import CompetitionFile, ConfigFileWatcher, settings
 from app.database import session_factory
 from app.logs import configure_logging
 from app.models import Competition, SeasonSource
-from app.repository import PostgresResultRepository, ScheduledRefresh
+from app.repository import PostgresResultRepository, RefreshTarget, ScheduledRefresh
 from app.scheduling import SchedulePolicy
 from app.scraper import ScraperRegistry, create_scraper_registry
 
@@ -62,11 +62,20 @@ async def check_seasons(
         except Exception:
             logger.exception("season discovery failed for %s", competition.slug)
             next_check_in = policy.failure_backoff[-1]
+    fallbacks = await discover_fallback_seasons(scraper, configured.fallback_provider, competition)
     result = await repository.apply_season_check(
-        competition.slug, discovered, datetime.now(UTC) + next_check_in, policy
+        competition.slug,
+        discovered,
+        datetime.now(UTC) + next_check_in,
+        policy,
+        fallbacks=fallbacks,
     )
     if result.added_seasons:
         logger.info("discovered %s seasons %s", competition.slug, result.added_seasons)
+    if result.fallback_seasons:
+        logger.info(
+            "added fallback sources to %s seasons %s", competition.slug, result.fallback_seasons
+        )
     if result.rejected_sources:
         logger.warning(
             "ignored invalid discovered %s seasons %s", competition.slug, result.rejected_sources
@@ -84,6 +93,98 @@ async def check_seasons(
             competition.slug,
             result.missing_season,
         )
+
+
+async def discover_fallback_seasons(
+    scraper: ScraperRegistry, provider_name: str | None, competition: Competition
+) -> list[SeasonSource]:
+    """Seasons the fallback provider knows, so automatically discovered seasons get a fallback."""
+    if provider_name is None or not scraper.available(provider_name):
+        return []
+    provider = scraper.provider(provider_name)
+    if not provider.capabilities.season_discovery:
+        return []
+    known = {
+        season: fallback
+        for season, source in competition.seasons.items()
+        if (fallback := source.fallback()) is not None
+    }
+    if not known:
+        return []
+    try:
+        found = await provider.discover_seasons(competition.model_copy(update={"seasons": known}))
+    except Exception:
+        logger.exception("fallback season discovery failed for %s", competition.slug)
+        return []
+    return [source for source in found if source.provider == provider_name]
+
+
+async def refresh_target(
+    repository: PostgresResultRepository,
+    scraper: ScraperRegistry,
+    target: RefreshTarget,
+    policy: SchedulePolicy,
+    fallback_provider: str | None = None,
+) -> None:
+    """Refresh one claimed season from its primary source, else from its fallback source.
+
+    Only scheduled checks use the fallback, once the primary has failed
+    ``policy.fallback_after_failures`` times in a row (ADR 0002). ``fallback_provider`` is the
+    configured fallback provider of the competition; other stored fallbacks are ignored.
+    """
+    competition, source = target.competition, target.source
+    name = f"{competition.slug} {source.season}"
+    try:
+        matches = await scraper.scrape(competition, source)
+        await repository.replace_competition(
+            competition, source, matches, run_id=target.run_id, policy=policy
+        )
+        logger.info("refreshed %s (%d fixtures)", name, len(matches))
+        return
+    except Exception as error:
+        logger.exception("refresh failed for %s", name)
+        # Keep going: one unrecorded failure must not strand the other claimed jobs.
+        try:
+            failures = await repository.record_scrape_failure(
+                competition, source, error, run_id=target.run_id, policy=policy
+            )
+        except Exception:
+            logger.exception("could not record the failed refresh of %s", name)
+            return
+    fallback = source.fallback()
+    if (
+        not target.scheduled
+        or fallback is None
+        or fallback.provider != fallback_provider
+        or failures < policy.fallback_after_failures
+        or not scraper.available(fallback.provider)
+    ):
+        return
+    logger.warning(
+        "refreshing %s from fallback source %s after %d primary failures",
+        name,
+        fallback.provider,
+        failures,
+    )
+    try:
+        matches = await scraper.scrape(competition, fallback)
+        await repository.replace_competition(
+            competition, source, matches, policy=policy, fallback=fallback
+        )
+        logger.info("refreshed %s from fallback source (%d fixtures)", name, len(matches))
+    except Exception as error:
+        logger.exception("fallback refresh failed for %s", name)
+        try:
+            await repository.record_scrape_failure(
+                competition, source, error, policy=policy, fallback=fallback
+            )
+        except Exception:
+            logger.exception("could not record the failed fallback refresh of %s", name)
+
+
+def log_fallback_warnings(config: CompetitionFile) -> None:
+    for warning in config.fallback_warnings(settings.football_data_api_token):
+        logger.warning(warning)
 
 
 def worker_name() -> str:
@@ -136,6 +237,7 @@ async def run() -> None:
     config, _ = config_watcher.load_if_changed()
     await repository.seed_competitions(config.to_competitions(), config.auto_rollover_slugs())
     config_watcher.mark_applied()
+    log_fallback_warnings(config)
     scraper = _create_scraper(config)
     schedules: dict[str, SchedulePolicy] = config.schedules()
     worker_id = worker_name()
@@ -163,6 +265,7 @@ async def run() -> None:
                     config.to_competitions(), config.auto_rollover_slugs()
                 )
                 config_watcher.mark_applied()
+                log_fallback_warnings(config)
                 scraper = _create_scraper(config)
                 schedules = config.schedules()
             await recover_abandoned_runs(repository)
@@ -177,6 +280,7 @@ async def run() -> None:
             targets.extend(
                 await repository.claim_due_seasons(settings.scheduler_claim_limit, worker_id)
             )
+            fallback_providers = config.fallback_providers()
             for target in targets:
                 logger.info(
                     "refreshing %s %s (job %s)",
@@ -184,41 +288,13 @@ async def run() -> None:
                     target.source.season,
                     target.run_id,
                 )
-                policy = schedules.get(target.competition.slug, SchedulePolicy())
-                try:
-                    matches = await scraper.scrape(target.competition, target.source)
-                    await repository.replace_competition(
-                        target.competition,
-                        target.source,
-                        matches,
-                        run_id=target.run_id,
-                        policy=policy,
-                    )
-                    logger.info(
-                        "refreshed %s %s (%d fixtures)",
-                        target.competition.slug,
-                        target.source.season,
-                        len(matches),
-                    )
-                except Exception as error:
-                    logger.exception(
-                        "refresh failed for %s %s", target.competition.slug, target.source.season
-                    )
-                    # Keep going: one unrecorded failure must not strand the other claimed jobs.
-                    try:
-                        await repository.record_scrape_failure(
-                            target.competition,
-                            target.source,
-                            error,
-                            run_id=target.run_id,
-                            policy=policy,
-                        )
-                    except Exception:
-                        logger.exception(
-                            "could not record the failed refresh of %s %s",
-                            target.competition.slug,
-                            target.source.season,
-                        )
+                await refresh_target(
+                    repository,
+                    scraper,
+                    target,
+                    schedules.get(target.competition.slug, SchedulePolicy()),
+                    fallback_providers.get(target.competition.slug),
+                )
             if targets:
                 last_idle_message = None
             else:

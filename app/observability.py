@@ -42,6 +42,9 @@ class SeasonState:
     last_checked_at: datetime | None
     consecutive_failures: int
     active_job_id: int | None
+    primary_consecutive_failures: int = 0
+    # The last successful import came from the fallback source.
+    fallback_active: bool = False
 
 
 @dataclass(frozen=True)
@@ -105,6 +108,8 @@ def season_schedule(state: SeasonState, now: datetime) -> SeasonSchedule:
         overdue_seconds=overdue_seconds(state.next_check_at, now),
         stale=is_stale(state, now),
         consecutive_failures=state.consecutive_failures,
+        primary_consecutive_failures=state.primary_consecutive_failures,
+        fallback_active=state.fallback_active,
         active_job_id=state.active_job_id,
     )
 
@@ -193,6 +198,17 @@ class _SnapshotCollector(Collector):
             "Failed imports in a row of a current season",
             labels=labels,
         )
+        primary_failures = GaugeMetricFamily(
+            f"{PREFIX}_season_primary_consecutive_failures",
+            "Primary source failures in a row of a current season (a fallback success does not "
+            "reset it)",
+            labels=labels,
+        )
+        fallback_active = GaugeMetricFamily(
+            f"{PREFIX}_season_fallback_active",
+            "1 when the last successful import of a current season came from its fallback source",
+            labels=labels,
+        )
         data_age = GaugeMetricFamily(
             f"{PREFIX}_season_data_age_seconds",
             "Seconds since the last successful import of a current season (absent if never)",
@@ -208,11 +224,14 @@ class _SnapshotCollector(Collector):
             stale.add_metric(key, 1 if is_stale(season, now) else 0)
             overdue.add_metric(key, overdue_seconds(season.next_check_at, now))
             failures.add_metric(key, season.consecutive_failures)
+            primary_failures.add_metric(key, season.primary_consecutive_failures)
+            fallback_active.add_metric(key, 1 if season.fallback_active else 0)
             if season.fetched_at is not None:
                 data_age.add_metric(key, (now - season.fetched_at).total_seconds())
             if season.next_check_at is not None:
                 next_update.add_metric(key, season.next_check_at.timestamp())
-        yield from (stale, overdue, failures, data_age, next_update)
+        yield from (stale, overdue, failures, primary_failures, fallback_active, data_age)
+        yield next_update
 
         runs = GaugeMetricFamily(
             f"{PREFIX}_scrape_runs",

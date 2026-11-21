@@ -1,9 +1,12 @@
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from app.config import load_config
-from app.models import Competition, SeasonSource
-from app.repository import ScheduledRefresh, SeasonCheckResult
-from app.scheduler import check_seasons, describe_idle
+from app.models import Competition, ScrapedMatch, SeasonSource
+from app.repository import RefreshTarget, ScheduledRefresh, SeasonCheckResult
+from app.scheduler import check_seasons, describe_idle, refresh_target
+from app.scheduling import SchedulePolicy
 from app.scraper import ProviderCapabilities, ScraperRegistry
 
 CONFIG = load_config()
@@ -15,32 +18,69 @@ NEXT_SEASON = SeasonSource(
 )
 
 
+NEXT_FALLBACK = SeasonSource(
+    season="2027-2028",
+    source_url="https://api.football-data.org/v4/competitions/PL/matches?season=2027",
+    provider="football-data",
+)
+
+
 class FakeProvider:
-    def __init__(self, name: str, discovery: bool, error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        name: str,
+        discovery: bool,
+        error: Exception | None = None,
+        discovered: SeasonSource = NEXT_SEASON,
+    ) -> None:
         self.name = name
         self.capabilities = ProviderCapabilities(
             statistics=frozenset(), season_discovery=discovery, requires_api_token=False
         )
         self.error = error
+        self.discovered = discovered
         self.calls: list[str] = []
+        self.scraped: list[SeasonSource] = []
+        self.available = True
 
     async def scrape(self, competition, source):
-        raise AssertionError("season checks must not scrape")
+        self.scraped.append(source)
+        if self.error is not None:
+            raise self.error
+        return [MATCH]
 
     async def discover_seasons(self, competition: Competition) -> list[SeasonSource]:
         self.calls.append(competition.slug)
         if self.error is not None:
             raise self.error
-        return [NEXT_SEASON]
+        return [self.discovered]
 
 
 class FakeRepository:
-    def __init__(self) -> None:
+    def __init__(self, primary_failures: int = 0) -> None:
         self.calls: list[tuple[str, list[SeasonSource], datetime]] = []
+        self.fallbacks: list[list[SeasonSource]] = []
+        self.primary_failures = primary_failures
+        self.stored: list[SeasonSource | None] = []
+        self.failed: list[SeasonSource | None] = []
 
-    async def apply_season_check(self, slug, discovered, next_check_at, policy):
+    async def apply_season_check(self, slug, discovered, next_check_at, policy, fallbacks):
         self.calls.append((slug, discovered, next_check_at))
+        self.fallbacks.append(fallbacks)
         return SeasonCheckResult()
+
+    async def replace_competition(
+        self, competition, source, matches, run_id=None, policy=None, fallback=None
+    ):
+        self.stored.append(fallback)
+
+    async def record_scrape_failure(
+        self, competition, source, error, run_id=None, policy=None, fallback=None
+    ):
+        self.failed.append(fallback)
+        if fallback is None:
+            self.primary_failures += 1
+        return self.primary_failures
 
 
 def registry(*providers: FakeProvider) -> ScraperRegistry:
@@ -97,3 +137,94 @@ def test_idle_message_names_the_next_refresh_or_what_blocks_an_overdue_one() -> 
         "and waits for scrape job 7"
     )
     assert "no current season" in describe_idle(None, NOW)
+
+
+PREMIER_LEAGUE = COMPETITIONS["premier-league"]
+SOURCE = PREMIER_LEAGUE.seasons["2026-2027"]
+FALLBACK = SOURCE.fallback()
+MATCH = ScrapedMatch(
+    competition="premier-league",
+    season="2026-2027",
+    stage="Premier League",
+    home_team="Arsenal FC",
+    away_team="Chelsea FC",
+    status="scheduled",
+    played_at=NOW,
+    source_url=SOURCE.source_url,
+)
+
+
+def target(scheduled: bool = True) -> RefreshTarget:
+    return RefreshTarget(PREMIER_LEAGUE, SOURCE, run_id=1, scheduled=scheduled)
+
+
+async def test_fallback_is_used_once_the_primary_failed_often_enough() -> None:
+    espn = FakeProvider("espn", discovery=False, error=RuntimeError("HTTP 503"))
+    football_data = FakeProvider("football-data", discovery=False)
+    repository = FakeRepository(primary_failures=1)
+    policy = SchedulePolicy(fallback_after_failures=3)
+    scraper = registry(espn, football_data)
+
+    await refresh_target(repository, scraper, target(), policy, "football-data")
+    assert (football_data.scraped, repository.failed) == ([], [None])
+
+    await refresh_target(repository, scraper, target(), policy, "football-data")
+    assert football_data.scraped == [FALLBACK]
+    assert repository.stored == [FALLBACK]
+    assert repository.primary_failures == 3
+
+
+async def test_primary_success_does_not_try_the_fallback() -> None:
+    espn = FakeProvider("espn", discovery=False)
+    football_data = FakeProvider("football-data", discovery=False)
+    repository = FakeRepository(primary_failures=5)
+
+    await refresh_target(
+        repository, registry(espn, football_data), target(), SchedulePolicy(), "football-data"
+    )
+
+    assert (espn.scraped, football_data.scraped, repository.stored) == ([SOURCE], [], [None])
+
+
+@pytest.mark.parametrize(
+    ("scheduled", "configured", "available"),
+    [(False, "football-data", True), (True, None, True), (True, "football-data", False)],
+    ids=["queued-job", "fallback-removed-from-config", "no-api-token"],
+)
+async def test_fallback_is_skipped(
+    scheduled: bool, configured: str | None, available: bool
+) -> None:
+    espn = FakeProvider("espn", discovery=False, error=RuntimeError("HTTP 503"))
+    football_data = FakeProvider("football-data", discovery=False)
+    football_data.available = available
+    repository = FakeRepository(primary_failures=10)
+
+    await refresh_target(
+        repository, registry(espn, football_data), target(scheduled), SchedulePolicy(), configured
+    )
+
+    assert (football_data.scraped, repository.stored, repository.failed) == ([], [], [None])
+
+
+async def test_failed_fallback_is_recorded_as_a_fallback_run() -> None:
+    espn = FakeProvider("espn", discovery=False, error=RuntimeError("HTTP 503"))
+    football_data = FakeProvider("football-data", discovery=False, error=RuntimeError("HTTP 429"))
+    repository = FakeRepository(primary_failures=10)
+
+    await refresh_target(
+        repository, registry(espn, football_data), target(), SchedulePolicy(), "football-data"
+    )
+
+    assert repository.failed == [None, FALLBACK]
+    assert repository.primary_failures == 11
+
+
+async def test_season_check_discovers_fallback_sources() -> None:
+    espn = FakeProvider("espn", discovery=True)
+    football_data = FakeProvider("football-data", discovery=True, discovered=NEXT_FALLBACK)
+    repository = FakeRepository()
+
+    await check_seasons(repository, registry(espn, football_data), CONFIG, PREMIER_LEAGUE)
+
+    assert repository.fallbacks == [[NEXT_FALLBACK]]
+    assert football_data.calls == ["premier-league"]

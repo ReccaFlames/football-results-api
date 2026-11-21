@@ -132,6 +132,7 @@ class ScheduleConfig(BaseModel):
     )
     season_rollover: SeasonRollover = "auto"
     season_check_interval: Duration = "1d"
+    fallback_after_failures: int = Field(default=3, ge=1)
 
     @field_validator("match_duration_minutes")
     @classmethod
@@ -187,6 +188,7 @@ class ScheduleConfig(BaseModel):
             failure_backoff=minutes(self.failure_backoff_minutes),
             season_rollover=self.season_rollover,
             season_check_interval=parse_duration(self.season_check_interval),
+            fallback_after_failures=self.fallback_after_failures,
         )
 
 
@@ -205,6 +207,7 @@ class ScheduleOverride(BaseModel):
     failure_backoff_minutes: list[int] | None = Field(default=None, min_length=1)
     season_rollover: SeasonRollover | None = None
     season_check_interval: Duration | None = None
+    fallback_after_failures: int | None = Field(default=None, ge=1)
 
 
 class ProviderConfig(BaseModel):
@@ -217,6 +220,7 @@ class SeasonConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     source_url: str
+    fallback_url: str | None = None
 
 
 class CompetitionConfig(BaseModel):
@@ -227,6 +231,8 @@ class CompetitionConfig(BaseModel):
     country: str | None = None
     format: str = Field(min_length=1, max_length=30)
     provider: str
+    # Fallback source provider; each season may set a matching fallback_url (ADR 0002).
+    fallback_provider: str | None = None
     season_format: SeasonFormat = "split"
     season_start_month: int | None = Field(default=None, ge=1, le=12)
     current_season: str | None = None
@@ -271,8 +277,12 @@ class CompetitionConfig(BaseModel):
             raise ValueError("a split season cannot start in January; use season_format: calendar")
         if self.current_season is not None and self.current_season not in self.seasons:
             raise ValueError("current_season must be a key in seasons")
-        for season in self.seasons:
+        if self.fallback_provider is not None and self.fallback_provider == self.provider:
+            raise ValueError("fallback_provider must differ from provider")
+        for season, source in self.seasons.items():
             validate_season(season, self.season_format)
+            if source.fallback_url is not None and self.fallback_provider is None:
+                raise ValueError(f"season {season} has a fallback_url but no fallback_provider")
         return self
 
     def to_competition(self) -> Competition:
@@ -289,6 +299,10 @@ class CompetitionConfig(BaseModel):
                     season=season,
                     source_url=source.source_url,
                     provider=self.provider,
+                    fallback_provider=None
+                    if source.fallback_url is None
+                    else self.fallback_provider,
+                    fallback_url=source.fallback_url,
                 )
                 for season, source in self.seasons.items()
             },
@@ -319,7 +333,16 @@ class CompetitionFile(BaseModel):
                     f"competition {competition.slug!r} references undeclared "
                     f"provider {competition.provider!r}"
                 )
+            if (
+                competition.fallback_provider is not None
+                and competition.fallback_provider not in self.providers
+            ):
+                raise ValueError(
+                    f"competition {competition.slug!r} references undeclared "
+                    f"fallback_provider {competition.fallback_provider!r}"
+                )
             codes: set[str] = set()
+            fallback_codes: set[str] = set()
             for season, source_config in competition.seasons.items():
                 source = source_from_url(season, source_config.source_url)
                 if source.provider != competition.provider:
@@ -329,11 +352,22 @@ class CompetitionFile(BaseModel):
                     )
                 if (code := provider_competition_code(source)) is not None:
                     codes.add(code)
-            if len(codes) > 1:
-                raise ValueError(
-                    f"competition {competition.slug!r} mixes provider competition codes "
-                    f"{sorted(codes)}"
-                )
+                if source_config.fallback_url is None:
+                    continue
+                fallback = source_from_url(season, source_config.fallback_url)
+                if fallback.provider != competition.fallback_provider:
+                    raise ValueError(
+                        f"competition {competition.slug!r} season {season} fallback_url uses "
+                        f"provider {fallback.provider!r}, not {competition.fallback_provider!r}"
+                    )
+                if (code := provider_competition_code(fallback)) is not None:
+                    fallback_codes.add(code)
+            for label, found in (("provider", codes), ("fallback provider", fallback_codes)):
+                if len(found) > 1:
+                    raise ValueError(
+                        f"competition {competition.slug!r} mixes {label} competition codes "
+                        f"{sorted(found)}"
+                    )
             try:
                 schedule = self.defaults.schedule.merged(competition.schedule)
             except ValidationError as error:
@@ -369,6 +403,25 @@ class CompetitionFile(BaseModel):
             for competition in self.competitions
             if competition.team_aliases
         }
+
+    def fallback_providers(self) -> dict[str, str]:
+        """Configured fallback provider per competition slug."""
+        return {
+            competition.slug: competition.fallback_provider
+            for competition in self.competitions
+            if competition.fallback_provider is not None
+        }
+
+    def fallback_warnings(self, football_data_api_token: str | None) -> list[str]:
+        """Fallback sources that cannot be used with the current settings."""
+        if football_data_api_token and football_data_api_token.strip():
+            return []
+        return [
+            f"competition {slug!r} has fallback provider 'football-data', but "
+            "FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN is not set; its fallback source is unavailable"
+            for slug, provider in self.fallback_providers().items()
+            if provider == "football-data"
+        ]
 
     def auto_rollover_slugs(self) -> frozenset[str]:
         """Competitions whose configured ``current_season`` is a floor, not an exact value."""
@@ -440,6 +493,8 @@ def cli(argv: list[str] | None = None) -> int:
         config = load_config(args.config_file)
     except (TypeError, ValueError) as error:
         parser.error(str(error))
+    for warning in config.fallback_warnings(settings.football_data_api_token):
+        print(f"warning: {warning}", file=sys.stderr)
     print(f"Configuration valid: {args.config_file} ({len(config.competitions)} competitions)")
     return 0
 

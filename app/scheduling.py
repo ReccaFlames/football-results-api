@@ -51,12 +51,16 @@ class SchedulePolicy:
     failure_backoff: tuple[timedelta, ...] = _minutes(5, 15, 30, 60)
     season_rollover: SeasonRollover = "auto"
     season_check_interval: timedelta = timedelta(days=1)
+    # Primary failures in a row after which each scheduled check also tries the fallback source.
+    fallback_after_failures: int = 3
 
     def __post_init__(self) -> None:
         if not self.result_poll or len(self.result_poll_until) != len(self.result_poll) - 1:
             raise ValueError("result_poll_until needs exactly one entry fewer than result_poll")
         if not self.failure_backoff:
             raise ValueError("failure_backoff needs at least one interval")
+        if self.fallback_after_failures < 1:
+            raise ValueError("fallback_after_failures must be at least 1")
 
     def duration_for(self, competition_format: str) -> timedelta:
         """Expected match duration; unknown formats use the longest configured duration."""
