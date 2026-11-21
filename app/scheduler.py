@@ -11,7 +11,13 @@ from app.logs import configure_logging
 from app.models import Competition, SeasonSource
 from app.repository import PostgresResultRepository, RefreshTarget, ScheduledRefresh
 from app.scheduling import SchedulePolicy
-from app.scraper import ScraperRegistry, create_scraper_registry
+from app.scraper import (
+    THESPORTSDB_MIN_REQUEST_INTERVAL_SECONDS,
+    THESPORTSDB_WINDOW_DAYS_AHEAD,
+    THESPORTSDB_WINDOW_DAYS_BACK,
+    ScraperRegistry,
+    create_scraper_registry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +26,12 @@ def _create_scraper(config: CompetitionFile) -> ScraperRegistry:
     ninety_minut = config.providers.get("90minut")
     football_data = config.providers.get("football-data")
     espn = config.providers.get("espn")
+    thesportsdb = config.providers.get("thesportsdb")
+    window_days_back, window_days_ahead = (
+        (THESPORTSDB_WINDOW_DAYS_BACK, THESPORTSDB_WINDOW_DAYS_AHEAD)
+        if thesportsdb is None
+        else thesportsdb.window()
+    )
     return create_scraper_registry(
         settings.request_timeout_seconds,
         settings.user_agent,
@@ -35,6 +47,16 @@ def _create_scraper(config: CompetitionFile) -> ScraperRegistry:
         if settings.espn_min_request_interval_seconds is not None
         else (2.0 if espn is None else espn.min_request_interval_seconds),
         config.team_aliases(),
+        thesportsdb_api_key=settings.thesportsdb_api_key.get_secret_value(),
+        thesportsdb_min_interval_seconds=settings.thesportsdb_min_request_interval_seconds
+        if settings.thesportsdb_min_request_interval_seconds is not None
+        else (
+            THESPORTSDB_MIN_REQUEST_INTERVAL_SECONDS
+            if thesportsdb is None
+            else thesportsdb.min_request_interval_seconds
+        ),
+        thesportsdb_window_days_back=window_days_back,
+        thesportsdb_window_days_ahead=window_days_ahead,
     )
 
 

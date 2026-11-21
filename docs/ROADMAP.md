@@ -254,7 +254,27 @@ How to use this list:
           `season_fallback_active`, `season_primary_consecutive_failures`; 24 h Grafana warning
     - [x] Season check discovers missing fallback URLs
     - [x] Docs (README, `PROVIDERS.md`, ADR 0002, glossary); version 0.18.0
-  - [ ] 17c. More primary providers
+  - [ ] 17c. Fallback source for the 90minut competitions
+        ([ADR 0003](adr/0003-thesportsdb-windowed-fallback-for-polish-competitions.md))
+    - [x] 17c.0 ESPN (`uefa.europa`) as the Europa League fallback: `fallback_provider`,
+          `fallback_url` for 2026-2027, `team_aliases` for the 2026-27 league-phase teams only
+    - [x] `thesportsdb` provider: documented `eventsday.php?d=<date>&l=<league>` over a window
+          (`providers.thesportsdb.window_days_back`/`window_days_ahead`, default 7/14); status
+          mapping (finished, scheduled, postponed/cancelled → `inactive`, live → `scheduled`);
+          throttled within the 30 requests/minute free limit
+    - [x] Windowed source capability; `config check` rejects a windowed provider as `provider`
+    - [x] Free key `123` by default, optional `FOOTBALL_RESULTS_THESPORTSDB_API_KEY`; key-free
+          source URL allow-list `https://www.thesportsdb.com/league/<id>?season=<YYYY-YYYY>`
+    - [x] `discover_seasons` via `search_all_seasons.php?id=<league>` (fills missing fallback URLs)
+    - [ ] Fallback refreshes (all providers, ADR 0002 amendment): skip matches with teams unknown
+          in the season and log a warning; an empty windowed result is a success with no changes;
+          next check from stored matches after the merge
+    - [ ] Migration: `scrape_run.matches_skipped`, shown in the admin endpoints
+    - [ ] Ekstraklasa (4422) and I liga (4661): `fallback_provider: thesportsdb`, `fallback_url`
+          for 2026-2027, `team_aliases` for all teams
+    - [ ] Docs (README, `PROVIDERS.md`, ADR 0003, glossary); version 0.19.0
+  - [ ] 17d. More primary providers, each tied to a named competition that no current provider
+        covers
 - [ ] **18. Optional hosted access**
   - [ ] OAuth for remote MCP
   - [ ] Per-key quotas

@@ -13,6 +13,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SecretStr,
     ValidationError,
     field_validator,
     model_validator,
@@ -26,6 +27,12 @@ from app.scheduling import (
     SchedulePolicy,
     SeasonRollover,
     parse_duration,
+)
+from app.scraper import (
+    PROVIDER_CAPABILITIES,
+    THESPORTSDB_FREE_API_KEY,
+    THESPORTSDB_WINDOW_DAYS_AHEAD,
+    THESPORTSDB_WINDOW_DAYS_BACK,
 )
 from app.seasons import SeasonFormat, default_start_month, validate_season
 
@@ -57,6 +64,9 @@ class Settings(BaseSettings):
     ninety_minut_min_request_interval_seconds: float | None = Field(default=None, ge=0)
     ninety_minut_detail_cache_max_entries: int = Field(default=512, ge=0)
     espn_min_request_interval_seconds: float | None = Field(default=None, ge=0)
+    # TheSportsDB's free public key; a premium key overrides it. Never logged or stored.
+    thesportsdb_api_key: SecretStr = SecretStr(THESPORTSDB_FREE_API_KEY)
+    thesportsdb_min_request_interval_seconds: float | None = Field(default=None, ge=0)
     rate_limit_enabled: bool = True
     rate_limit_read_per_minute: int = Field(default=120, ge=1)
     rate_limit_write_per_minute: int = Field(default=10, ge=1)
@@ -214,6 +224,19 @@ class ProviderConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     min_request_interval_seconds: float = Field(ge=0)
+    # Only for windowed providers (ADR 0003): days before and after today that are fetched.
+    window_days_back: int | None = Field(default=None, ge=0)
+    window_days_ahead: int | None = Field(default=None, ge=0)
+
+    def window(self) -> tuple[int, int]:
+        return (
+            THESPORTSDB_WINDOW_DAYS_BACK
+            if self.window_days_back is None
+            else self.window_days_back,
+            THESPORTSDB_WINDOW_DAYS_AHEAD
+            if self.window_days_ahead is None
+            else self.window_days_ahead,
+        )
 
 
 class SeasonConfig(BaseModel):
@@ -327,7 +350,22 @@ class CompetitionFile(BaseModel):
         slugs = [competition.slug for competition in self.competitions]
         if len(slugs) != len(set(slugs)):
             raise ValueError("competition slugs must be unique")
+        for name, provider_config in self.providers.items():
+            capabilities = PROVIDER_CAPABILITIES.get(name)
+            has_window = (
+                provider_config.window_days_back is not None
+                or provider_config.window_days_ahead is not None
+            )
+            if has_window and (capabilities is None or not capabilities.windowed):
+                raise ValueError(f"provider {name!r} is not windowed; remove its window_days_*")
         for competition in self.competitions:
+            capabilities = PROVIDER_CAPABILITIES.get(competition.provider)
+            if capabilities is not None and capabilities.windowed:
+                raise ValueError(
+                    f"competition {competition.slug!r} uses windowed provider "
+                    f"{competition.provider!r} as provider; a windowed source supplies only the "
+                    "matches around today, so it may only be a fallback_provider"
+                )
             if competition.provider not in self.providers:
                 raise ValueError(
                     f"competition {competition.slug!r} references undeclared "

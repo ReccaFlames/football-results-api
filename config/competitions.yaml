@@ -27,6 +27,11 @@ providers:
     min_request_interval_seconds: 6
   espn:
     min_request_interval_seconds: 2
+  # Windowed source (ADR 0003): fallback_provider only. Free plan: 30 requests per minute.
+  thesportsdb:
+    min_request_interval_seconds: 3
+    window_days_back: 7
+    window_days_ahead: 14
 
 competitions:
   - slug: ekstraklasa
@@ -57,12 +62,51 @@ competitions:
     name: UEFA Europa League
     format: cup
     provider: 90minut
+    # ESPN fills in fixtures, status, kickoff times, and scores while 90minut fails.
+    # See docs/adr/0002-fallback-source-refreshes.md.
+    fallback_provider: espn
     current_season: 2026-2027
     seasons:
       "2025-2026":
         source_url: http://www.90minut.pl/liga/1/liga14078.html
       "2026-2027":
         source_url: http://www.90minut.pl/liga/1/liga14681.html
+        fallback_url: https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.europa/scoreboard?season=2026
+    # ESPN team name -> the 90minut team name, for the 2026-27 league-phase teams. Teams whose
+    # names are equal (AC Milan, AFC Bournemouth, NK Celje, SK Sturm Graz) need no alias.
+    team_aliases:
+      AZ Alkmaar: AZ (Alkmaar)
+      Anderlecht: RSC Anderlecht
+      Ararat-Armenia: Ararat-Armenia Erewan
+      Bayer Leverkusen: TSV Bayer 04 Leverkusen
+      Benfica: SL e Benfica
+      Besiktas: Beşiktaş JK
+      Celta Vigo: RC Celta de Vigo
+      Celtic: Celtic FC
+      Crystal Palace: Crystal Palace FC
+      Dinamo Zagreb: GNK Dinamo (Zagrzeb)
+      Ferencvaros: Ferencvárosi TC
+      "Hapoel Be'er": Hapoel Beer Szewa
+      Jagiellonia Bialystok: Jagiellonia Białystok
+      Juventus: Juventus FC
+      Lech Poznan: Lech Poznań
+      Levski Sofia: Lewski Sofia
+      Lillestrom: Lillestrøm SK
+      Lyon: Olympique Lyonnais
+      Marseille: Olympique de Marseille
+      NEC Nijmegen: NEC (Nijmegen)
+      OFI Crete: OFI
+      Olympiacos: Olympiakós SFP (Pireus)
+      Omonia Nicosia: AS Omónia Lefkossías
+      RB Salzburg: FC Salzburg
+      Real Sociedad: Real Sociedad de Fútbol
+      Sparta Prague: AC Sparta Praga
+      Stade Rennais: Stade Rennais FC
+      Sunderland: Sunderland AFC
+      TSG Hoffenheim: TSG 1899 Hoffenheim
+      Torreense: SCU Torreense
+      Union St.-Gilloise: Royale Union Saint-Gilloise
+      Viktoria Plzen: FC Viktoria Plzeň
 
   # ESPN's undocumented scoreboard API (personal, non-commercial use); see
   # docs/adr/0001-espn-primary-source-for-premier-league.md.

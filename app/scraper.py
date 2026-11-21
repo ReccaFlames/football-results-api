@@ -3,8 +3,9 @@ import logging
 import re
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Literal, Protocol
 from zoneinfo import ZoneInfo
 
@@ -13,9 +14,11 @@ from bs4 import BeautifulSoup
 
 from app.competitions import (
     ESPN_HOST,
+    THESPORTSDB_HOST,
     espn_source_url,
     football_data_source_url,
     provider_competition_code,
+    thesportsdb_source_url,
 )
 from app.models import (
     Competition,
@@ -23,7 +26,7 @@ from app.models import (
     ScrapedMatch,
     SeasonSource,
 )
-from app.seasons import season_year_for_month, season_years
+from app.seasons import season_year_for_month, season_years, validate_season
 
 logger = logging.getLogger(__name__)
 
@@ -87,13 +90,15 @@ class ProviderCapabilities:
     """What a provider can supply; see docs/PROVIDERS.md.
 
     ``statistics`` lists the optional ScrapedMatch statistic fields the provider may fill.
-    Every other statistic must stay ``None``.
+    Every other statistic must stay ``None``. A ``windowed`` provider returns only the matches
+    around today, not a whole season, so it may only be a fallback source (ADR 0003).
     """
 
     statistics: frozenset[str]
     season_discovery: bool
     scheduled_fixtures: bool = True
     requires_api_token: bool = False
+    windowed: bool = False
 
     def __post_init__(self) -> None:
         unknown = self.statistics - MATCH_STATISTICS
@@ -999,6 +1004,309 @@ class EspnScraper:
         ]
 
 
+THESPORTSDB_API = f"https://{THESPORTSDB_HOST}/api/v1/json"
+THESPORTSDB_FREE_API_KEY = "123"
+THESPORTSDB_WINDOW_DAYS_BACK = 7
+THESPORTSDB_WINDOW_DAYS_AHEAD = 14
+# Free plan: 30 requests per minute; 3 s keeps a margin for other clients on the same IP.
+THESPORTSDB_MIN_REQUEST_INTERVAL_SECONDS = 3.0
+# Soccer event status codes from https://www.thesportsdb.com/docs_api_data.
+THESPORTSDB_FINISHED_STATUSES = frozenset({"FT", "AET", "PEN", "AWD", "WO"})
+THESPORTSDB_SCHEDULED_STATUSES = frozenset({"TBD", "NS"})
+THESPORTSDB_LIVE_STATUSES = frozenset({"1H", "HT", "2H", "ET", "P", "BT", "INT"})
+THESPORTSDB_INACTIVE_STATUSES = frozenset({"PST", "CANC", "ABD", "SUSP"})
+# Special intRound values from https://www.thesportsdb.com/docs_api_data.
+THESPORTSDB_SPECIAL_ROUNDS = {
+    125: "Quarter-Final",
+    150: "Semi-Final",
+    160: "Playoff",
+    170: "Playoff Semi-Final",
+    180: "Playoff Final",
+    200: "Final",
+    400: "Qualifier",
+    500: "Pre-Season",
+}
+
+
+THESPORTSDB_KEY_RE = re.compile(re.escape(THESPORTSDB_API) + r"/[^/?#\s]+/")
+
+
+class _RedactTheSportsDbKey(logging.Filter):
+    """Hide the API key in httpx's request log lines (the key is part of the URL path)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        if THESPORTSDB_API in message:
+            record.msg = THESPORTSDB_KEY_RE.sub(f"{THESPORTSDB_API}/***/", message)
+            record.args = ()
+        return True
+
+
+logging.getLogger("httpx").addFilter(_RedactTheSportsDbKey())
+
+
+def thesportsdb_window(today: date, days_back: int, days_ahead: int) -> list[date]:
+    """Every day from ``days_back`` days before ``today`` to ``days_ahead`` days after it."""
+    if days_back < 0 or days_ahead < 0:
+        raise ValueError("TheSportsDB window days must not be negative")
+    return [today + timedelta(days=offset) for offset in range(-days_back, days_ahead + 1)]
+
+
+def _thesportsdb_status(event: dict[object, object], has_score: bool) -> str:
+    raw_status = event.get("strStatus")
+    status = raw_status.strip().upper() if isinstance(raw_status, str) else ""
+    if status in THESPORTSDB_FINISHED_STATUSES:
+        # A finished match without its score yet is still waiting for a result.
+        return "finished" if has_score else "scheduled"
+    postponed = event.get("strPostponed")
+    if status in THESPORTSDB_INACTIVE_STATUSES or (
+        isinstance(postponed, str) and postponed.strip().lower() == "yes"
+    ):
+        return "inactive"
+    if status in THESPORTSDB_SCHEDULED_STATUSES or status in THESPORTSDB_LIVE_STATUSES:
+        return "scheduled"
+    # Inactive is never polled aggressively, so it is the safe choice for an unknown status.
+    logger.warning(
+        "unknown TheSportsDB status %r for event %s; treating it as inactive",
+        raw_status,
+        event.get("idEvent"),
+    )
+    return "inactive"
+
+
+def _thesportsdb_score(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value if value >= 0 else None
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
+def _thesportsdb_kickoff(event: dict[object, object]) -> datetime | None:
+    """Kickoff from ``strTimestamp`` (UTC), else from ``dateEvent`` and ``strTime``."""
+    raw = event.get("strTimestamp")
+    if not isinstance(raw, str) or not raw.strip():
+        day, time_of_day = event.get("dateEvent"), event.get("strTime")
+        if not isinstance(day, str) or not day:
+            return None
+        raw = f"{day}T{time_of_day if isinstance(time_of_day, str) and time_of_day else '00:00'}"
+    try:
+        kickoff = datetime.fromisoformat(raw.strip())
+    except ValueError:
+        return None
+    return kickoff.replace(tzinfo=UTC) if kickoff.tzinfo is None else kickoff
+
+
+def _thesportsdb_round(
+    event: dict[object, object], competition: Competition
+) -> tuple[str, int | None]:
+    raw_round = event.get("intRound")
+    number = _thesportsdb_score(raw_round)
+    if number in THESPORTSDB_SPECIAL_ROUNDS:
+        return THESPORTSDB_SPECIAL_ROUNDS[number], None
+    return competition.name, number if number is not None and 0 < number < 100 else None
+
+
+def parse_thesportsdb_events(
+    payloads: list[dict[str, object]],
+    competition: Competition,
+    source: SeasonSource,
+) -> list[ScrapedMatch]:
+    """Map ``eventsday.php`` responses (one per day) to the fixtures of one season.
+
+    ``"events": null`` is a day without events. Events of other seasons or leagues are dropped,
+    and an event listed on several days is returned once.
+    """
+    league = provider_competition_code(source)
+    matches: dict[str, ScrapedMatch] = {}
+    for payload in payloads:
+        if not isinstance(payload, dict) or "events" not in payload:
+            raise TypeError("TheSportsDB response does not contain events")
+        events = payload["events"]
+        if events is None:
+            continue
+        if not isinstance(events, list):
+            raise TypeError("TheSportsDB events is not a list")
+        for event in events:
+            match = _parse_thesportsdb_event(event, competition, source, league)
+            if match is not None and match.provider_match_id is not None:
+                matches[match.provider_match_id] = match
+    return sorted(matches.values(), key=lambda item: (item.played_at, item.provider_match_id))
+
+
+def _parse_thesportsdb_event(
+    event: object, competition: Competition, source: SeasonSource, league: str | None
+) -> ScrapedMatch | None:
+    if not isinstance(event, dict) or event.get("strSeason") != source.season:
+        return None
+    if league is not None and str(event.get("idLeague")) != league:
+        return None
+    event_id = event.get("idEvent")
+    home_team, away_team = event.get("strHomeTeam"), event.get("strAwayTeam")
+    kickoff = _thesportsdb_kickoff(event)
+    if (
+        not isinstance(event_id, str)
+        or not event_id.isdigit()
+        or not isinstance(home_team, str)
+        or not home_team.strip()
+        or not isinstance(away_team, str)
+        or not away_team.strip()
+        or kickoff is None
+    ):
+        logger.warning("skipping incomplete TheSportsDB event %r", event_id)
+        return None
+    home_score = _thesportsdb_score(event.get("intHomeScore"))
+    away_score = _thesportsdb_score(event.get("intAwayScore"))
+    status = _thesportsdb_status(event, home_score is not None and away_score is not None)
+    finished = status == "finished"
+    stage, round_number = _thesportsdb_round(event, competition)
+    return ScrapedMatch(
+        competition=competition.slug,
+        season=source.season,
+        stage=stage,
+        round=round_number,
+        home_team=home_team.strip(),
+        away_team=away_team.strip(),
+        status=status,
+        home_score=home_score if finished else None,
+        away_score=away_score if finished else None,
+        home_goals=home_score if finished else None,
+        away_goals=away_score if finished else None,
+        played_at=kickoff,
+        source_url=f"https://{THESPORTSDB_HOST}/event/{event_id}",
+        provider_match_id=event_id,
+    )
+
+
+def parse_thesportsdb_seasons(
+    payload: dict[str, object], competition: Competition, league: str
+) -> list[SeasonSource]:
+    """Map a ``search_all_seasons.php`` response to season sources in the competition's format."""
+    raw_seasons = payload.get("seasons") if isinstance(payload, dict) else None
+    if raw_seasons is None:
+        return []
+    if not isinstance(raw_seasons, list):
+        raise TypeError("TheSportsDB response does not contain a seasons list")
+    sources: dict[str, SeasonSource] = {}
+    for item in raw_seasons:
+        season = item.get("strSeason") if isinstance(item, dict) else None
+        if not isinstance(season, str):
+            continue
+        try:
+            validate_season(season, competition.season_format)
+        except ValueError:
+            continue
+        sources[season] = SeasonSource(
+            season=season,
+            source_url=thesportsdb_source_url(league, season),
+            provider="thesportsdb",
+        )
+    return [sources[season] for season in sorted(sources, reverse=True)]
+
+
+class TheSportsDbScraper:
+    """TheSportsDB's documented v1 API as a windowed fallback source (see docs/adr/0003).
+
+    The API key is part of every request path, so it is never stored in a source URL or logged.
+    """
+
+    name = "thesportsdb"
+    capabilities = ProviderCapabilities(
+        statistics=frozenset({"home_goals", "away_goals"}),
+        season_discovery=True,
+        windowed=True,
+    )
+
+    def __init__(
+        self,
+        timeout: float,
+        user_agent: str,
+        api_key: str = THESPORTSDB_FREE_API_KEY,
+        min_interval_seconds: float = THESPORTSDB_MIN_REQUEST_INTERVAL_SECONDS,
+        window_days_back: int = THESPORTSDB_WINDOW_DAYS_BACK,
+        window_days_ahead: int = THESPORTSDB_WINDOW_DAYS_AHEAD,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        if window_days_back < 0 or window_days_ahead < 0:
+            raise ValueError("TheSportsDB window days must not be negative")
+        self.timeout = timeout
+        self.user_agent = user_agent
+        self._api_key = api_key.strip() or THESPORTSDB_FREE_API_KEY
+        self.min_interval_seconds = min_interval_seconds
+        self.window_days_back = window_days_back
+        self.window_days_ahead = window_days_ahead
+        self.clock = clock
+        self._transport = transport
+        self._lock = asyncio.Lock()
+        self._last_request_at = 0.0
+
+    def window(self) -> list[date]:
+        return thesportsdb_window(
+            self.clock().astimezone(UTC).date(), self.window_days_back, self.window_days_ahead
+        )
+
+    def _url(self, endpoint: str) -> str:
+        return f"{THESPORTSDB_API}/{self._api_key}/{endpoint}"
+
+    async def _get_json(self, endpoint: str, params: dict[str, str]) -> dict[str, object]:
+        async with self._lock:
+            delay = self.min_interval_seconds - (time.monotonic() - self._last_request_at)
+            if delay > 0:
+                await asyncio.sleep(delay)
+            try:
+                async with httpx.AsyncClient(
+                    timeout=self.timeout,
+                    headers={"User-Agent": self.user_agent},
+                    follow_redirects=False,
+                    transport=self._transport,
+                ) as client:
+                    response = await client.get(self._url(endpoint), params=params)
+                response.raise_for_status()
+            except httpx.HTTPStatusError as error:
+                # The default message contains the URL, and with it the API key.
+                raise RuntimeError(
+                    f"TheSportsDB {endpoint} returned HTTP {error.response.status_code}"
+                ) from None
+            except httpx.HTTPError as error:
+                raise RuntimeError(
+                    f"TheSportsDB {endpoint} request failed: {type(error).__name__}"
+                ) from None
+            finally:
+                self._last_request_at = time.monotonic()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise TypeError("TheSportsDB response is not a JSON object")
+        return payload
+
+    def _league(self, source: SeasonSource) -> str:
+        league = provider_competition_code(source)
+        if source.provider != self.name or league is None:
+            raise ValueError(f"not a TheSportsDB source: {source.source_url}")
+        return league
+
+    async def scrape(self, competition: Competition, source: SeasonSource) -> list[ScrapedMatch]:
+        league = self._league(source)
+        payloads = [
+            await self._get_json("eventsday.php", {"d": day.isoformat(), "l": league})
+            for day in self.window()
+        ]
+        return parse_thesportsdb_events(payloads, competition, source)
+
+    async def discover_seasons(self, competition: Competition) -> list[SeasonSource]:
+        leagues = {
+            league
+            for source in competition.seasons.values()
+            if source.provider == self.name
+            and (league := provider_competition_code(source)) is not None
+        }
+        if len(leagues) != 1:
+            raise ValueError(f"cannot determine the TheSportsDB league for {competition.slug}")
+        league = leagues.pop()
+        payload = await self._get_json("search_all_seasons.php", {"id": league})
+        return parse_thesportsdb_seasons(payload, competition, league)
+
+
 class ScraperRegistry:
     def __init__(
         self,
@@ -1054,6 +1362,10 @@ def create_scraper_registry(
     ninety_minut_detail_cache_max_entries: int = 512,
     espn_min_interval_seconds: float = 2.0,
     team_aliases: dict[str, dict[str, str]] | None = None,
+    thesportsdb_api_key: str = THESPORTSDB_FREE_API_KEY,
+    thesportsdb_min_interval_seconds: float = THESPORTSDB_MIN_REQUEST_INTERVAL_SECONDS,
+    thesportsdb_window_days_back: int = THESPORTSDB_WINDOW_DAYS_BACK,
+    thesportsdb_window_days_ahead: int = THESPORTSDB_WINDOW_DAYS_AHEAD,
 ) -> ScraperRegistry:
     providers: list[CompetitionScraper] = [
         NinetyMinutScraper(
@@ -1069,5 +1381,19 @@ def create_scraper_registry(
             football_data_min_interval_seconds,
         ),
         EspnScraper(timeout, user_agent, espn_min_interval_seconds),
+        TheSportsDbScraper(
+            timeout,
+            user_agent,
+            thesportsdb_api_key,
+            thesportsdb_min_interval_seconds,
+            thesportsdb_window_days_back,
+            thesportsdb_window_days_ahead,
+        ),
     ]
     return ScraperRegistry({provider.name: provider for provider in providers}, team_aliases)
+
+
+PROVIDER_CAPABILITIES: dict[str, ProviderCapabilities] = {
+    scraper.name: scraper.capabilities
+    for scraper in (NinetyMinutScraper, FootballDataScraper, EspnScraper, TheSportsDbScraper)
+}

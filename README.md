@@ -16,7 +16,7 @@ league-data API**. This README describes both:
 | Capability | Current state | Target state |
 | --- | --- | --- |
 | Competitions | 4 declared in `config/competitions.yaml`: Ekstraklasa, I liga, Europa League, Premier League | Any league/cup, declared in a config file or through an admin API |
-| Data providers | `90minut` (HTML scraping), `football-data` (JSON API, any competition code), and `espn` (public scoreboard JSON, Premier League) behind a [documented provider contract](docs/PROVIDERS.md) | More sources and fallback providers |
+| Data providers | `90minut` (HTML scraping), `football-data` (JSON API, any competition code), and `espn` (public scoreboard JSON, Premier League; Europa League fallback) behind a [documented provider contract](docs/PROVIDERS.md) | More sources and fallback providers |
 | Adding a competition/season | Edit `config/competitions.yaml`; the scheduler applies changes | Edit configuration (no code), hot-reloaded |
 | Seasons | Split (`2026-2027`) or calendar-year (`2026`) per competition, with a configurable start month | Same |
 | Season rollover | Automatic: providers with discovery (football-data, espn) add new seasons; the scheduler switches `current_season` once the new season has started and the old one is finished. 90minut sources are added to YAML by hand | Same, with more discovering providers |
@@ -70,7 +70,7 @@ scheduler_heartbeat, and alembic_version.
 | --- | --- | --- | --- | --- |
 | `ekstraklasa` | PKO BP Ekstraklasa | 90minut | 2025-2026, 2026-2027 | 2026-2027 |
 | `pierwsza-liga` | Betclic I liga | 90minut | 2025-2026, 2026-2027 | 2026-2027 |
-| `europa-league` | UEFA Europa League (cup) | 90minut | 2025-2026, 2026-2027 | 2026-2027 |
+| `europa-league` | UEFA Europa League (cup) | 90minut (fallback: espn) | 2025-2026, 2026-2027 | 2026-2027 |
 | `premier-league` | Premier League | espn (fallback: football-data) | 2024-2025 – 2026-2027 | 2026-2027 |
 
 ### Known limitations
@@ -203,7 +203,9 @@ come from `defaults.schedule` in `config/competitions.yaml` and can be overridde
 
 A competition can name a `fallback_provider` and give seasons a `fallback_url` (see
 [ADR 0002](docs/adr/0002-fallback-source-refreshes.md)). The Premier League uses ESPN as its
-primary source and football-data.org as its fallback. A **primary failure** is an error from the
+primary source and football-data.org as its fallback; the Europa League uses 90minut.pl as its
+primary and ESPN as its fallback for 2026-2027, with `team_aliases` mapping ESPN's team names to
+90minut's. A **primary failure** is an error from the
 primary source, or an empty result for a season that already has matches (an empty result never
 deletes stored matches). After `fallback_after_failures` primary failures in a row (default 3),
 each scheduled check tries the primary first and, if it fails again, refreshes from the fallback in

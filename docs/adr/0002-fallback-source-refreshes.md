@@ -12,6 +12,14 @@ A fallback refresh is a merge, not a reconciliation. It overwrites fixture field
 status, full-time and half-time score), keeps stored statistics where it has none, may add matches
 but never deletes them, and never writes provider match IDs or per-match source URLs.
 
+**Amendment (roadmap 17c):** a fallback refresh skips a match whose home or away team, after
+`team_aliases`, is not already a team of that season. It logs a warning and counts the match in
+`scrape_run.matches_skipped`. A missing alias (for example for a newly promoted team) would
+otherwise create a duplicate team and a duplicate match that only a primary refresh could remove.
+A fallback refresh also calculates the next check from the season's stored matches after the merge,
+so a windowed source ([ADR 0003](0003-thesportsdb-windowed-fallback-for-polish-competitions.md))
+does not make the scheduler idle.
+
 ## Considered options
 
 - **Sticky switch** (the season moves to the fallback until a person or a probe switches it back):
