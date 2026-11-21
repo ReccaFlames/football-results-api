@@ -7,12 +7,12 @@ from datetime import UTC, datetime, timedelta
 
 from app.config import CompetitionFile, ConfigFileWatcher, settings
 from app.database import session_factory
+from app.logs import configure_logging
 from app.models import Competition, SeasonSource
 from app.repository import PostgresResultRepository, ScheduledRefresh
 from app.scheduling import SchedulePolicy
 from app.scraper import ScraperRegistry, create_scraper_registry
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 
@@ -233,4 +233,5 @@ async def run() -> None:
 
 
 if __name__ == "__main__":
+    configure_logging(settings.log_format)
     asyncio.run(run())

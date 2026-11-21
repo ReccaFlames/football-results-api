@@ -29,6 +29,8 @@ OPERATIONS: dict[str, str] = {
     "refresh": "request_refresh",
     "fetch-season": "fetch_historical_season",
     "status": "get_job",
+    "scrape-runs": "list_scrape_runs",
+    "scheduler": "get_scheduler_status",
 }
 
 # Options that only steer the CLI and are never sent to the API, per command.
@@ -42,6 +44,8 @@ CLI_ONLY_OPTIONS: dict[str, frozenset[str]] = {
     "refresh": _WAIT_OPTIONS,
     "fetch-season": _WAIT_OPTIONS,
     "status": _WAIT_OPTIONS,
+    "scrape-runs": frozenset({"json_output", "all_pages", "max_items"}),
+    "scheduler": frozenset({"json_output"}),
 }
 
 # Item fields for commands whose `--fields` is applied by the CLI (the API has no `fields=`).
@@ -164,8 +168,8 @@ def root(
             envvar="FOOTBALL_RESULTS_API_KEY",
             show_envvar=True,
             help=(
-                "API key for refresh, fetch-season, and status; sent only to the API URL, never "
-                "printed. Prefer the environment variable over the option."
+                "API key for refresh, fetch-season, status, scrape-runs, and scheduler; sent only "
+                "to the API URL, never printed. Prefer the environment variable over the option."
             ),
             show_default=False,
         ),
@@ -305,14 +309,20 @@ def _project(items: list[dict[str, Any]], key: str, fields: list[str] | None) ->
 
 
 def _fetch_list(
-    api: http.ApiClient, path: str, params: dict[str, Any], *, all_pages: bool, max_items: int
+    api: http.ApiClient,
+    path: str,
+    params: dict[str, Any],
+    *,
+    all_pages: bool,
+    max_items: int,
+    auth: bool = False,
 ) -> dict[str, Any]:
     if not all_pages:
-        return api.get(path, params).body
+        return api.get(path, params, auth=auth).body
     limit = params.get("limit") or 200
     data: list[Any] = []
     while True:
-        page = api.get(path, {**params, "limit": min(limit, max_items - len(data))}).body
+        page = api.get(path, {**params, "limit": min(limit, max_items - len(data))}, auth=auth).body
         data.extend(page["data"])
         cursor = page["pagination"]["next_cursor"]
         if not cursor or len(data) >= max_items:
@@ -749,6 +759,85 @@ def status(
     else:
         body = api.get(f"/api/v1/jobs/{job_id}", auth=True).body
     _print_record(body, json_output=json_output, title="Job")
+
+
+@app.command(
+    "scrape-runs",
+    epilog=(
+        "Examples:\n\n\b\n"
+        "  football-results scrape-runs --status failed --limit 10\n"
+        "  football-results scrape-runs -c ekstraklasa --all --max-items 500 --json"
+    ),
+)
+def scrape_runs(
+    ctx: typer.Context,
+    competition: CompetitionFilter = None,
+    season: SeasonOption = None,
+    status: Annotated[
+        str | None,
+        typer.Option(
+            "--status",
+            help=(
+                "Comma-separated job statuses: queued, running, completed, failed, cancelled "
+                "[default: all]"
+            ),
+            show_default=False,
+        ),
+    ] = None,
+    limit: LimitOption = None,
+    cursor: CursorOption = None,
+    all_pages: AllOption = False,
+    max_items: MaxItemsOption = 1000,
+    json_output: JsonOption = False,
+) -> None:
+    """List recent import jobs, newest first; needs an API key (list_scrape_runs).
+
+    Use to find out why data is stale: failed jobs carry the error message.
+    """
+    params = {
+        "competition": competition,
+        "season": season,
+        "status": status,
+        "limit": limit,
+        "cursor": cursor,
+    }
+    body = _fetch_list(
+        _api(ctx),
+        "/api/v1/admin/scrape-runs",
+        params,
+        all_pages=all_pages,
+        max_items=max_items,
+        auth=True,
+    )
+    if output.use_json(json_output):
+        output.print_json(body)
+        return
+    output.print_table(body["data"], output.SCRAPE_RUN_COLUMNS, title="Import jobs")
+    output.print_footer(body)
+
+
+@app.command(
+    epilog=(
+        "Examples:\n\n\b\n"
+        "  football-results scheduler\n"
+        "  football-results scheduler --json | jq '.seasons[] | select(.stale)'"
+    ),
+)
+def scheduler(ctx: typer.Context, json_output: JsonOption = False) -> None:
+    """Show the scheduler and the refresh state of current seasons; needs an API key
+    (get_scheduler_status).
+
+    The status is 'stalled' when no worker heartbeat is recent; a season is stale when it was
+    never fetched or its update is more than the grace period overdue.
+    """
+    body = _api(ctx).get("/api/v1/admin/scheduler", auth=True).body
+    if output.use_json(json_output):
+        output.print_json(body)
+        return
+    summary = {key: value for key, value in body.items() if key not in ("workers", "seasons")}
+    output.print_record(summary, title="Scheduler")
+    output.print_table(body.get("seasons") or [], output.SEASON_SCHEDULE_COLUMNS, title="Seasons")
+    output.print_table(body.get("workers") or [], output.WORKER_COLUMNS, title="Workers")
 
 
 command = typer.main.get_command(app)

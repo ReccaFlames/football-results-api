@@ -3,7 +3,7 @@
   "name": "io.github.OWNER/football-results",
   "title": "Football Results",
   "description": "Football fixtures, results, league tables, and team form, with data freshness.",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "remotes": [
     {
       "type": "streamable-http",

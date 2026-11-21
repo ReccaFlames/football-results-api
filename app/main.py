@@ -3,7 +3,7 @@ import secrets
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from functools import lru_cache
 from importlib.metadata import version
 from typing import Annotated, Literal
@@ -11,9 +11,11 @@ from typing import Annotated, Literal
 from fastapi import Depends, FastAPI, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
+from prometheus_client import CONTENT_TYPE_LATEST
 from sqlalchemy.exc import SQLAlchemyError
+from starlette.routing import Match as RouteMatch
 
-from app import agent_docs
+from app import agent_docs, observability
 from app import api_docs as docs
 from app.caching import (
     CACHEABLE_OPERATIONS,
@@ -31,13 +33,16 @@ from app.contract import (
     compact,
     encode_cursor,
     filter_hash,
+    id_keyset,
     match_keyset,
     parse_date_bound,
     parse_fields,
+    parse_job_statuses,
     parse_statuses,
     slug_keyset,
 )
 from app.database import session_factory
+from app.logs import configure_logging
 from app.mcp_server import (
     CLIENT_SCOPE_KEY,
     INTERNAL_SCOPE_KEY,
@@ -48,6 +53,7 @@ from app.mcp_server import (
 )
 from app.models import (
     PROBLEM_TYPES,
+    SCRAPE_RUN_STATUSES,
     Competition,
     CompetitionSummary,
     Freshness,
@@ -60,7 +66,9 @@ from app.models import (
     Pagination,
     RefreshRequest,
     ResultsResponse,
+    SchedulerStatus,
     ScrapeJobStatus,
+    ScrapeRunsResponse,
     StandingRow,
     StandingsResponse,
     TeamsResponse,
@@ -79,6 +87,7 @@ from app.seasons import SEASON_PATTERN, validate_season
 from app.standings import compute_standings
 
 logger = logging.getLogger(__name__)
+SCHEDULER_WORKERS_SHOWN = 10
 store = PostgresResultRepository(session_factory)
 rate_limiter = FixedWindowRateLimiter()
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -109,6 +118,27 @@ async def require_api_key(api_key: str | None = Depends(api_key_header)) -> None
             "Invalid or missing API key",
             headers={"WWW-Authenticate": "ApiKey"},
             hint="Send a configured API key in the X-API-Key header.",
+        )
+
+
+def require_metrics_key(request: Request) -> None:
+    """Like `require_api_key`, but also accepts `Authorization: Bearer` (Prometheus' native auth)."""
+    configured_keys = _configured_api_keys()
+    if not configured_keys:
+        raise ProblemError(
+            "writes-disabled",
+            "Metrics are disabled",
+            hint="The operator must set FOOTBALL_RESULTS_API_KEYS.",
+        )
+    scheme, _, credentials = request.headers.get("Authorization", "").partition(" ")
+    supplied = credentials.strip() if scheme.lower() == "bearer" else ""
+    supplied = supplied or request.headers.get("X-API-Key", "")
+    if not _is_valid_api_key(supplied, configured_keys):
+        raise ProblemError(
+            "unauthorized",
+            "Invalid or missing API key",
+            headers={"WWW-Authenticate": "Bearer"},
+            hint="Send a configured API key as Authorization: Bearer <key> or in X-API-Key.",
         )
 
 
@@ -163,6 +193,7 @@ def _freshness_cache_control(freshness: list[Freshness]) -> dict[str, str]:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    configure_logging(settings.log_format)
     config = load_config()
     await store.seed_competitions(config.to_competitions(), config.auto_rollover_slugs())
     async with mcp_endpoint.lifespan():
@@ -266,6 +297,42 @@ async def rate_limit_and_cache(
     return Response(content=body, status_code=200, headers=headers)
 
 
+METRIC_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"})
+
+
+def _metric_operation(request: Request) -> str:
+    """The operation ID, else the route template; requests rejected before routing are matched
+    here so a `429` is counted against its operation."""
+    route = request.scope.get("route")
+    if route is None:
+        route = next(
+            (
+                candidate
+                for candidate in app.router.routes
+                if candidate.matches(request.scope)[0] == RouteMatch.FULL
+            ),
+            None,
+        )
+    return getattr(route, "operation_id", None) or getattr(route, "path", None) or "unmatched"
+
+
+@app.middleware("http")
+async def record_http_metrics(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
+    started = time.perf_counter()
+    status = 500
+    try:
+        response = await call_next(request)
+        status = response.status_code
+        return response
+    finally:
+        method = request.method if request.method in METRIC_METHODS else "other"
+        observability.record_request(
+            _metric_operation(request), method, status, time.perf_counter() - started
+        )
+
+
 @app.get(
     "/health",
     operation_id="get_health",
@@ -291,12 +358,13 @@ async def health() -> dict[str, str]:
         await store.health()
     except Exception as error:
         raise ProblemError("service-unavailable", "Database unavailable") from error
-    heartbeat = await store.latest_scheduler_heartbeat()
-    scheduler_status = "not_started"
-    if heartbeat is not None:
-        stale_after = timedelta(seconds=max(settings.scheduler_loop_seconds * 4, 120))
-        scheduler_status = "ok" if datetime.now(UTC) - heartbeat <= stale_after else "stale"
-    return {"status": "ok", "database": "ok", "scheduler": scheduler_status}
+    state = observability.scheduler_state(
+        await store.latest_scheduler_heartbeat(),
+        datetime.now(UTC),
+        observability.stall_window(settings.scheduler_loop_seconds),
+    )
+    # `/health` predates the glossary term "stalled scheduler" and keeps its public value.
+    return {"status": "ok", "database": "ok", "scheduler": "stale" if state == "stalled" else state}
 
 
 @app.get(
@@ -888,6 +956,128 @@ async def fetch_historical_results(
 # Agent documentation: `/llms.txt`, `/llms-full.txt`, `/agents`, `/agents.md`, `/problems/...`,
 # and the static Agent Skill at `agent_docs.SKILL_PATH`.
 # Generated from the OpenAPI spec and the competitions; not part of the OpenAPI spec itself.
+
+
+@app.get(
+    "/api/v1/admin/scrape-runs",
+    operation_id="list_scrape_runs",
+    tags=[docs.TAG_ADMIN],
+    summary="List recent import jobs",
+    description=(
+        "Use to find out why data is stale or an import failed: scheduled and requested import "
+        "jobs, newest first, with their error message and scheduler worker. Filter by "
+        "competition, season, and `status`."
+    ),
+    response_model=ScrapeRunsResponse,
+    dependencies=[Depends(require_api_key)],
+    responses={
+        200: {
+            "description": "Successful Response",
+            "headers": docs.NO_STORE_HEADER | docs.RATE_LIMIT_HEADERS,
+        },
+        400: docs.invalid_cursor("/api/v1/admin/scrape-runs"),
+        **docs.auth_errors("/api/v1/admin/scrape-runs"),
+        404: docs.unknown_competition_or_season("/api/v1/admin/scrape-runs"),
+        422: docs.error(
+            "Unknown `status` (`invalid-parameter` with `valid_values`), or request validation "
+            "failed (`validation-error`)",
+            unknown_status=docs.example(
+                "Unknown status",
+                "invalid-parameter",
+                "Unknown job status",
+                "/api/v1/admin/scrape-runs",
+                parameter="status",
+                invalid=["done"],
+                valid_values=list(SCRAPE_RUN_STATUSES),
+            ),
+            validation=docs.limit_validation_example("/api/v1/admin/scrape-runs"),
+        ),
+        429: docs.rate_limited("/api/v1/admin/scrape-runs", "read"),
+    },
+)
+async def list_scrape_runs(
+    competition: docs.CompetitionFilter = None,
+    season: docs.SeasonFilter = None,
+    status: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Comma-separated job statuses: "
+                + ", ".join(SCRAPE_RUN_STATUSES)
+                + " (default: all)"
+            ),
+            examples=["failed", "queued,running"],
+        ),
+    ] = None,
+    limit: docs.Limit = DEFAULT_LIMIT,
+    cursor: docs.Cursor = None,
+) -> ScrapeRunsResponse:
+    statuses = _contract(lambda: parse_job_statuses(status))
+    if competition:
+        await _require_season(competition, season)
+    competition = competition.casefold() if competition else None
+    digest = filter_hash({"competition": competition, "season": season, "status": statuses})
+    before_id = None
+    if cursor is not None:
+        before_id = _contract(lambda: id_keyset(cursor, digest))
+    runs = await store.list_scrape_runs(competition, season, statuses, limit + 1, before_id)
+    page = runs[:limit]
+    next_cursor = encode_cursor([page[-1].job_id], digest) if len(runs) > limit else None
+    return ScrapeRunsResponse(
+        data=page, pagination=Pagination(limit=limit, next_cursor=next_cursor)
+    )
+
+
+@app.get(
+    "/api/v1/admin/scheduler",
+    operation_id="get_scheduler_status",
+    tags=[docs.TAG_ADMIN],
+    summary="Show the scheduler and the refresh state of current seasons",
+    description=(
+        "Use to check whether the scheduler is running and which current seasons are stale, "
+        "overdue, or failing. `status` is `stalled` when no worker heartbeat is within the "
+        "stall window; a season is `stale` when it was never fetched or its update is more "
+        "than the grace period overdue."
+    ),
+    response_model=SchedulerStatus,
+    dependencies=[Depends(require_api_key)],
+    responses={
+        200: {
+            "description": "Successful Response",
+            "headers": docs.NO_STORE_HEADER | docs.RATE_LIMIT_HEADERS,
+        },
+        **docs.auth_errors("/api/v1/admin/scheduler"),
+        429: docs.rate_limited("/api/v1/admin/scheduler", "read"),
+    },
+)
+async def get_scheduler_status() -> SchedulerStatus:
+    now = datetime.now(UTC)
+    window = observability.stall_window(settings.scheduler_loop_seconds)
+    latest = await store.latest_scheduler_heartbeat()
+    workers = await store.scheduler_workers(SCHEDULER_WORKERS_SHOWN)
+    seasons = await store.scheduled_seasons()
+    return SchedulerStatus(
+        status=observability.scheduler_state(latest, now, window),
+        checked_at=now,
+        latest_heartbeat_at=latest,
+        stall_after_seconds=window.total_seconds(),
+        stale_grace_seconds=observability.STALE_GRACE.total_seconds(),
+        workers=[observability.scheduler_worker(item, now, window) for item in workers],
+        seasons=[observability.season_schedule(item, now) for item in seasons],
+    )
+
+
+@app.get("/metrics", include_in_schema=False, dependencies=[Depends(require_metrics_key)])
+async def metrics() -> Response:
+    snapshot = observability.Snapshot(
+        latest_heartbeat_at=await store.latest_scheduler_heartbeat(),
+        seasons=await store.scheduled_seasons(),
+        run_counts=await store.scrape_run_counts(),
+    )
+    body = observability.render_metrics(
+        snapshot, datetime.now(UTC), observability.stall_window(settings.scheduler_loop_seconds)
+    )
+    return Response(body, media_type=CONTENT_TYPE_LATEST, headers={"Cache-Control": "no-store"})
 
 
 def _public_base_url(request: Request) -> tuple[str, bool]:

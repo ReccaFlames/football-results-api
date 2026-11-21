@@ -16,8 +16,9 @@ import app.main as main_module
 from app.config import Settings
 from app.main import app as api_app
 from app.models import CompetitionSummary, Freshness, FreshnessSource, Team
+from app.observability import WorkerHeartbeat
 from app.ratelimit import FixedWindowRateLimiter
-from tests.test_api import FakeRepository, fixture
+from tests.test_api import FakeRepository, fixture, scrape_run, season_state
 
 runner = CliRunner()
 
@@ -259,6 +260,43 @@ def test_api_key_is_sent_only_for_jobs_and_never_printed(requests, repository) -
     assert json.loads(requests[1].content) == {"competition": "ekstraklasa"}
     for result in (missing, queued):
         assert "test-api-key" not in result.stdout + result.stderr
+
+
+def test_admin_commands_send_the_api_key(requests, repository) -> None:
+    repository.scrape_runs = [scrape_run(1, "completed"), scrape_run(2, "failed")]
+    assert invoke("scheduler").exit_code == 5
+
+    env = {"FOOTBALL_RESULTS_API_KEY": "test-api-key"}
+    runs = invoke("scrape-runs", "--status", "failed", env=env)
+    assert runs.exit_code == 0, runs.stderr
+    assert [item["job_id"] for item in json.loads(runs.stdout)["data"]] == [2]
+    status = invoke("scheduler", env=env)
+    assert status.exit_code == 0, status.stderr
+    assert json.loads(status.stdout)["status"] == "not_started"
+    assert [request.headers.get("x-api-key") for request in requests] == [
+        None,
+        "test-api-key",
+        "test-api-key",
+    ]
+    assert dict(requests[1].url.params) == {"status": "failed"}
+
+
+def test_scheduler_table_shows_seasons_and_workers(
+    requests, repository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(output, "stdout_is_tty", lambda: True)
+    now = datetime.now(UTC)
+    repository.heartbeat_at = now
+    repository.workers = [WorkerHeartbeat("host:1:abc", now - timedelta(hours=1), now)]
+    repository.season_states = [season_state("ekstraklasa", now - timedelta(days=1), now, 2)]
+
+    env = {"FOOTBALL_RESULTS_API_KEY": "test-api-key", "COLUMNS": "200"}
+    result = invoke("scheduler", env=env)
+
+    assert result.exit_code == 0, result.stderr
+    assert "ok" in result.stdout
+    assert "ekstraklasa" in result.stdout and "retrying" in result.stdout
+    assert "host:1:abc" in result.stdout
 
 
 def test_disabled_writes_exit_5(requests, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -7,7 +7,7 @@ scheduler, and serves them over a REST API.
 The repository started as an Ekstraklasa-only scraper and is evolving into a **generic, configurable
 league-data API**. This README describes both:
 
-- **[Current state](#current-state)** – what is implemented and works today (version 0.15.0).
+- **[Current state](#current-state)** – what is implemented and works today (version 0.16.0).
 - **[Target state](#target-state-and-roadmap)** – where the project is heading and what is still
   missing.
 
@@ -22,8 +22,8 @@ league-data API**. This README describes both:
 | Season rollover | Automatic: providers with discovery (football-data) add new seasons; the scheduler switches `current_season` once the new season has started and the old one is finished. 90minut sources are added to YAML by hand | Same, with more discovering providers |
 | Scheduling | Adaptive per-season scheduler driven by fixture times; thresholds from `defaults.schedule` with per-competition overrides | Plus cron-style overrides and global provider quotas |
 | Configuration | Environment variables plus validated YAML for leagues, sources, providers, and schedule defaults | Env vars for infrastructure + one validated config file for leagues, sources, and schedules |
-| Observability | `/health` (DB + scheduler heartbeat), `scrape_run` table, logs; CI with PostgreSQL integration tests | Scheduler/scrape status endpoints, metrics, alerting on stale data |
-| API | Matches of every status with filters, cursor pagination, `fields=` and per-season freshness; computed standings; teams with aliases; manual refresh and historical fetch; RFC 9457 errors, rate limits, and `ETag` caching; generated `/llms.txt` and `/agents` guide; `football-results` CLI, Agent Skill, and curated MCP server at `/mcp` | Plus authenticated admin endpoints |
+| Observability | `/health`; authenticated admin endpoints for import jobs and scheduler state; Prometheus `/metrics`; optional Prometheus + Grafana stack with Telegram alerts on stale seasons; JSON logs | Same, plus per-provider quotas and fallback alerts |
+| API | Matches of every status with filters, cursor pagination, `fields=` and per-season freshness; computed standings; teams with aliases; manual refresh and historical fetch; RFC 9457 errors, rate limits, and `ETag` caching; generated `/llms.txt` and `/agents` guide; `football-results` CLI, Agent Skill, and curated MCP server at `/mcp`; authenticated admin endpoints | Plus admin writes (enable/disable competitions) |
 
 ## Current state
 
@@ -245,6 +245,8 @@ go through Alembic.
 | POST | `/api/v1/results/refresh` | `request_refresh` | Queue a current-season refresh (`202 Accepted`; requires `X-API-Key`) |
 | POST | `/api/v1/results/history/fetch` | `fetch_historical_season` | Queue a non-current-season fetch (`202 Accepted`; requires `X-API-Key`); cached results return immediately |
 | GET | `/api/v1/jobs/{job_id}` | `get_job` | Get queued, running, completed, or failed scrape-job status (`X-API-Key` required) |
+| GET | `/api/v1/admin/scrape-runs` | `list_scrape_runs` | Import jobs, newest first, with source URL, worker, and error; filters: `competition`, `season`, `status`; cursor pagination (`X-API-Key` required) |
+| GET | `/api/v1/admin/scheduler` | `get_scheduler_status` | Scheduler workers and heartbeats plus every scheduled season's next update, overdue time, staleness, and failure count (`X-API-Key` required) |
 
 Interactive documentation is available at `/docs`; the OpenAPI document is at `/openapi.json`.
 Agents should start at `/llms.txt` (see [Agent documentation](#agent-documentation)).
@@ -332,7 +334,7 @@ type `application/problem+json` and `Cache-Control: no-store`:
 **Rate limits** are counted per client in fixed 60-second windows: `GET` requests use the `read`
 policy (120 per minute by default), other methods the `write` policy (10 per minute). The client is
 the API key when a valid `X-API-Key` is sent, otherwise the IP address. `/health`, `/docs`,
-`/redoc`, and `/openapi.json` are exempt. Responses carry the
+`/redoc`, `/openapi.json`, and `/metrics` are exempt. Responses carry the
 [draft-ietf-httpapi-ratelimit-headers-11](https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/)
 fields; a `429` adds `Retry-After`:
 
@@ -349,7 +351,8 @@ its own quota. Behind a reverse proxy, set `FOOTBALL_RESULTS_TRUSTED_PROXIES` so
 return a weak `ETag` (a hash of the body) and `Cache-Control: public, max-age=N`. `N` is the time
 until the earliest `freshness.next_update_at`, capped at `FOOTBALL_RESULTS_CACHE_MAX_AGE_SECONDS`
 (60), or `no-cache` when an update is due. Send the ETag back in `If-None-Match` to get
-`304 Not Modified` without a body. Health, job status, and write responses use `no-store`.
+`304 Not Modified` without a body. Health, job status, admin, `/metrics`, and write responses use
+`no-store`.
 
 ~~~bash
 curl -i 'http://localhost:8000/api/v1/standings?competition=ekstraklasa' -H 'If-None-Match: W/"<etag>"'
@@ -547,7 +550,7 @@ Use `./cli`, not `.`: `uvx --from .` would install the whole API with its depend
 | Variable | Option | Default | Purpose |
 | --- | --- | --- | --- |
 | `FOOTBALL_RESULTS_URL` | `--url` | `http://localhost:8000` | API base URL, optionally with a path prefix |
-| `FOOTBALL_RESULTS_API_KEY` | `--api-key` | none | Sent as `X-API-Key`, only by `refresh`, `fetch-season`, and `status` |
+| `FOOTBALL_RESULTS_API_KEY` | `--api-key` | none | Sent as `X-API-Key`, only by `refresh`, `fetch-season`, `status`, `scrape-runs`, and `scheduler` |
 | `FOOTBALL_RESULTS_TIMEOUT` | `--timeout` | `30` | HTTP timeout in seconds |
 
 Global options go before the command (`football-results --url URL matches`). The API key is never
@@ -566,13 +569,15 @@ ignores these three variables; its settings use other names.
 | `refresh` | `request_refresh` | `-c/--competition` (required), `-s/--season` |
 | `fetch-season` | `fetch_historical_season` | `-c/--competition`, `-s/--season` (both required), `--source-url`, `--force-refresh` |
 | `status JOB_ID` | `get_job` | the job ID |
+| `scrape-runs` | `list_scrape_runs` | `-c/--competition`, `-s/--season`, `--status`, `--limit`, `--cursor` |
+| `scheduler` | `get_scheduler_status` | none |
 
 Options use the API parameter names (`--date-from` is `date_from`). CLI-only options:
 
 - `--json` prints JSON even on a terminal.
 - `--fields` selects item fields. The API applies it for `matches` and `standings`; the CLI applies
   it for `competitions` and `teams`.
-- `--all` (`matches`, `teams`) follows `next_cursor` and prints one combined response with up to
+- `--all` (`matches`, `teams`, `scrape-runs`) follows `next_cursor` and prints one combined response with up to
   `--max-items` items (default 1000).
 - `--fail-if-stale` (`matches`, `standings`) prints the data, then exits 4 if a competition-season
   was never fetched or its `next_update_at` is more than 15 minutes in the past.
@@ -588,6 +593,7 @@ football-results teams -c ekstraklasa -q legia
 football-results matches -c ekstraklasa --team legia-warszawa --status finished --order desc --limit 5
 football-results standings -c ekstraklasa --json | jq '.data[:3]'
 FOOTBALL_RESULTS_API_KEY=... football-results refresh -c ekstraklasa --wait
+FOOTBALL_RESULTS_API_KEY=... football-results scrape-runs --status failed --limit 10
 ~~~
 
 ### Output
@@ -740,6 +746,74 @@ gateway, for example `172.16.0.0/12`), and make the proxy set `X-Forwarded-For`.
 client shares one rate-limit quota. Set `FOOTBALL_RESULTS_PUBLIC_BASE_URL` to the public HTTPS URL
 so that `/llms.txt` and `/agents` show the right base URL and `/mcp` accepts its host.
 
+### Observability
+
+Everything here is self-hosted and free: Prometheus (Apache-2.0) and Grafana OSS (AGPL-3.0) run in
+the optional `observability` Compose profile, and alerts go to a Telegram bot. Together they use
+about 200 MB of RAM. Terms such as *stale season* and *stalled scheduler* are defined in
+[GLOSSARY.md](GLOSSARY.md).
+
+**Signals**
+
+- `GET /metrics` (Prometheus text format, not in OpenAPI, not rate-limited) needs one of
+  `FOOTBALL_RESULTS_API_KEYS`, sent as `Authorization: Bearer <key>` or `X-API-Key`. Without
+  configured keys it returns `503 writes-disabled`. Scheduler and season values are read from
+  PostgreSQL at scrape time, so they are correct even when the scheduler is down:
+  - `football_results_scheduler_stalled`, `football_results_scheduler_heartbeat_age_seconds`
+  - per `{competition, season}` of every current, automatically refreshed season:
+    `football_results_season_stale`, `_season_overdue_seconds`, `_season_consecutive_failures`,
+    `_season_data_age_seconds`, `_season_next_update_timestamp_seconds`
+  - `football_results_scrape_runs{competition, status}` (stored import jobs)
+  - `football_results_http_requests_total{operation, method, status}` and
+    `football_results_http_request_duration_seconds{operation}` (labelled by operation ID, so paths
+    with IDs do not create new series), `football_results_build_info{version}`, and `process_*`
+- Admin endpoints (`X-API-Key`): `list_scrape_runs` and `get_scheduler_status`, also available as
+  `football-results scrape-runs` and `football-results scheduler`. They are not MCP tools.
+- `FOOTBALL_RESULTS_LOG_FORMAT=json` (the Compose default) writes one JSON object per line. Compose
+  rotates container logs (`json-file`, 3 × 10 MB per container); read them with
+  `docker compose logs api scheduler`.
+
+A season is **stale** when it was never fetched or its scheduled update is more than 15 minutes
+overdue (the same rule as the CLI's `--fail-if-stale`). The scheduler is **stalled** when no
+heartbeat is newer than four scheduler loops (at least two minutes). `/health` keeps reporting a
+stalled scheduler as `stale` for backward compatibility; the admin endpoint and metrics say
+`stalled`.
+
+**Set up monitoring**
+
+1. Create a Telegram bot with [@BotFather](https://t.me/BotFather) and note its token. Send the bot
+   a message, then read your chat ID from
+   `https://api.telegram.org/bot<token>/getUpdates` (`message.chat.id`).
+2. In `.env`, add a dedicated key to `FOOTBALL_RESULTS_API_KEYS` and set the same value as
+   `PROMETHEUS_API_KEY`. Set `GRAFANA_ADMIN_PASSWORD`, `TELEGRAM_BOT_TOKEN`, and
+   `TELEGRAM_CHAT_ID`.
+3. Start the stack:
+
+~~~bash
+docker compose --profile observability up -d
+~~~
+
+4. Open Grafana through an SSH tunnel (it listens on 127.0.0.1 only; Prometheus is not published):
+
+~~~bash
+ssh -L 3000:localhost:3000 user@server   # then browse http://localhost:3000
+~~~
+
+Grafana is provisioned from `observability/grafana/` (the Prometheus data source, the *Football
+Results API* dashboard, and these alert rules, evaluated every minute) and from the Telegram
+contact point that `compose.yaml` renders from `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`:
+
+| Alert | Fires when |
+| --- | --- |
+| Stale season | `football_results_season_stale` is 1 for a season (for 1 minute) |
+| Stalled scheduler | `football_results_scheduler_stalled` is 1 for 2 minutes |
+| Failing season | `football_results_season_consecutive_failures` is 3 or more (retries back off, so the season is not yet overdue) |
+| API down | Prometheus cannot scrape `/metrics` for 2 minutes (API down or the Prometheus key rejected) |
+
+Without Telegram settings the stack still starts and alerts show in Grafana, but notifications fail.
+Prometheus keeps 15 days of data (`PROMETHEUS_RETENTION`). Provisioned rules and the dashboard are
+read-only in Grafana; change the files and restart Grafana.
+
 ### Backups
 
 ~~~bash
@@ -852,7 +926,8 @@ Application variables:
 | FOOTBALL_RESULTS_SCHEDULER_LOOP_SECONDS | `30` | Pause between scheduler cycles |
 | FOOTBALL_RESULTS_SCHEDULER_CLAIM_LIMIT | `5` | Max queued jobs and due seasons claimed per cycle (each limit applies separately) |
 | FOOTBALL_RESULTS_SCHEDULER_WORKER_TIMEOUT_SECONDS | `300` | A scheduler worker without a heartbeat for this long is treated as dead: its `running` scrape jobs are marked `failed` so their seasons are claimed again |
-| FOOTBALL_RESULTS_API_KEYS | empty | Comma-separated API keys; required for write endpoints and job status |
+| FOOTBALL_RESULTS_API_KEYS | empty | Comma-separated API keys; required for write endpoints, job status, admin endpoints, and `/metrics` |
+| FOOTBALL_RESULTS_LOG_FORMAT | `text` | `text` or `json` (one JSON object per line on stderr, including uvicorn access logs); Docker Compose sets `json` |
 | FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN | empty | football-data.org token (needed for football-data competitions such as the Premier League) |
 | FOOTBALL_RESULTS_FOOTBALL_DATA_MIN_REQUEST_INTERVAL_SECONDS | `6` (from YAML) | Optional environment override for the football-data.org throttle (free tier: 10 req/min) |
 | FOOTBALL_RESULTS_NINETY_MINUT_MIN_REQUEST_INTERVAL_SECONDS | `2` (from YAML) | Optional environment override for the minimum delay between requests to each 90minut host; set to `0` to disable |
@@ -874,6 +949,9 @@ Deployment variables (Docker Compose):
 - POSTGRES_PORT
 - API_BIND_ADDRESS
 - API_PORT
+- Observability profile: PROMETHEUS_API_KEY, PROMETHEUS_RETENTION (`15d`), GRAFANA_ADMIN_USER,
+  GRAFANA_ADMIN_PASSWORD, GRAFANA_BIND_ADDRESS (`127.0.0.1`), GRAFANA_PORT (`3000`),
+  TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID (see [Observability](#observability))
 
 Never commit .env.
 
@@ -1030,9 +1108,8 @@ The current adaptive scheduler is the foundation; planned improvements:
 
 ### Operations and observability
 
-- `/metrics` (Prometheus): refresh counts, failures, latency, data age per competition.
-- Alerts when a current season has not been refreshed successfully within its expected window.
-- Structured JSON logging.
+- ~~`/metrics` (Prometheus), admin status endpoints, stale-data alerts, structured JSON logging~~
+  (done: see [Observability](#observability)).
 - Move remaining hard-coded competition configuration into explicit, documented configuration.
 
 ### Suggested implementation order
@@ -1041,6 +1118,6 @@ The current adaptive scheduler is the foundation; planned improvements:
 2. ~~Generalise the football-data.org adapter to any competition code.~~ (done)
 3. ~~Make scheduler thresholds configurable per competition.~~ (done)
 4. ~~Add fixtures and standings endpoints.~~ (done)
-5. Add admin/status endpoints with API-key authentication and metrics.
+5. ~~Add admin/status endpoints with API-key authentication and metrics.~~ (done)
 6. ~~Automatic season discovery and rollover.~~ (done)
 7. Additional providers and fallback sources.

@@ -214,11 +214,11 @@ How to use this list:
 
 ### Phase 3: Operations and growth
 
-- [ ] **16. Observability**
-  - [ ] `/metrics` (Prometheus)
-  - [ ] Admin status endpoints (recent `scrape_run` rows, scheduler state)
-  - [ ] Alerts when data goes stale
-  - [ ] Structured JSON logs
+- [x] **16. Observability**
+  - [x] `/metrics` (Prometheus)
+  - [x] Admin status endpoints (recent `scrape_run` rows, scheduler state)
+  - [x] Alerts when data goes stale (Prometheus + Grafana OSS profile, Telegram contact point)
+  - [x] Structured JSON logs
 - [ ] **17. More providers and fallback sources** (use the `add-data-provider` skill)
 - [ ] **18. Optional hosted access**
   - [ ] OAuth for remote MCP

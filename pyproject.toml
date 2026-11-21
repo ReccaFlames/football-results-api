@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "football-results-api"
-version = "0.15.0"
+version = "0.16.0"
 description = "Cached multi-competition REST API for football match results"
 requires-python = ">=3.12"
 dependencies = [
@@ -18,6 +18,7 @@ dependencies = [
   "sqlalchemy[asyncio]>=2.0,<2.2",
   "uvicorn[standard]>=0.35,<1",
   "mcp>=2.3,<3",
+  "prometheus-client>=0.21,<1",
 ]
 
 [project.optional-dependencies]

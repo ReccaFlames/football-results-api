@@ -40,9 +40,11 @@ from app.models import (
     MatchResult,
     ScrapedMatch,
     ScrapeJobStatus,
+    ScrapeRun,
     SeasonSource,
     Team,
 )
+from app.observability import ScrapeRunCount, SeasonState, WorkerHeartbeat
 from app.scheduling import (
     DEFAULT_POLICY,
     SchedulePolicy,
@@ -1273,6 +1275,116 @@ class PostgresResultRepository:
     async def latest_scheduler_heartbeat(self) -> datetime | None:
         async with self.sessions() as session:
             return await session.scalar(select(func.max(SchedulerHeartbeatRow.heartbeat_at)))
+
+    async def list_scrape_runs(
+        self,
+        competition: str | None = None,
+        season: str | None = None,
+        statuses: tuple[str, ...] = (),
+        limit: int | None = None,
+        before_id: int | None = None,
+    ) -> list[ScrapeRun]:
+        """Import jobs, newest first; ``before_id`` continues after the last job of a page."""
+        statement = (
+            select(ScrapeRunRow, CompetitionSeasonRow.season, CompetitionRow.slug)
+            .join(
+                CompetitionSeasonRow,
+                ScrapeRunRow.competition_season_id == CompetitionSeasonRow.id,
+            )
+            .join(CompetitionRow, CompetitionSeasonRow.competition_id == CompetitionRow.id)
+            .order_by(ScrapeRunRow.id.desc())
+        )
+        if competition:
+            statement = statement.where(CompetitionRow.slug == competition.casefold())
+        if season:
+            statement = statement.where(CompetitionSeasonRow.season == season)
+        if statuses:
+            statement = statement.where(ScrapeRunRow.status.in_(statuses))
+        if before_id is not None:
+            statement = statement.where(ScrapeRunRow.id < before_id)
+        if limit is not None:
+            statement = statement.limit(limit)
+        async with self.sessions() as session:
+            rows = (await session.execute(statement)).all()
+        return [
+            ScrapeRun(
+                job_id=run.id,
+                competition=slug,
+                season=season_name,
+                status=run.status,
+                queued_at=run.queued_at,
+                started_at=run.started_at,
+                completed_at=run.completed_at,
+                matches_found=run.matches_found,
+                error_message=run.error_message,
+                source_url=run.source_url,
+                worker_id=run.worker_id,
+            )
+            for run, season_name, slug in rows
+        ]
+
+    async def scheduler_workers(self, limit: int) -> list[WorkerHeartbeat]:
+        """The most recently seen scheduler workers."""
+        async with self.sessions() as session:
+            rows = await session.scalars(
+                select(SchedulerHeartbeatRow)
+                .order_by(SchedulerHeartbeatRow.heartbeat_at.desc())
+                .limit(limit)
+            )
+            return [
+                WorkerHeartbeat(row.worker_id, row.started_at, row.heartbeat_at) for row in rows
+            ]
+
+    async def scheduled_seasons(self) -> list[SeasonState]:
+        """Current seasons with automatic refresh of enabled competitions."""
+        active_run = (
+            select(func.min(ScrapeRunRow.id))
+            .where(
+                ScrapeRunRow.competition_season_id == CompetitionSeasonRow.id,
+                ScrapeRunRow.status.in_(("queued", "running")),
+            )
+            .scalar_subquery()
+        )
+        statement = (
+            select(CompetitionSeasonRow, CompetitionRow.slug, active_run)
+            .join(CompetitionRow, CompetitionSeasonRow.competition_id == CompetitionRow.id)
+            .where(
+                CompetitionRow.is_enabled.is_(True),
+                CompetitionSeasonRow.is_current,
+                CompetitionSeasonRow.automatic_refresh_enabled,
+            )
+            .order_by(CompetitionRow.slug)
+        )
+        async with self.sessions() as session:
+            rows = (await session.execute(statement)).all()
+        return [
+            SeasonState(
+                competition=slug,
+                season=row.season,
+                scheduler_state=row.scheduler_state,
+                fetched_at=row.fetched_at,
+                next_check_at=row.next_check_at,
+                last_checked_at=row.last_checked_at,
+                consecutive_failures=row.consecutive_failures,
+                active_job_id=active_job_id,
+            )
+            for row, slug, active_job_id in rows
+        ]
+
+    async def scrape_run_counts(self) -> list[ScrapeRunCount]:
+        statement = (
+            select(CompetitionRow.slug, ScrapeRunRow.status, func.count(ScrapeRunRow.id))
+            .join(
+                CompetitionSeasonRow,
+                ScrapeRunRow.competition_season_id == CompetitionSeasonRow.id,
+            )
+            .join(CompetitionRow, CompetitionSeasonRow.competition_id == CompetitionRow.id)
+            .group_by(CompetitionRow.slug, ScrapeRunRow.status)
+            .order_by(CompetitionRow.slug, ScrapeRunRow.status)
+        )
+        async with self.sessions() as session:
+            rows = (await session.execute(statement)).all()
+        return [ScrapeRunCount(slug, status, count) for slug, status, count in rows]
 
     @staticmethod
     async def _ensure_season(

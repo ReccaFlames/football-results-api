@@ -19,8 +19,10 @@ from app.models import (
     Problem,
     ScrapedMatch,
     ScrapeJobStatus,
+    ScrapeRun,
     Team,
 )
+from app.observability import ScrapeRunCount, SeasonState, WorkerHeartbeat
 from app.ratelimit import FixedWindowRateLimiter
 
 AUTH_HEADERS = {"X-API-Key": "test-api-key"}
@@ -39,12 +41,39 @@ class FakeRepository:
         self.active_jobs: dict[tuple[str, str], int] = {}
         self.matches: list[Match] = []
         self.freshness: list[Freshness] = []
+        self.heartbeat_at: datetime | None = None
+        self.workers: list[WorkerHeartbeat] = []
+        self.season_states: list[SeasonState] = []
+        self.scrape_runs: list[ScrapeRun] = []
+        self.run_counts: list[ScrapeRunCount] = []
 
     async def health(self) -> None:
         return None
 
     async def latest_scheduler_heartbeat(self):
-        return None
+        return self.heartbeat_at
+
+    async def scheduler_workers(self, limit):
+        return self.workers[:limit]
+
+    async def scheduled_seasons(self):
+        return self.season_states
+
+    async def scrape_run_counts(self):
+        return self.run_counts
+
+    async def list_scrape_runs(
+        self, competition=None, season=None, statuses=(), limit=None, before_id=None
+    ):
+        runs = [
+            run
+            for run in sorted(self.scrape_runs, key=lambda item: item.job_id, reverse=True)
+            if (not competition or run.competition == competition)
+            and (not season or run.season == season)
+            and (not statuses or run.status in statuses)
+            and (before_id is None or run.job_id < before_id)
+        ]
+        return runs if limit is None else runs[:limit]
 
     async def seed_competitions(self, _seeds, _auto_rollover=frozenset()) -> None:
         return None
@@ -1117,3 +1146,173 @@ def test_problem_type_uris_resolve_to_pages(tmp_path: Path) -> None:
     assert page.text.startswith("# Unknown competition (unknown-competition)")
     body = assert_problem(client.get("/problems/nope"), 404, "not-found")
     assert body["valid_values"] == list(PROBLEM_TYPES)
+
+
+# --- Admin and metrics ---------------------------------------------------------------------
+
+
+def scrape_run(job_id: int, status: str, competition: str = "ekstraklasa") -> ScrapeRun:
+    queued = datetime(2026, 11, 1, tzinfo=UTC) + timedelta(hours=job_id)
+    return ScrapeRun(
+        job_id=job_id,
+        competition=competition,
+        season="2026-2027",
+        status=status,
+        queued_at=queued,
+        started_at=queued,
+        completed_at=queued if status in ("completed", "failed") else None,
+        matches_found=9 if status == "completed" else None,
+        error_message="HTTP 503" if status == "failed" else None,
+        source_url="http://www.90minut.pl/liga/1/liga14000.html",
+        worker_id="host:1:abc",
+    )
+
+
+def season_state(
+    competition: str = "ekstraklasa",
+    fetched_at: datetime | None = None,
+    next_check_at: datetime | None = None,
+    failures: int = 0,
+) -> SeasonState:
+    return SeasonState(
+        competition=competition,
+        season="2026-2027",
+        scheduler_state="retrying" if failures else "waiting_for_schedule",
+        fetched_at=fetched_at,
+        next_check_at=next_check_at,
+        last_checked_at=fetched_at,
+        consecutive_failures=failures,
+        active_job_id=None,
+    )
+
+
+@pytest.mark.parametrize("path", ["/api/v1/admin/scrape-runs", "/api/v1/admin/scheduler"])
+def test_admin_operations_need_an_api_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    client, _ = client_with_empty_store(tmp_path)
+    assert client.get(path).json()["type"].endswith("/problems/unauthorized")
+    response = client.get(path, headers=AUTH_HEADERS)
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    monkeypatch.setattr(main_module.settings, "api_keys", "")
+    assert client.get(path, headers=AUTH_HEADERS).status_code == 503
+
+
+def test_scrape_runs_are_newest_first_filtered_and_paginated(tmp_path: Path) -> None:
+    client, repository = client_with_empty_store(tmp_path)
+    repository.scrape_runs = [
+        scrape_run(1, "completed"),
+        scrape_run(2, "failed"),
+        scrape_run(3, "failed", "premier-league"),
+        scrape_run(4, "failed"),
+    ]
+    url = "/api/v1/admin/scrape-runs"
+
+    first = client.get(url, params={"status": "failed", "limit": 2}, headers=AUTH_HEADERS).json()
+    assert [item["job_id"] for item in first["data"]] == [4, 3]
+    assert first["data"][0]["error_message"] == "HTTP 503"
+    cursor = first["pagination"]["next_cursor"]
+    second = client.get(
+        url, params={"status": "failed", "limit": 2, "cursor": cursor}, headers=AUTH_HEADERS
+    ).json()
+    assert [item["job_id"] for item in second["data"]] == [2]
+    assert second["pagination"]["next_cursor"] is None
+
+    assert client.get(url, params={"cursor": cursor}, headers=AUTH_HEADERS).status_code == 400
+    only_league = client.get(url, params={"competition": "ekstraklasa"}, headers=AUTH_HEADERS)
+    assert [item["job_id"] for item in only_league.json()["data"]] == [4, 2, 1]
+    unknown = client.get(url, params={"status": "done"}, headers=AUTH_HEADERS)
+    assert unknown.status_code == 422
+    assert unknown.json()["valid_values"] == [
+        "queued",
+        "running",
+        "completed",
+        "failed",
+        "cancelled",
+    ]
+
+
+def test_scheduler_status_reports_stalled_workers_and_stale_seasons(tmp_path: Path) -> None:
+    client, repository = client_with_empty_store(tmp_path)
+    now = datetime.now(UTC)
+    repository.heartbeat_at = now - timedelta(hours=1)
+    repository.workers = [
+        WorkerHeartbeat("host:1:abc", now - timedelta(days=1), now - timedelta(hours=1))
+    ]
+    repository.season_states = [
+        season_state("ekstraklasa", now - timedelta(hours=2), now - timedelta(minutes=10)),
+        season_state("premier-league", now - timedelta(days=1), now - timedelta(minutes=20), 3),
+        season_state("europa-league"),
+    ]
+
+    body = client.get("/api/v1/admin/scheduler", headers=AUTH_HEADERS).json()
+
+    assert body["status"] == "stalled"
+    assert body["stale_grace_seconds"] == 900
+    assert [worker["alive"] for worker in body["workers"]] == [False]
+    seasons = {item["competition"]: item for item in body["seasons"]}
+    assert not seasons["ekstraklasa"]["stale"]
+    assert 590 < seasons["ekstraklasa"]["overdue_seconds"] < 700
+    assert seasons["premier-league"]["stale"]
+    assert seasons["premier-league"]["consecutive_failures"] == 3
+    assert seasons["europa-league"]["stale"] and seasons["europa-league"]["overdue_seconds"] == 0
+    assert client.get("/health").json()["scheduler"] == "stale"
+
+
+def metric(body: str, name: str, **labels: str) -> float:
+    selector = ",".join(f'{key}="{value}"' for key, value in sorted(labels.items()))
+    series = f"{name}{{{selector}}}" if labels else name
+    for line in body.splitlines():
+        if line.startswith(series + " "):
+            return float(line.rsplit(" ", 1)[1])
+    raise AssertionError(f"{series} not in metrics")
+
+
+def test_metrics_need_a_bearer_or_api_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _ = client_with_empty_store(tmp_path)
+
+    missing = client.get("/metrics")
+    assert missing.status_code == 401 and missing.headers["www-authenticate"] == "Bearer"
+    assert client.get("/metrics", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    bearer = client.get("/metrics", headers={"Authorization": "Bearer test-api-key"})
+    assert bearer.status_code == 200
+    assert bearer.headers["content-type"].startswith("text/plain")
+    assert bearer.headers["cache-control"] == "no-store"
+    assert client.get("/metrics", headers=AUTH_HEADERS).status_code == 200
+    assert "/metrics" not in app.openapi()["paths"]
+    monkeypatch.setattr(main_module.settings, "api_keys", "")
+    assert client.get("/metrics", headers=AUTH_HEADERS).status_code == 503
+
+
+def test_metrics_report_scheduler_seasons_jobs_and_requests(tmp_path: Path) -> None:
+    client, repository = client_with_empty_store(tmp_path)
+    now = datetime.now(UTC)
+    repository.heartbeat_at = now - timedelta(seconds=5)
+    repository.season_states = [
+        season_state("ekstraklasa", now - timedelta(hours=2), now + timedelta(hours=1)),
+        season_state("premier-league", now - timedelta(days=1), now - timedelta(hours=1), 4),
+        season_state("europa-league"),
+    ]
+    repository.run_counts = [ScrapeRunCount("ekstraklasa", "failed", 2)]
+    client.get("/api/v1/teams")
+    client.get("/api/v1/matches/does-not-exist")
+
+    body = client.get("/metrics", headers=AUTH_HEADERS).text
+
+    assert metric(body, "football_results_scheduler_stalled") == 0
+    assert metric(body, "football_results_scheduler_heartbeat_age_seconds") < 60
+    league = {"competition": "ekstraklasa", "season": "2026-2027"}
+    failing = {"competition": "premier-league", "season": "2026-2027"}
+    never = {"competition": "europa-league", "season": "2026-2027"}
+    assert metric(body, "football_results_season_stale", **league) == 0
+    assert metric(body, "football_results_season_overdue_seconds", **league) == 0
+    assert metric(body, "football_results_season_stale", **failing) == 1
+    assert metric(body, "football_results_season_consecutive_failures", **failing) == 4
+    assert metric(body, "football_results_season_stale", **never) == 1
+    assert 'football_results_season_data_age_seconds{competition="europa-league"' not in body
+    runs = {"competition": "ekstraklasa", "status": "failed"}
+    assert metric(body, "football_results_scrape_runs", **runs) == 2
+    teams = {"operation": "list_teams", "method": "GET", "status": "200"}
+    assert metric(body, "football_results_http_requests_total", **teams) >= 1
+    assert "/api/v1/matches/does-not-exist" not in body

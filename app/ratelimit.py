@@ -12,7 +12,9 @@ from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv4Network, IPv6Address, IPv6Network, ip_address
 
 READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
-EXEMPT_PATHS = frozenset({"/health", "/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"})
+EXEMPT_PATHS = frozenset(
+    {"/health", "/metrics", "/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"}
+)
 
 
 @dataclass(frozen=True)

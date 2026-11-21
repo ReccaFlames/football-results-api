@@ -102,7 +102,10 @@ PROBLEM_GUIDANCE: dict[str, tuple[str, str]] = {
         "Retry later; report it to the operator if it persists.",
     ),
     "writes-disabled": (
-        "The operator has configured no API keys, so write operations are switched off.",
+        (
+            "The operator has configured no API keys, so operations that need one (writes, jobs, "
+            "admin, and `/metrics`) are switched off."
+        ),
         (
             "A client cannot fix this; the operator must set `FOOTBALL_RESULTS_API_KEYS`. Read "
             "operations still work."
@@ -126,6 +129,8 @@ CLI_COMMANDS: dict[str, str] = {
     "request_refresh": "refresh",
     "fetch_historical_season": "fetch-season",
     "get_job": "status",
+    "list_scrape_runs": "scrape-runs",
+    "get_scheduler_status": "scheduler",
 }
 CLI_EXIT_CODES: tuple[tuple[int, str], ...] = (
     (0, "Success"),
@@ -958,11 +963,12 @@ def _parameter_description(parameter: Parameter) -> str:
 def _auth_text(guide: AgentGuide) -> str:
     protected = [item.operation_id for item in guide.operations if item.requires_api_key]
     return (
-        "**Auth:** read operations need no authentication. "
+        "**Auth:** other operations need no authentication. "
         + ", ".join(f"`{item}`" for item in protected)
         + " need an `X-API-Key` header with a key issued by the operator; without one they "
-        "return `401` (or `503` when the instance has writes disabled). Use them only when data "
-        "is missing or stale: the scheduler refreshes current seasons automatically."
+        "return `401` (or `503` when the instance has no keys configured). Request imports only "
+        "when data is missing or stale: the scheduler refreshes current seasons automatically. "
+        "Admin operations are for the operator."
     )
 
 
@@ -1069,11 +1075,12 @@ def _cli_blocks(guide: AgentGuide) -> list[Block]:
         Code(CLI_INSTALL),
         Paragraph(
             "Configure it with environment variables (or `--url`, `--api-key`, `--timeout`). The "
-            "API key is sent only for `refresh`, `fetch-season`, and `status`."
+            "API key is sent only for `refresh`, `fetch-season`, `status`, `scrape-runs`, and "
+            "`scheduler`."
         ),
         Code(
             f"export FOOTBALL_RESULTS_URL={guide.base_url}\n"
-            "export FOOTBALL_RESULTS_API_KEY=...   # only for refresh, fetch-season, status"
+            "export FOOTBALL_RESULTS_API_KEY=...   # only for refresh, fetch-season, status, admin"
         ),
         Table(
             ("Command", "Operation", "Summary"),

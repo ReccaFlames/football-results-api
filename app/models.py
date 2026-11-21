@@ -273,6 +273,55 @@ class ScrapeJobStatus(BaseModel):
     error_message: str | None
 
 
+SCRAPE_RUN_STATUSES = ("queued", "running", "completed", "failed", "cancelled")
+
+
+class ScrapeRun(ScrapeJobStatus):
+    source_url: str
+    worker_id: str | None = Field(description="Scheduler worker that ran the job, if any")
+
+
+class ScrapeRunsResponse(BaseModel):
+    data: list[ScrapeRun]
+    pagination: Pagination
+
+
+class SchedulerWorker(BaseModel):
+    worker_id: str
+    started_at: datetime
+    heartbeat_at: datetime
+    alive: bool = Field(description="Whether the heartbeat is within the stall window")
+
+
+class SeasonSchedule(BaseModel):
+    competition: str
+    season: str
+    scheduler_state: str
+    data_as_of: datetime | None = Field(description="Last successful import; null if never")
+    next_update_at: datetime | None
+    last_checked_at: datetime | None
+    overdue_seconds: float = Field(description="Seconds past `next_update_at`; 0 when not due")
+    stale: bool = Field(
+        description="Never fetched, or the update is more than the grace period overdue"
+    )
+    consecutive_failures: int
+    active_job_id: int | None = Field(description="Queued or running job of this season")
+
+
+class SchedulerStatus(BaseModel):
+    status: Literal["ok", "stalled", "not_started"] = Field(
+        description="`stalled` when no worker heartbeat is within the stall window"
+    )
+    checked_at: datetime
+    latest_heartbeat_at: datetime | None
+    stall_after_seconds: float
+    stale_grace_seconds: float
+    workers: list[SchedulerWorker] = Field(description="Most recently seen workers first")
+    seasons: list[SeasonSchedule] = Field(
+        description="Current seasons with automatic refresh, by competition"
+    )
+
+
 class RefreshRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

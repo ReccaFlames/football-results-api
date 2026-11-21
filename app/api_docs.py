@@ -21,7 +21,7 @@ automatically around kickoff times.
 Start with `list_competitions` to find competition slugs and seasons, then use `list_matches` for
 fixtures and results, `get_standings` for league tables, and `list_teams` to resolve team slugs.
 List responses are cursor-paginated and report per-season `freshness`. Unknown values are `null`,
-never `0`. Write operations require an `X-API-Key` header.
+never `0`. Write, job, and admin operations require an `X-API-Key` header.
 
 Errors are RFC 9457 problem details (`application/problem+json`): branch on `type`, and use
 `parameter`, `valid_values`, `hint`, and `examples` to correct the request. Requests are rate
@@ -34,6 +34,7 @@ TAG_MATCHES = "Matches"
 TAG_STANDINGS = "Standings"
 TAG_REFRESH = "Data refresh"
 TAG_SYSTEM = "System"
+TAG_ADMIN = "Admin"
 
 OPENAPI_TAGS = [
     {
@@ -63,6 +64,13 @@ OPENAPI_TAGS = [
         ),
     },
     {"name": TAG_SYSTEM, "description": "Service health for monitoring."},
+    {
+        "name": TAG_ADMIN,
+        "description": (
+            "Operator views of import jobs and the scheduler. Requires `X-API-Key`. Use to find "
+            "out why data is stale; Prometheus metrics are served separately at `/metrics`."
+        ),
+    },
 ]
 
 CompetitionFilter = Annotated[
@@ -314,7 +322,7 @@ def auth_errors(path: str) -> dict[int | str, dict[str, Any]]:
             ),
         ),
         503: error(
-            "No API keys are configured, so write endpoints are disabled",
+            "No API keys are configured, so operations that need a key are disabled",
             disabled=example(
                 "Writes disabled",
                 "writes-disabled",

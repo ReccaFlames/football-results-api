@@ -64,6 +64,7 @@ class Settings(BaseSettings):
     public_base_url: str | None = None
     mcp_allowed_hosts: str = ""
     mcp_allowed_origins: str = ""
+    log_format: Literal["text", "json"] = "text"
 
     @field_validator("trusted_proxies")
     @classmethod

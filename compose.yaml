@@ -1,7 +1,15 @@
+# Rotated JSON-file logs for long-running services (30 MB per container at most).
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
 services:
   db:
     image: postgres:17-alpine
     restart: unless-stopped
+    logging: *logging
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-football}
       POSTGRES_USER: ${POSTGRES_USER:-football}
@@ -20,6 +28,7 @@ services:
   api:
     build: .
     restart: unless-stopped
+    logging: *logging
     depends_on:
       db:
         condition: service_healthy
@@ -36,6 +45,7 @@ services:
       FOOTBALL_RESULTS_TRUSTED_PROXIES: ${FOOTBALL_RESULTS_TRUSTED_PROXIES:-}
       FOOTBALL_RESULTS_CACHE_MAX_AGE_SECONDS: ${FOOTBALL_RESULTS_CACHE_MAX_AGE_SECONDS:-}
       FOOTBALL_RESULTS_PUBLIC_BASE_URL: ${FOOTBALL_RESULTS_PUBLIC_BASE_URL:-}
+      FOOTBALL_RESULTS_LOG_FORMAT: ${FOOTBALL_RESULTS_LOG_FORMAT:-json}
     volumes:
       - ./config/competitions.yaml:/app/config/competitions.yaml:ro
     ports:
@@ -44,6 +54,7 @@ services:
   scheduler:
     build: .
     restart: unless-stopped
+    logging: *logging
     depends_on:
       db:
         condition: service_healthy
@@ -60,8 +71,54 @@ services:
       FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN: ${FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN:-}
       FOOTBALL_RESULTS_FOOTBALL_DATA_MIN_REQUEST_INTERVAL_SECONDS: ${FOOTBALL_RESULTS_FOOTBALL_DATA_MIN_REQUEST_INTERVAL_SECONDS:-}
       FOOTBALL_RESULTS_NINETY_MINUT_MIN_REQUEST_INTERVAL_SECONDS: ${FOOTBALL_RESULTS_NINETY_MINUT_MIN_REQUEST_INTERVAL_SECONDS:-}
+      FOOTBALL_RESULTS_LOG_FORMAT: ${FOOTBALL_RESULTS_LOG_FORMAT:-json}
     volumes:
       - ./config/competitions.yaml:/app/config/competitions.yaml:ro
+
+  # Monitoring: docker compose --profile observability up -d (see README, Observability).
+  prometheus:
+    image: prom/prometheus:v3.16.0
+    profiles: ["observability"]
+    restart: unless-stopped
+    logging: *logging
+    depends_on:
+      - api
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}
+    secrets:
+      - prometheus_api_key
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+
+  grafana:
+    image: grafana/grafana-oss:13.0.2
+    profiles: ["observability"]
+    restart: unless-stopped
+    logging: *logging
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    ports:
+      - "${GRAFANA_BIND_ADDRESS:-127.0.0.1}:${GRAFANA_PORT:-3000}:3000"
+    configs:
+      - source: grafana_contact_points
+        target: /etc/grafana/provisioning/alerting/contact-points.yaml
+    volumes:
+      - ./observability/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./observability/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./observability/grafana/provisioning/alerting/rules.yaml:/etc/grafana/provisioning/alerting/rules.yaml:ro
+      - ./observability/grafana/provisioning/alerting/policies.yaml:/etc/grafana/provisioning/alerting/policies.yaml:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
 
   # Disposable database for integration tests: docker compose --profile test up -d test-db
   test-db:
@@ -81,5 +138,29 @@ services:
       timeout: 5s
       retries: 15
 
+# Rendered by Compose rather than by Grafana: Grafana turns environment values that look like
+# numbers (Telegram chat IDs) into numbers, which the Telegram contact point rejects.
+configs:
+  grafana_contact_points:
+    content: |
+      apiVersion: 1
+      contactPoints:
+        - orgId: 1
+          name: telegram
+          receivers:
+            - uid: football-results-telegram
+              type: telegram
+              disableResolveMessage: false
+              settings:
+                bottoken: "${TELEGRAM_BOT_TOKEN:-not-configured}"
+                chatid: "${TELEGRAM_CHAT_ID:-not-configured}"
+                parse_mode: HTML
+
+secrets:
+  prometheus_api_key:
+    environment: PROMETHEUS_API_KEY
+
 volumes:
   postgres_data:
+  prometheus_data:
+  grafana_data:

@@ -1,0 +1,170 @@
+# Alert rules; notifications go to the Telegram contact point (policies.yaml).
+apiVersion: 1
+groups:
+- orgId: 1
+  name: football-results
+  folder: Football Results
+  interval: 1m
+  rules:
+  - uid: football-results-season-stale
+    title: Stale season
+    condition: C
+    for: 1m
+    noDataState: OK
+    execErrState: Alerting
+    labels:
+      service: football-results
+    annotations:
+      summary: '{{ $labels.competition }} {{ $labels.season }} is stale: its scheduled update is more
+        than 15 minutes overdue or it was never fetched.'
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: football-results-prometheus
+      model:
+        refId: A
+        expr: football_results_season_stale
+        instant: true
+        intervalMs: 30000
+        maxDataPoints: 43200
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: reduce
+        expression: A
+        reducer: last
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+  - uid: football-results-scheduler-stalled
+    title: Stalled scheduler
+    condition: C
+    for: 2m
+    noDataState: OK
+    execErrState: Alerting
+    labels:
+      service: football-results
+    annotations:
+      summary: No scheduler heartbeat inside the stall window; scheduled refreshes have stopped.
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: football-results-prometheus
+      model:
+        refId: A
+        expr: football_results_scheduler_stalled
+        instant: true
+        intervalMs: 30000
+        maxDataPoints: 43200
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: reduce
+        expression: A
+        reducer: last
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+  - uid: football-results-season-failing
+    title: Failing season
+    condition: C
+    for: 0s
+    noDataState: OK
+    execErrState: Alerting
+    labels:
+      service: football-results
+    annotations:
+      summary: '{{ $labels.competition }} {{ $labels.season }} failed {{ $values.B }} imports in a row.
+        Check: football-results scrape-runs -c {{ $labels.competition }} --status failed'
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: football-results-prometheus
+      model:
+        refId: A
+        expr: football_results_season_consecutive_failures
+        instant: true
+        intervalMs: 30000
+        maxDataPoints: 43200
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: reduce
+        expression: A
+        reducer: last
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 2
+  - uid: football-results-api-down
+    title: API down
+    condition: C
+    for: 2m
+    noDataState: Alerting
+    execErrState: Alerting
+    labels:
+      service: football-results
+    annotations:
+      summary: Prometheus cannot scrape the API /metrics (down, or the Prometheus key was rejected).
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: football-results-prometheus
+      model:
+        refId: A
+        expr: up{job="football-results-api"}
+        instant: true
+        intervalMs: 30000
+        maxDataPoints: 43200
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: reduce
+        expression: A
+        reducer: last
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: lt
+            params:
+            - 1

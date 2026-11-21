@@ -10,7 +10,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from app.models import MATCH_STATUSES
+from app.models import MATCH_STATUSES, SCRAPE_RUN_STATUSES
 
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
@@ -56,22 +56,28 @@ def parse_fields(
     return set(requested) | set(always)
 
 
-def parse_statuses(value: str | None) -> tuple[str, ...]:
+def parse_statuses(
+    value: str | None, valid: tuple[str, ...] = MATCH_STATUSES, kind: str = "match"
+) -> tuple[str, ...]:
     if value is None:
         return ()
     requested = _split(value)
-    invalid = [item for item in requested if item not in MATCH_STATUSES]
+    invalid = [item for item in requested if item not in valid]
     if invalid or not requested:
         raise ContractError(
             "invalid-parameter",
             {
-                "message": "Unknown match status",
+                "message": f"Unknown {kind} status",
                 "parameter": "status",
                 "invalid": invalid,
-                "valid_values": list(MATCH_STATUSES),
+                "valid_values": list(valid),
             },
         )
     return tuple(sorted(set(requested)))
+
+
+def parse_job_statuses(value: str | None) -> tuple[str, ...]:
+    return parse_statuses(value, SCRAPE_RUN_STATUSES, "job")
 
 
 def parse_date_bound(value: str | None, parameter: str, *, upper: bool) -> datetime | None:
@@ -168,6 +174,13 @@ def slug_keyset(token: str, filters_hash: str) -> str:
     if not isinstance(slug, str):
         raise _invalid_cursor()
     return slug
+
+
+def id_keyset(token: str, filters_hash: str) -> int:
+    (item_id,) = decode_cursor(token, filters_hash, 1)
+    if not isinstance(item_id, int) or isinstance(item_id, bool):
+        raise _invalid_cursor()
+    return item_id
 
 
 def compact(model: BaseModel, fields: set[str] | None) -> dict[str, Any]:

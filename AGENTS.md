@@ -23,6 +23,8 @@ API.
 | `app/agent_docs.py` | Pure generator of `/llms.txt`, `/agents`, `/agents.md`, `/llms-full.txt`, `/problems/<slug>` from the OpenAPI spec and competitions; `SKILL_PATH`/`SKILL_FILE` for the served skill; `MCP_TOOLS` (tool → operation) |
 | `app/mcp_server.py` | Curated MCP server (`mcp` SDK `MCPServer`) at `/mcp`: 5 tools calling the API in-process, output models, Host/Origin checks, `McpRoute` |
 | `app/caching.py` | Weak body-hash `ETag`, `If-None-Match`, and `Cache-Control` rules for read endpoints |
+| `app/observability.py` | Stale-season and stalled-scheduler rules (`STALE_GRACE`, `stall_window`), Prometheus rendering for `/metrics`, HTTP request metrics |
+| `app/logs.py` | `configure_logging` (`FOOTBALL_RESULTS_LOG_FORMAT`: `text` or `json`) for the API and scheduler |
 | `app/standings.py` | Pure league-table calculation and tie-breakers from finished matches |
 | `app/scheduler.py` | Scheduler loop (`python -m app.scheduler`): seed → heartbeat → season checks (discovery/rollover) → claim due seasons → scrape → persist |
 | `app/scheduling.py` | Pure rules driven by `SchedulePolicy`: `calculate_next_check`, `failure_backoff`, `rollover_target` |
@@ -44,6 +46,8 @@ API.
 | `cli/football_results_cli/problems.py` | Exit codes, CLI problem slugs (`urn:football-results:cli:<slug>`), `exit_code_for` |
 | `skills/football-results/SKILL.md` | Consumer Agent Skill for API users (teaches the CLI), served unchanged at `/skills/football-results/SKILL.md` |
 | `server.json` | MCP Registry metadata (remote `/mcp`), validated against `tests/schemas/server.schema.json` |
+| `observability/` | Prometheus scrape config and Grafana provisioning (data source, dashboard, alert rules, policy; the Telegram contact point is in `compose.yaml`) for the `observability` Compose profile |
+| `GLOSSARY.md` | Domain terms (stale season, stalled scheduler, grace period) |
 | `tests/` | pytest; API tests use `FakeRepository` and need no database; `test_cli.py` runs the CLI against the app in-process |
 | `tests/integration/` | Repository and migration tests against real PostgreSQL (skipped without `FOOTBALL_RESULTS_TEST_DATABASE_URL`) |
 
@@ -150,6 +154,14 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
   the server `Settings` (a test checks). Send the API key only on job/write operations.
 - Both packages share one version; bump `pyproject.toml` and `cli/pyproject.toml` together (a test
   checks). The Docker image installs only the API (`uv sync --frozen --no-dev`), not `cli/`.
+- Observability: `/metrics` (not an OpenAPI operation, rate-limit exempt) and the `Admin`
+  operations need an API key; `/metrics` also accepts `Authorization: Bearer`. Scheduler and
+  season metrics are computed from PostgreSQL at scrape time with the rules in
+  `app/observability.py`; keep `STALE_GRACE` equal to the CLI's (a test checks). Label HTTP
+  metrics by operation ID, never by raw path. Admin operations are not MCP tools. Alert rules and
+  the dashboard in `observability/grafana/` use these metric names, so rename none. The Telegram
+  contact point is a Compose `configs` entry: Grafana turns numeric-looking `$VAR` values into
+  numbers, which breaks chat IDs. Alert templates use `{{ $labels.x }}` unescaped.
 - Statistics that a provider cannot supply must stay `null` — never default to `0`.
 - 90minut pages are ISO-8859-2 and use Polish month names with Europe/Warsaw time.
 - football-data.org is throttled (`FOOTBALL_DATA_MIN_REQUEST_INTERVAL_SECONDS`, default 6s) and

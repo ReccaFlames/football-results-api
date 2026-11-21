@@ -596,6 +596,51 @@ async def test_scheduler_heartbeat(repository: PostgresResultRepository) -> None
     assert first is not None and second is not None and second >= first
 
 
+async def test_observability_queries(repository: PostgresResultRepository) -> None:
+    competition = league()
+    await repository.seed_competitions({"test-league": competition, "test-cup": cup()})
+    current = competition.seasons["2026-2027"]
+    await repository.record_scrape_failure(competition, current, RuntimeError("first"))
+    await repository.record_scrape_failure(competition, current, RuntimeError("second"))
+    queued_id, _ = await repository.enqueue_scrape(competition, current)
+    await repository.enqueue_scrape(cup(), cup().seasons["2026-2027"])
+    started = datetime.now(UTC)
+    await repository.heartbeat("old-worker", started - timedelta(days=1))
+    await repository.heartbeat("new-worker", started)
+
+    runs = await repository.list_scrape_runs(competition="TEST-LEAGUE")
+    assert [(run.status, run.error_message) for run in runs] == [
+        ("queued", None),
+        ("failed", "second"),
+        ("failed", "first"),
+    ]
+    assert runs[0].source_url == current.source_url
+    page = await repository.list_scrape_runs(
+        statuses=("failed",), limit=1, before_id=runs[1].job_id
+    )
+    assert [run.error_message for run in page] == ["first"]
+    assert await repository.list_scrape_runs(season="2025-2026") == []
+
+    [latest] = await repository.scheduler_workers(1)
+    assert latest.worker_id == "new-worker"
+
+    seasons = {state.competition: state for state in await repository.scheduled_seasons()}
+    assert set(seasons) == {"test-league", "test-cup"}
+    assert seasons["test-league"].season == "2026-2027"
+    assert seasons["test-league"].consecutive_failures == 2
+    assert seasons["test-league"].active_job_id == queued_id
+    assert seasons["test-league"].fetched_at is None
+
+    counts = {
+        (item.competition, item.status): item.count for item in await repository.scrape_run_counts()
+    }
+    assert counts == {
+        ("test-cup", "queued"): 1,
+        ("test-league", "failed"): 2,
+        ("test-league", "queued"): 1,
+    }
+
+
 async def test_runs_of_a_dead_worker_are_failed_and_the_season_is_claimed_again(
     repository: PostgresResultRepository, sessions: async_sessionmaker[AsyncSession]
 ) -> None:

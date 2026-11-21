@@ -140,6 +140,40 @@ TEAM_COLUMNS = (
 )
 
 
+def truncate(value: Any, width: int = 60) -> str:
+    text = format_value(value)
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
+SCRAPE_RUN_COLUMNS = (
+    Column("Job", lambda item: str(item["job_id"]), numeric=True),
+    Column("Competition", lambda item: format_value(item.get("competition"))),
+    Column("Season", lambda item: format_value(item.get("season"))),
+    Column("Status", lambda item: format_value(item.get("status"))),
+    Column("Queued (UTC)", lambda item: format_value(item.get("queued_at"), "_at")),
+    Column("Completed (UTC)", lambda item: format_value(item.get("completed_at"), "_at")),
+    Column("Matches", lambda item: format_value(item.get("matches_found")), numeric=True),
+    Column("Error", lambda item: truncate(item.get("error_message"))),
+)
+SEASON_SCHEDULE_COLUMNS = (
+    Column("Competition", lambda item: format_value(item.get("competition"))),
+    Column("Season", lambda item: format_value(item.get("season"))),
+    Column("State", lambda item: format_value(item.get("scheduler_state"))),
+    Column("Data as of (UTC)", lambda item: format_value(item.get("data_as_of"), "_at")),
+    Column("Next update (UTC)", lambda item: format_value(item.get("next_update_at"), "_at")),
+    Column("Overdue (s)", lambda item: f"{item.get('overdue_seconds') or 0:.0f}", numeric=True),
+    Column("Stale", lambda item: format_value(item.get("stale"))),
+    Column("Failures", lambda item: format_value(item.get("consecutive_failures")), numeric=True),
+    Column("Job", lambda item: format_value(item.get("active_job_id")), numeric=True),
+)
+WORKER_COLUMNS = (
+    Column("Worker", lambda item: format_value(item.get("worker_id"))),
+    Column("Started (UTC)", lambda item: format_value(item.get("started_at"), "_at")),
+    Column("Heartbeat (UTC)", lambda item: format_value(item.get("heartbeat_at"), "_at")),
+    Column("Alive", lambda item: format_value(item.get("alive"))),
+)
+
+
 def selected_columns(
     defaults: Sequence[Column], fields: Sequence[str] | None, always: str
 ) -> Sequence[Column]:
