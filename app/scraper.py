@@ -14,9 +14,11 @@ from bs4 import BeautifulSoup
 
 from app.competitions import (
     ESPN_HOST,
+    OPENLIGADB_HOST,
     THESPORTSDB_HOST,
     espn_source_url,
     football_data_source_url,
+    openligadb_source_url,
     provider_competition_code,
     thesportsdb_source_url,
 )
@@ -1307,6 +1309,275 @@ class TheSportsDbScraper:
         return parse_thesportsdb_seasons(payload, competition, league)
 
 
+OPENLIGADB_API = f"https://{OPENLIGADB_HOST}"
+OPENLIGADB_MIN_REQUEST_INTERVAL_SECONDS = 2.0
+OPENLIGADB_POSTPONED_AFTER_HOURS = 24.0
+OPENLIGADB_FULL_TIME = 2
+OPENLIGADB_HALF_TIME = 1
+
+
+def _openligadb_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _openligadb_result(results: object, type_id: int) -> tuple[int, int] | None:
+    """The score of one result type; never chosen by array position."""
+    for result in results if isinstance(results, list) else []:
+        if not isinstance(result, dict) or result.get("resultTypeID") != type_id:
+            continue
+        home = _openligadb_int(result.get("pointsTeam1"))
+        away = _openligadb_int(result.get("pointsTeam2"))
+        return None if home is None or away is None else (home, away)
+    return None
+
+
+def _openligadb_team(raw_match: dict[object, object], key: str) -> str:
+    team = raw_match.get(key)
+    name = team.get("teamName") if isinstance(team, dict) else None
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError(f"OpenLigaDB match {raw_match.get('matchID')} has no {key} name")
+    return name.strip()
+
+
+def _openligadb_first_goal(goals: object, full_time: tuple[int, int]) -> tuple[int, str | None]:
+    """Side (1 = team1, 2 = team2) and minute of the first goal.
+
+    The side comes from which running score the goal raised, so an own goal counts for the team
+    whose score it raised. Raises ``ValueError`` (or ``TypeError`` for malformed goals) when the
+    goals do not add up to ``full_time``.
+    """
+    if not isinstance(goals, list) or not goals:
+        raise ValueError("no goals")
+    running: list[tuple[int, int, object]] = []
+    for goal in goals:
+        if not isinstance(goal, dict):
+            raise TypeError("malformed goal")
+        home = _openligadb_int(goal.get("scoreTeam1"))
+        away = _openligadb_int(goal.get("scoreTeam2"))
+        if home is None or away is None:
+            raise ValueError("goal without a running score")
+        running.append((home, away, goal.get("matchMinute")))
+    running.sort(key=lambda item: item[0] + item[1])
+    previous = (0, 0)
+    sides: list[int] = []
+    for home, away, _ in running:
+        if (home, away) == (previous[0] + 1, previous[1]):
+            sides.append(1)
+        elif (home, away) == (previous[0], previous[1] + 1):
+            sides.append(2)
+        else:
+            raise ValueError("goals do not add up")
+        previous = (home, away)
+    if previous != full_time:
+        raise ValueError("goals do not add up to the full-time score")
+    minute = _openligadb_int(running[0][2])
+    return sides[0], None if minute is None else str(minute)
+
+
+def _openligadb_statistics(
+    raw_match: dict[object, object],
+    full_time: tuple[int, int],
+    home_team: str,
+    away_team: str,
+) -> dict[str, object]:
+    home_goals, away_goals = full_time
+    statistics: dict[str, object] = {"home_goals": home_goals, "away_goals": away_goals}
+    half_time = _openligadb_result(raw_match.get("matchResults"), OPENLIGADB_HALF_TIME)
+    if half_time is not None and half_time[0] <= home_goals and half_time[1] <= away_goals:
+        statistics |= {
+            "home_goals_first_half": half_time[0],
+            "away_goals_first_half": half_time[1],
+            "home_goals_second_half": home_goals - half_time[0],
+            "away_goals_second_half": away_goals - half_time[1],
+        }
+    if home_goals + away_goals > 0:
+        try:
+            side, minute = _openligadb_first_goal(raw_match.get("goals"), full_time)
+        except (TypeError, ValueError):
+            pass
+        else:
+            statistics["first_team_to_score"] = home_team if side == 1 else away_team
+            statistics["first_goal_minute"] = minute
+    return statistics
+
+
+def parse_openligadb_matches(
+    payload: object,
+    competition: Competition,
+    source: SeasonSource,
+    now: datetime,
+    postponed_after: timedelta = timedelta(hours=OPENLIGADB_POSTPONED_AFTER_HOURS),
+) -> list[ScrapedMatch]:
+    """Map a ``getmatchdata/<shortcut>/<year>`` response (a whole season) to fixtures.
+
+    OpenLigaDB has no postponed status, so an unfinished match more than ``postponed_after`` past
+    kickoff is ``inactive`` (ADR 0004). Cards, corners, and fouls are not supplied.
+    """
+    if not isinstance(payload, list):
+        raise TypeError("OpenLigaDB response is not a JSON list of matches")
+    matches: list[ScrapedMatch] = []
+    for raw_match in payload:
+        if not isinstance(raw_match, dict):
+            raise TypeError("OpenLigaDB match is not a JSON object")
+        match_id = _openligadb_int(raw_match.get("matchID"))
+        raw_kickoff = raw_match.get("matchDateTimeUTC")
+        group = raw_match.get("group")
+        round_number = group.get("groupOrderID") if isinstance(group, dict) else None
+        if match_id is None or not isinstance(raw_kickoff, str):
+            raise ValueError("OpenLigaDB match has no matchID or matchDateTimeUTC")
+        try:
+            played_at = datetime.fromisoformat(raw_kickoff)
+        except ValueError as error:
+            raise ValueError(f"OpenLigaDB match {match_id} has an invalid kickoff") from error
+        if played_at.tzinfo is None:
+            raise ValueError(f"OpenLigaDB match {match_id} kickoff has no time zone")
+        home_team = _openligadb_team(raw_match, "team1")
+        away_team = _openligadb_team(raw_match, "team2")
+        full_time = _openligadb_result(raw_match.get("matchResults"), OPENLIGADB_FULL_TIME)
+        finished = raw_match.get("matchIsFinished") is True and full_time is not None
+        if raw_match.get("matchIsFinished") is True and full_time is None:
+            logger.warning(
+                "OpenLigaDB match %s is marked finished but has no full-time result", match_id
+            )
+        if finished:
+            status = "finished"
+        elif now - played_at > postponed_after:
+            status = "inactive"
+        else:
+            status = "scheduled"
+        statistics = (
+            _openligadb_statistics(raw_match, full_time, home_team, away_team)
+            if finished and full_time is not None
+            else {}
+        )
+        group_name = group.get("groupName") if isinstance(group, dict) else None
+        matches.append(
+            ScrapedMatch(
+                competition=competition.slug,
+                season=source.season,
+                stage=group_name.strip()
+                if isinstance(group_name, str) and group_name.strip()
+                else competition.name,
+                round=_openligadb_int(round_number) or None,
+                home_team=home_team,
+                away_team=away_team,
+                status=status,
+                home_score=full_time[0] if finished and full_time else None,
+                away_score=full_time[1] if finished and full_time else None,
+                played_at=played_at,
+                source_url=source.source_url,
+                provider_match_id=str(match_id),
+                **statistics,
+            )
+        )
+    return sorted(matches, key=lambda item: item.played_at)
+
+
+def parse_openligadb_seasons(
+    payload: object, competition: Competition, shortcut: str
+) -> list[SeasonSource]:
+    """Map a ``getavailableleagues`` response to the competition's seasons, newest first."""
+    if not isinstance(payload, list):
+        raise TypeError("OpenLigaDB getavailableleagues response is not a JSON list")
+    years: set[int] = set()
+    for league in payload:
+        if not isinstance(league, dict):
+            continue
+        league_shortcut = league.get("leagueShortcut")
+        if not isinstance(league_shortcut, str) or league_shortcut.lower() != shortcut:
+            continue
+        raw_year = league.get("leagueSeason")
+        if isinstance(raw_year, str) and raw_year.strip().isdigit():
+            raw_year = int(raw_year)
+        if isinstance(raw_year, int) and not isinstance(raw_year, bool) and raw_year >= 1900:
+            years.add(raw_year)
+    sources: list[SeasonSource] = []
+    for year in sorted(years, reverse=True):
+        season = str(year) if competition.season_format == "calendar" else f"{year}-{year + 1}"
+        sources.append(
+            SeasonSource(
+                season=season,
+                source_url=openligadb_source_url(shortcut, season),
+                provider="openligadb",
+            )
+        )
+    return sources
+
+
+class OpenLigaDbScraper:
+    """OpenLigaDB's documented, key-free JSON API (see docs/adr/0004). Data is ODbL-licensed."""
+
+    name = "openligadb"
+    capabilities = ProviderCapabilities(
+        statistics=DERIVED_GOAL_STATISTICS,
+        season_discovery=True,
+    )
+
+    def __init__(
+        self,
+        timeout: float,
+        user_agent: str,
+        min_interval_seconds: float = OPENLIGADB_MIN_REQUEST_INTERVAL_SECONDS,
+        postponed_after_hours: float = OPENLIGADB_POSTPONED_AFTER_HOURS,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self.timeout = timeout
+        self.user_agent = user_agent
+        self.min_interval_seconds = min_interval_seconds
+        self.postponed_after = timedelta(hours=postponed_after_hours)
+        self.clock = clock
+        self._transport = transport
+        self._lock = asyncio.Lock()
+        self._last_request_at = 0.0
+
+    async def _get_json(self, url: str) -> object:
+        async with self._lock:
+            delay = self.min_interval_seconds - (time.monotonic() - self._last_request_at)
+            if delay > 0:
+                await asyncio.sleep(delay)
+            try:
+                async with httpx.AsyncClient(
+                    timeout=self.timeout,
+                    headers={"User-Agent": self.user_agent, "Accept": "application/json"},
+                    follow_redirects=False,
+                    transport=self._transport,
+                ) as client:
+                    response = await client.get(url)
+            finally:
+                self._last_request_at = time.monotonic()
+        response.raise_for_status()
+        return response.json()
+
+    def _shortcut(self, source: SeasonSource) -> str:
+        shortcut = provider_competition_code(source)
+        if source.provider != self.name or shortcut is None:
+            raise ValueError(f"not an OpenLigaDB source: {source.source_url}")
+        return shortcut
+
+    async def scrape(self, competition: Competition, source: SeasonSource) -> list[ScrapedMatch]:
+        self._shortcut(source)
+        payload = await self._get_json(source.source_url)
+        return parse_openligadb_matches(
+            payload, competition, source, self.clock(), self.postponed_after
+        )
+
+    async def discover_seasons(self, competition: Competition) -> list[SeasonSource]:
+        shortcuts = {
+            shortcut
+            for source in competition.seasons.values()
+            if source.provider == self.name
+            and (shortcut := provider_competition_code(source)) is not None
+        }
+        if len(shortcuts) != 1:
+            raise ValueError(
+                f"cannot determine the OpenLigaDB league shortcut for {competition.slug}"
+            )
+        shortcut = shortcuts.pop()
+        payload = await self._get_json(f"{OPENLIGADB_API}/getavailableleagues")
+        return parse_openligadb_seasons(payload, competition, shortcut)
+
+
 class ScraperRegistry:
     def __init__(
         self,
@@ -1366,6 +1637,8 @@ def create_scraper_registry(
     thesportsdb_min_interval_seconds: float = THESPORTSDB_MIN_REQUEST_INTERVAL_SECONDS,
     thesportsdb_window_days_back: int = THESPORTSDB_WINDOW_DAYS_BACK,
     thesportsdb_window_days_ahead: int = THESPORTSDB_WINDOW_DAYS_AHEAD,
+    openligadb_min_interval_seconds: float = OPENLIGADB_MIN_REQUEST_INTERVAL_SECONDS,
+    openligadb_postponed_after_hours: float = OPENLIGADB_POSTPONED_AFTER_HOURS,
 ) -> ScraperRegistry:
     providers: list[CompetitionScraper] = [
         NinetyMinutScraper(
@@ -1389,11 +1662,23 @@ def create_scraper_registry(
             thesportsdb_window_days_back,
             thesportsdb_window_days_ahead,
         ),
+        OpenLigaDbScraper(
+            timeout,
+            user_agent,
+            openligadb_min_interval_seconds,
+            openligadb_postponed_after_hours,
+        ),
     ]
     return ScraperRegistry({provider.name: provider for provider in providers}, team_aliases)
 
 
 PROVIDER_CAPABILITIES: dict[str, ProviderCapabilities] = {
     scraper.name: scraper.capabilities
-    for scraper in (NinetyMinutScraper, FootballDataScraper, EspnScraper, TheSportsDbScraper)
+    for scraper in (
+        NinetyMinutScraper,
+        FootballDataScraper,
+        EspnScraper,
+        TheSportsDbScraper,
+        OpenLigaDbScraper,
+    )
 }

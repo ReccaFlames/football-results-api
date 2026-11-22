@@ -1145,8 +1145,17 @@ async def _agent_guide(
             agent_docs.skill_tool(base_url),
             agent_docs.mcp_tool(base_url),
         ),
+        provider_competitions=_configured_provider_competitions(),
     )
     return guide, base_url, request_derived
+
+
+def _configured_provider_competitions() -> dict[str, list[str]]:
+    try:
+        return load_config().competitions_by_provider()
+    except (TypeError, ValueError):
+        logger.warning("Agent docs omit data attributions: the configuration file is invalid")
+        return {}
 
 
 def _markdown(content: str, headers: dict[str, str]) -> Response:

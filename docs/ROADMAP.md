@@ -275,40 +275,40 @@ How to use this list:
     - [x] Docs (README, `PROVIDERS.md`, ADR 0003, glossary); version 0.19.0
   - [ ] 17d. More primary providers, each tied to a named competition that no current provider
         covers
-    - [ ] 17d.1 3. Liga (Germany) via OpenLigaDB
+    - [x] 17d.1 3. Liga (Germany) via OpenLigaDB
           ([ADR 0004](adr/0004-openligadb-primary-source-for-3-liga.md))
-      - [ ] `openligadb` provider: one documented `getmatchdata/<shortcut>/<start year>` request
+      - [x] `openligadb` provider: one documented `getmatchdata/<shortcut>/<start year>` request
             per season (whole season, no key); `matchDateTimeUTC` kickoff; `round` from
             `group.groupOrderID`; `provider_match_id` = `matchID`; scores by `resultTypeID`
             (2 = full time, 1 = half time), never by array order
-      - [ ] Status: `matchIsFinished` with a full-time result → `finished`; an unfinished match
+      - [x] Status: `matchIsFinished` with a full-time result → `finished`; an unfinished match
             more than `providers.openligadb.postponed_after_hours` (default 24) past kickoff →
             `inactive` (OpenLigaDB has no postponed status, see ADR 0004); otherwise
             `scheduled`; a finished match without a full-time result stays unfinished with a
             warning
-      - [ ] Statistics: goals, half-time split, first goal team and minute; the first goal only
+      - [x] Statistics: goals, half-time split, first goal team and minute; the first goal only
             when the goal list adds up to the full-time score (else `null`); own goals count for
             the team whose score they raised (from the score change, not `scoringTeamId`);
             cards, corners, and fouls always `null`
-      - [ ] `discover_seasons` via `getavailableleagues`, filtered by the competition's shortcut,
+      - [x] `discover_seasons` via `getavailableleagues`, filtered by the competition's shortcut,
             newest first; `split` seasons map `2026-2027` ↔ `2026`
-      - [ ] Source URL allow-list `https://api.openligadb.de/getmatchdata/<shortcut>/<start year>`
+      - [x] Source URL allow-list `https://api.openligadb.de/getmatchdata/<shortcut>/<start year>`
             (`<shortcut>` lowercase letters and digits, e.g. `bl3`); all seasons of one
             competition use the same shortcut (`config check` and historical fetch reject mixed
             ones)
-      - [ ] Throttle with `providers.openligadb.min_request_interval_seconds` (default 2) and
+      - [x] Throttle with `providers.openligadb.min_request_interval_seconds` (default 2) and
             `FOOTBALL_RESULTS_OPENLIGADB_MIN_REQUEST_INTERVAL_SECONDS`; `postponed_after_hours`
             accepted only for `openligadb` (`config check`)
-      - [ ] Tests (`tests/test_openligadb_scraper.py`, inline fixtures): finished match with
+      - [x] Tests (`tests/test_openligadb_scraper.py`, inline fixtures): finished match with
             goals, scheduled match, postponed heuristic, goal list that does not add up, own goal,
             missing half-time result stays `null`, malformed payload raises, discovery, URL
             accept/reject, statistics within capabilities
-      - [ ] `config/competitions.yaml`: `3-liga` (3. Liga, Germany, league, `openligadb`, split,
+      - [x] `config/competitions.yaml`: `3-liga` (3. Liga, Germany, league, `openligadb`, split,
             start month 7), seasons 2025-2026 and 2026-2027 (current), no fallback
-      - [ ] ODbL attribution for OpenLigaDB: README, `PROVIDERS.md`, and a generated note in
+      - [x] ODbL attribution for OpenLigaDB: README, `PROVIDERS.md`, and a generated note in
             `/llms.txt` and `/agents` when a configured competition uses `openligadb`; API
             contract unchanged
-      - [ ] Docs (README supported competitions, statistics coverage, configuration;
+      - [x] Docs (README supported competitions, statistics coverage, configuration;
             `PROVIDERS.md` capability and URL tables; ADR 0004); version 0.20.0
             (`pyproject.toml`, `cli/pyproject.toml`, `server.json`, `uv lock`)
 - [ ] **18. Optional hosted access**

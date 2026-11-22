@@ -22,6 +22,7 @@ def test_default_config_is_valid_and_preserves_competitions() -> None:
         "pierwsza-liga",
         "europa-league",
         "premier-league",
+        "3-liga",
     }
     assert competitions["ekstraklasa"].current_season == "2026-2027"
     assert config.providers["90minut"].min_request_interval_seconds == 2

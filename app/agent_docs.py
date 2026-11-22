@@ -549,6 +549,7 @@ class AgentGuide:
     rate_limits: RateLimits
     cache_max_age_seconds: int
     tools: tuple[ToolLink, ...] = ()
+    attributions: tuple[str, ...] = ()
 
     def url(self, path: str) -> str:
         return f"{self.base_url}{path}"
@@ -569,6 +570,7 @@ def build_guide(
     rate_limits: RateLimits,
     cache_max_age_seconds: int,
     tools: Sequence[ToolLink] = (),
+    provider_competitions: Mapping[str, Sequence[str]] | None = None,
 ) -> AgentGuide:
     info = spec.get("info", {})
     description = info.get("description", "").strip()
@@ -587,7 +589,35 @@ def build_guide(
         rate_limits=rate_limits,
         cache_max_age_seconds=cache_max_age_seconds,
         tools=tuple(tools),
+        attributions=data_attributions(provider_competitions or {}),
     )
+
+
+# Data licences that require attribution, by provider name (ADR 0004).
+PROVIDER_ATTRIBUTIONS = {
+    "openligadb": (
+        "data from [OpenLigaDB](https://www.openligadb.de), licensed under the "
+        "[Open Database License (ODbL)](https://opendatacommons.org/licenses/odbl/1-0/). Keep "
+        "this attribution when you publish the data; a database derived from it is subject to "
+        "the ODbL's share-alike terms."
+    ),
+}
+
+
+def data_attributions(provider_competitions: Mapping[str, Sequence[str]]) -> tuple[str, ...]:
+    """Attribution notes for the configured providers whose data licence requires one."""
+    notes = []
+    for provider, text in PROVIDER_ATTRIBUTIONS.items():
+        slugs = sorted(set(provider_competitions.get(provider, ())))
+        if slugs:
+            notes.append(", ".join(f"`{slug}`" for slug in slugs) + f": {text}")
+    return tuple(notes)
+
+
+def _attribution_blocks(guide: AgentGuide) -> list[Block]:
+    if not guide.attributions:
+        return []
+    return [Paragraph("Data attribution:"), Bullets(guide.attributions)]
 
 
 def top_tasks(
@@ -717,6 +747,7 @@ def llms_txt(guide: AgentGuide) -> str:
         Paragraph(_auth_text(guide)),
         Paragraph("Competitions on this instance:"),
         Bullets(_competition_lines(guide)),
+        *_attribution_blocks(guide),
         Paragraph(_tasks_intro(guide)),
     ]
     for number, task in enumerate(guide.tasks, start=1):
@@ -810,6 +841,7 @@ def agent_guide_blocks(guide: AgentGuide) -> list[Block]:
             ),
         )
     )
+    blocks.extend(_attribution_blocks(guide))
     blocks.extend(
         [
             Heading(2, "Authentication"),

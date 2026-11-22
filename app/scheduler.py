@@ -12,6 +12,8 @@ from app.models import Competition, SeasonSource
 from app.repository import PostgresResultRepository, RefreshTarget, ScheduledRefresh
 from app.scheduling import SchedulePolicy
 from app.scraper import (
+    OPENLIGADB_MIN_REQUEST_INTERVAL_SECONDS,
+    OPENLIGADB_POSTPONED_AFTER_HOURS,
     THESPORTSDB_MIN_REQUEST_INTERVAL_SECONDS,
     THESPORTSDB_WINDOW_DAYS_AHEAD,
     THESPORTSDB_WINDOW_DAYS_BACK,
@@ -27,6 +29,7 @@ def _create_scraper(config: CompetitionFile) -> ScraperRegistry:
     football_data = config.providers.get("football-data")
     espn = config.providers.get("espn")
     thesportsdb = config.providers.get("thesportsdb")
+    openligadb = config.providers.get("openligadb")
     window_days_back, window_days_ahead = (
         (THESPORTSDB_WINDOW_DAYS_BACK, THESPORTSDB_WINDOW_DAYS_AHEAD)
         if thesportsdb is None
@@ -57,6 +60,16 @@ def _create_scraper(config: CompetitionFile) -> ScraperRegistry:
         ),
         thesportsdb_window_days_back=window_days_back,
         thesportsdb_window_days_ahead=window_days_ahead,
+        openligadb_min_interval_seconds=settings.openligadb_min_request_interval_seconds
+        if settings.openligadb_min_request_interval_seconds is not None
+        else (
+            OPENLIGADB_MIN_REQUEST_INTERVAL_SECONDS
+            if openligadb is None
+            else openligadb.min_request_interval_seconds
+        ),
+        openligadb_postponed_after_hours=OPENLIGADB_POSTPONED_AFTER_HOURS
+        if openligadb is None
+        else openligadb.postponed_after(),
     )
 
 

@@ -29,6 +29,7 @@ from app.scheduling import (
     parse_duration,
 )
 from app.scraper import (
+    OPENLIGADB_POSTPONED_AFTER_HOURS,
     PROVIDER_CAPABILITIES,
     THESPORTSDB_FREE_API_KEY,
     THESPORTSDB_WINDOW_DAYS_AHEAD,
@@ -67,6 +68,7 @@ class Settings(BaseSettings):
     # TheSportsDB's free public key; a premium key overrides it. Never logged or stored.
     thesportsdb_api_key: SecretStr = SecretStr(THESPORTSDB_FREE_API_KEY)
     thesportsdb_min_request_interval_seconds: float | None = Field(default=None, ge=0)
+    openligadb_min_request_interval_seconds: float | None = Field(default=None, ge=0)
     rate_limit_enabled: bool = True
     rate_limit_read_per_minute: int = Field(default=120, ge=1)
     rate_limit_write_per_minute: int = Field(default=10, ge=1)
@@ -227,6 +229,15 @@ class ProviderConfig(BaseModel):
     # Only for windowed providers (ADR 0003): days before and after today that are fetched.
     window_days_back: int | None = Field(default=None, ge=0)
     window_days_ahead: int | None = Field(default=None, ge=0)
+    # Only for openligadb (ADR 0004): an unfinished match this long past kickoff is inactive.
+    postponed_after_hours: float | None = Field(default=None, gt=0)
+
+    def postponed_after(self) -> float:
+        return (
+            OPENLIGADB_POSTPONED_AFTER_HOURS
+            if self.postponed_after_hours is None
+            else self.postponed_after_hours
+        )
 
     def window(self) -> tuple[int, int]:
         return (
@@ -358,6 +369,10 @@ class CompetitionFile(BaseModel):
             )
             if has_window and (capabilities is None or not capabilities.windowed):
                 raise ValueError(f"provider {name!r} is not windowed; remove its window_days_*")
+            if provider_config.postponed_after_hours is not None and name != "openligadb":
+                raise ValueError(
+                    f"postponed_after_hours is only supported for 'openligadb', not {name!r}"
+                )
         for competition in self.competitions:
             capabilities = PROVIDER_CAPABILITIES.get(competition.provider)
             if capabilities is not None and capabilities.windowed:
@@ -441,6 +456,14 @@ class CompetitionFile(BaseModel):
             for competition in self.competitions
             if competition.team_aliases
         }
+
+    def competitions_by_provider(self) -> dict[str, list[str]]:
+        """Competition slugs per provider, as primary or fallback provider."""
+        result: dict[str, list[str]] = {}
+        for competition in self.competitions:
+            for provider in {competition.provider, competition.fallback_provider} - {None}:
+                result.setdefault(str(provider), []).append(competition.slug)
+        return result
 
     def fallback_providers(self) -> dict[str, str]:
         """Configured fallback provider per competition slug."""

@@ -20,7 +20,7 @@ class CompetitionScraper(Protocol):
 
 ### `name`
 
-A short, stable, lowercase identifier (`90minut`, `football-data`, `espn`, `thesportsdb`). It is persisted in
+A short, stable, lowercase identifier (`90minut`, `football-data`, `espn`, `thesportsdb`, `openligadb`). It is persisted in
 `competition_season.provider`, so renaming it requires a data migration.
 
 ### `capabilities`
@@ -43,6 +43,7 @@ Current providers:
 | `football-data` | goals, half-time split, cards, first scorer and minute | yes | yes | no |
 | `espn` | goals, half-time split, cards, first scorer and minute, corners, fouls | yes | no | no |
 | `thesportsdb` | goals | yes (fallback URLs only) | no (free key `123` by default) | yes |
+| `openligadb` | goals, half-time split, first goal team and minute | yes | no | no |
 
 football-data.org declares cards and first scorer, but its free plan omits goal and booking events,
 so those fields stay `null` without a paid plan. Corners and fouls come only from `espn`.
@@ -67,6 +68,25 @@ matchday can miss matches. A paid key in `FOOTBALL_RESULTS_THESPORTSDB_API_KEY` 
 limits, and `config check` and the services warn about each `thesportsdb` fallback on the free key.
 The key is part of every request path, so it is never stored in a source URL, logged, or included
 in error messages.
+
+`openligadb` reads OpenLigaDB's documented, key-free JSON API (ADR 0004) with one
+`getmatchdata/<shortcut>/<start year>` request per season, which returns the whole season. Kickoff
+is `matchDateTimeUTC`, `round` is `group.groupOrderID`, `stage` is `group.groupName`, and
+`provider_match_id` is `matchID`. Scores are selected from `matchResults` by `resultTypeID`
+(2 = full time, 1 = half time), never by array position. A match with `matchIsFinished` and a
+full-time result is `finished`; one marked finished without a full-time result is treated as
+unfinished and logged. OpenLigaDB has no postponed status, so an unfinished match more than
+`providers.openligadb.postponed_after_hours` (default 24, accepted only for `openligadb`) past
+kickoff is `inactive`; every other match is `scheduled`. The first goal is filled only when the
+goal list adds up to the full-time score, and its team comes from which running score
+(`scoreTeam1`/`scoreTeam2`) the goal raised, so own goals count correctly; `scoringTeamId` is
+ignored. Cards, corners, and fouls are always `null`. `discover_seasons` uses
+`getavailableleagues`, filtered by the competition's shortcut, and maps `leagueSeason` 2026 to
+`2026-2027`. Requests are throttled by `providers.openligadb.min_request_interval_seconds`
+(default 2 s). OpenLigaDB data is licensed under the
+[Open Database License (ODbL)](https://opendatacommons.org/licenses/odbl/1-0/): attribute
+[OpenLigaDB](https://www.openligadb.de) when publishing it. `/llms.txt` and `/agents` add that
+attribution for every configured competition that uses `openligadb`.
 
 Statistic rules shared by providers: a card count is yellow plus red cards, so a second yellow
 counts as 2; an own goal belongs to the team whose score it raised; a goalless match has no first
@@ -135,8 +155,9 @@ endpoint against SSRF, so never accept arbitrary hosts or paths. Accepted today:
 | `football-data` | `https://api.football-data.org/v4/competitions/<CODE>/matches?season=<start year>` (`<CODE>` is 2–10 uppercase letters or digits, e.g. `PL`, `BL1`, `CL`, `BSA`) |
 | `espn` | `https://site.api.espn.com/apis/site/v2/sports/soccer/<league>/scoreboard?season=<start year>` (`<league>` such as `eng.1`, `ger.1`, `uefa.champions`) |
 | `thesportsdb` | `https://www.thesportsdb.com/league/<id>?season=<YYYY-YYYY>` (key-free; `<id>` such as `4422` for Ekstraklasa, `4661` for I liga) |
+| `openligadb` | `https://api.openligadb.de/getmatchdata/<shortcut>/<start year>` (`<shortcut>` is lowercase letters and digits, e.g. `bl3` for the 3. Liga) |
 
-All football-data.org sources (or ESPN sources) of one competition must use the same `<CODE>` (or `<league>`); the configuration
+All football-data.org sources (or ESPN or OpenLigaDB sources) of one competition must use the same `<CODE>` (or `<league>` or `<shortcut>`); the configuration
 check and the historical fetch endpoint reject mixed codes.
 
 ## Fallback sources

@@ -32,6 +32,11 @@ providers:
     min_request_interval_seconds: 3
     window_days_back: 7
     window_days_ahead: 14
+  # Documented, key-free JSON API with ODbL-licensed data (ADR 0004). It has no postponed status:
+  # an unfinished match more than postponed_after_hours past kickoff counts as inactive.
+  openligadb:
+    min_request_interval_seconds: 2
+    postponed_after_hours: 24
 
 competitions:
   - slug: ekstraklasa
@@ -123,6 +128,22 @@ competitions:
       Torreense: SCU Torreense
       Union St.-Gilloise: Royale Union Saint-Gilloise
       Viktoria Plzen: FC Viktoria Plzeň
+
+  # OpenLigaDB (ODbL; attribute when publishing). No fallback source and no team_aliases: team names
+  # come from OpenLigaDB. See docs/adr/0004-openligadb-primary-source-for-3-liga.md.
+  - slug: 3-liga
+    name: 3. Liga
+    country: Germany
+    format: league
+    provider: openligadb
+    season_format: split
+    season_start_month: 7
+    current_season: 2026-2027
+    seasons:
+      "2025-2026":
+        source_url: https://api.openligadb.de/getmatchdata/bl3/2025
+      "2026-2027":
+        source_url: https://api.openligadb.de/getmatchdata/bl3/2026
 
   # ESPN's undocumented scoreboard API (personal, non-commercial use); see
   # docs/adr/0001-espn-primary-source-for-premier-league.md.

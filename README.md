@@ -1,13 +1,13 @@
 # Football Results API
 
 FastAPI service that imports football fixtures and results from public sources (90minut.pl,
-football-data.org, and ESPN), stores them in PostgreSQL, keeps current seasons up to date with an adaptive
+football-data.org, ESPN, TheSportsDB, and OpenLigaDB), stores them in PostgreSQL, keeps current seasons up to date with an adaptive
 scheduler, and serves them over a REST API.
 
 The repository started as an Ekstraklasa-only scraper and is evolving into a **generic, configurable
 league-data API**. This README describes both:
 
-- **[Current state](#current-state)** – what is implemented and works today (version 0.17.0).
+- **[Current state](#current-state)** – what is implemented and works today (version 0.20.0).
 - **[Target state](#target-state-and-roadmap)** – where the project is heading and what is still
   missing.
 
@@ -15,11 +15,11 @@ league-data API**. This README describes both:
 
 | Capability | Current state | Target state |
 | --- | --- | --- |
-| Competitions | 4 declared in `config/competitions.yaml`: Ekstraklasa, I liga, Europa League, Premier League | Any league/cup, declared in a config file or through an admin API |
-| Data providers | `90minut` (HTML scraping), `football-data` (JSON API, any competition code), `espn` (public scoreboard JSON, Premier League; Europa League fallback), and `thesportsdb` (documented JSON API, windowed fallback for Ekstraklasa and I liga) behind a [documented provider contract](docs/PROVIDERS.md) | More sources and fallback providers |
+| Competitions | 5 declared in `config/competitions.yaml`: Ekstraklasa, I liga, Europa League, Premier League, 3. Liga | Any league/cup, declared in a config file or through an admin API |
+| Data providers | `90minut` (HTML scraping), `football-data` (JSON API, any competition code), `espn` (public scoreboard JSON, Premier League; Europa League fallback), `thesportsdb` (documented JSON API, windowed fallback for Ekstraklasa and I liga), and `openligadb` (documented JSON API, ODbL data, 3. Liga) behind a [documented provider contract](docs/PROVIDERS.md) | More sources and fallback providers |
 | Adding a competition/season | Edit `config/competitions.yaml`; the scheduler applies changes | Edit configuration (no code), hot-reloaded |
 | Seasons | Split (`2026-2027`) or calendar-year (`2026`) per competition, with a configurable start month | Same |
-| Season rollover | Automatic: providers with discovery (football-data, espn) add new seasons; the scheduler switches `current_season` once the new season has started and the old one is finished. 90minut sources are added to YAML by hand | Same, with more discovering providers |
+| Season rollover | Automatic: providers with discovery (football-data, espn, openligadb) add new seasons; the scheduler switches `current_season` once the new season has started and the old one is finished. 90minut sources are added to YAML by hand | Same, with more discovering providers |
 | Scheduling | Adaptive per-season scheduler driven by fixture times; thresholds from `defaults.schedule` with per-competition overrides | Plus cron-style overrides and global provider quotas |
 | Configuration | Environment variables plus validated YAML for leagues, sources, providers, and schedule defaults | Env vars for infrastructure + one validated config file for leagues, sources, and schedules |
 | Observability | `/health`; authenticated admin endpoints for import jobs and scheduler state; Prometheus `/metrics`; optional Prometheus + Grafana stack with Telegram alerts on stale seasons; JSON logs | Same, plus per-provider quotas and fallback alerts |
@@ -36,8 +36,8 @@ Scheduler (app.scheduler) ──┬──▶ ScraperRegistry ──▶ sources
 ~~~
 
 - FastAPI provides the HTTP API (`app/main.py`).
-- Provider-specific adapters (`app/scraper.py`) parse 90minut pages, football-data.org JSON, and ESPN
-  scoreboard JSON.
+- Provider-specific adapters (`app/scraper.py`) parse 90minut pages, football-data.org JSON, ESPN
+  scoreboard JSON, TheSportsDB JSON, and OpenLigaDB JSON.
   They implement the `CompetitionScraper` provider contract (`scrape`, `discover_seasons`, and
   declared capabilities; see [docs/PROVIDERS.md](docs/PROVIDERS.md)) and are selected by
   `ScraperRegistry` using the season's `provider` value.
@@ -72,11 +72,18 @@ scheduler_heartbeat, and alembic_version.
 | `pierwsza-liga` | Betclic I liga | 90minut (fallback: thesportsdb) | 2025-2026, 2026-2027 | 2026-2027 |
 | `europa-league` | UEFA Europa League (cup) | 90minut (fallback: espn) | 2025-2026, 2026-2027 | 2026-2027 |
 | `premier-league` | Premier League | espn (fallback: football-data) | 2024-2025 – 2026-2027 | 2026-2027 |
+| `3-liga` | 3. Liga (Germany) | openligadb | 2025-2026, 2026-2027 | 2026-2027 |
+
+3. Liga data comes from [OpenLigaDB](https://www.openligadb.de) and is licensed under the
+[Open Database License (ODbL)](https://opendatacommons.org/licenses/odbl/1-0/). If you publish it,
+keep the attribution to OpenLigaDB; a database derived from it is subject to the ODbL's
+share-alike terms. `/llms.txt` and `/agents` add this attribution whenever a configured
+competition uses `openligadb` ([ADR 0004](docs/adr/0004-openligadb-primary-source-for-3-liga.md)).
 
 ### Known limitations
 
 - Source URLs are validated against the currently supported 90minut, football-data.org, ESPN,
-  and TheSportsDB endpoints.
+  TheSportsDB, and OpenLigaDB endpoints.
 - football-data.org sources must use `/v4/competitions/<CODE>/matches?season=<start year>`, and
   all sources of one competition must share the same `<CODE>`.
 - ESPN sources must use
@@ -87,7 +94,12 @@ scheduler_heartbeat, and alembic_version.
 - TheSportsDB is a windowed source: it serves only as a fallback and fetches only the days around
   today. With the free key `123` it returns at most 3 events per day and 5 seasons, so a busy
   matchday can miss matches; see [Fallback sources](#fallback-sources).
-- Season discovery is implemented for football-data.org and ESPN only (TheSportsDB discovery only
+- OpenLigaDB sources must use `https://api.openligadb.de/getmatchdata/<shortcut>/<start year>`
+  (`bl3` is the 3. Liga), with one shortcut per competition. OpenLigaDB is community-edited and has
+  no postponed status: an unfinished match more than `postponed_after_hours` (default 24) past
+  kickoff is `inactive`, and a result entered later is picked up at the next scheduled check.
+  Cards, corners, and fouls are always null.
+- Season discovery is implemented for football-data.org, ESPN, and OpenLigaDB only (TheSportsDB discovery only
   fills missing fallback URLs); new 90minut seasons must be added to the YAML by hand (rollover to
   them is then automatic).
 - 90minut source URLs must match `http(s)://(www.)90minut.pl/liga/1/ligaNNNNN.html`.
@@ -251,7 +263,7 @@ accidentally running.
 Every `season_check_interval` (default daily) the scheduler claims each enabled competition for a
 season check:
 
-1. **Discovery.** If the provider supports it (football-data.org, ESPN), `discover_seasons` lists the
+1. **Discovery.** If the provider supports it (football-data.org, ESPN, OpenLigaDB), `discover_seasons` lists the
    provider's seasons. Only seasons newer than the newest known season are stored; existing
    seasons, including their source URLs, are never changed. Failed discovery is retried after the
    longest failure backoff.
@@ -459,8 +471,8 @@ curl -X POST http://localhost:8000/api/v1/results/history/fetch \
 New historical fetches return `202 Accepted` and a job status URL. Cached seasons return their
 results immediately unless `force_refresh` is true. The competition-season row and matches are
 committed together. The season then appears in GET /api/v1/competitions. The season must use the
-competition's `season_format` (`2024-2025` or `2024`); football-data.org and ESPN URLs must use
-the competition's configured code or league. The supplied URL must use
+competition's `season_format` (`2024-2025` or `2024`); football-data.org, ESPN, and OpenLigaDB URLs must use
+the competition's configured code, league, or shortcut. The supplied URL must use
 a provider already configured for that competition.
 
 Premier League historical sources use season-specific ESPN URLs (`season` is the start year), for
@@ -567,19 +579,21 @@ curl 'http://localhost:8000/api/v1/teams?q=wisla'
 Finished results include nullable statistics. Fields stay null when the configured provider does
 not supply enough information; the API never invents a zero for unavailable data.
 
-| Fields | 90minut | football-data.org | ESPN |
-| --- | --- | --- | --- |
-| home_goals, away_goals | yes | yes | yes |
-| first-half goals | derived from match-page goal events | yes, when supplied | derived from goal events |
-| second-half goals | derived from match-page goal events | derived from full-time minus half-time | derived from goal events |
-| home_cards, away_cards | match-page card markers | booking-event count (paid plan only) | yellow and red card events |
-| first_team_to_score, first_goal_minute | match-page goal events | goal events (paid plan only) | goal events |
-| corners and fouls | unavailable | unavailable | `wonCorners`, `foulsCommitted` |
+| Fields | 90minut | football-data.org | ESPN | OpenLigaDB |
+| --- | --- | --- | --- | --- |
+| home_goals, away_goals | yes | yes | yes | yes |
+| first-half goals | derived from match-page goal events | yes, when supplied | derived from goal events | half-time result, when supplied |
+| second-half goals | derived from match-page goal events | derived from full-time minus half-time | derived from goal events | full-time minus half-time result |
+| home_cards, away_cards | match-page card markers | booking-event count (paid plan only) | yellow and red card events | unavailable |
+| first_team_to_score, first_goal_minute | match-page goal events | goal events (paid plan only) | goal events | goal list, when it adds up to the score |
+| corners and fouls | unavailable | unavailable | `wonCorners`, `foulsCommitted` | unavailable |
 
 A card count is yellow plus red cards; a second yellow counts as one yellow and one red (2). An own
 goal counts for the team whose score it raised, including as the first goal. A goalless match has
 null first-goal fields. ESPN goal-derived fields stay null when the goal events do not add up to
 the final score; cards are then null too, because missing events cannot be told apart from none.
+OpenLigaDB first-goal fields stay null when its goal list does not add up to the full-time score;
+an own goal's team comes from the running score it raised.
 
 football-data.org's free plan omits goal and booking events, so these fields stay null for
 football-data competitions unless your token has a paid plan with them.
@@ -936,8 +950,10 @@ uv run python -m app.config check
 
 The check can target an alternate file with `--config-file`. Invalid YAML, unsupported source URLs,
 undeclared providers, duplicate slugs, inconsistent season/provider declarations, seasons that do
-not match the competition's `season_format`, mixed football-data.org competition codes or ESPN leagues, and
-invalid `team_aliases` fail validation.
+not match the competition's `season_format`, mixed football-data.org competition codes, ESPN leagues,
+or OpenLigaDB shortcuts, provider-only settings on another provider (`window_days_*` outside
+`thesportsdb`, `postponed_after_hours` outside `openligadb`), and invalid `team_aliases` fail
+validation.
 
 Per-competition season settings:
 
@@ -997,6 +1013,18 @@ TheSportsDB fallback URLs use the key-free form
 `https://www.thesportsdb.com/league/<league id>?season=<YYYY-YYYY>` (4422 is Ekstraklasa, 4661 is
 I liga). `thesportsdb` is windowed, so `config check` rejects it as a `provider`.
 
+OpenLigaDB sources use `https://api.openligadb.de/getmatchdata/<shortcut>/<start year>` (`bl3` is
+the 3. Liga); one request returns the whole season and needs no key. Its provider block accepts
+`postponed_after_hours` (default `24`): an unfinished match that long past kickoff is `inactive`,
+because OpenLigaDB has no postponed status.
+
+~~~yaml
+providers:
+  openligadb:
+    min_request_interval_seconds: 2
+    postponed_after_hours: 24
+~~~
+
 #### Schedule settings
 
 `defaults.schedule` sets the scheduler thresholds for every competition. A competition may add a
@@ -1044,6 +1072,7 @@ Application variables:
 | FOOTBALL_RESULTS_ESPN_MIN_REQUEST_INTERVAL_SECONDS | `2` (from YAML) | Optional environment override for the minimum delay between ESPN requests |
 | FOOTBALL_RESULTS_THESPORTSDB_API_KEY | `123` (free key) | TheSportsDB API key. The free key returns at most 3 events per day and 5 seasons; a paid key removes these limits. Never logged or stored |
 | FOOTBALL_RESULTS_THESPORTSDB_MIN_REQUEST_INTERVAL_SECONDS | `3` (from YAML) | Optional environment override for the minimum delay between TheSportsDB requests (free plan: 30 req/min) |
+| FOOTBALL_RESULTS_OPENLIGADB_MIN_REQUEST_INTERVAL_SECONDS | `2` (from YAML) | Optional environment override for the minimum delay between OpenLigaDB requests |
 | FOOTBALL_RESULTS_NINETY_MINUT_MIN_REQUEST_INTERVAL_SECONDS | `2` (from YAML) | Optional environment override for the minimum delay between requests to each 90minut host; set to `0` to disable |
 | FOOTBALL_RESULTS_NINETY_MINUT_DETAIL_CACHE_MAX_ENTRIES | `512` | Maximum successful 90minut detail responses kept in the process-local LRU cache; set to `0` to disable |
 | FOOTBALL_RESULTS_RATE_LIMIT_ENABLED | `true` | Per-client API rate limiting; set to `false` to disable |

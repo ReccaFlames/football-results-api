@@ -7,7 +7,7 @@ Guidance for AI coding agents working **on** this repository. For how to *use* t
 
 Football Results API (repo: `ekstraklasa-results-api`, package: `football-results-api`) imports
 fixtures and results from external sources (90minut.pl HTML, football-data.org JSON,
-ESPN scoreboard JSON), stores them in
+ESPN scoreboard JSON, TheSportsDB JSON, OpenLigaDB JSON), stores them in
 PostgreSQL, and serves them through FastAPI. A separate scheduler process refreshes current seasons
 adaptively based on kickoff times. Goal: a generic, easy-to-configure, AI-agent-first league data
 API.
@@ -171,6 +171,10 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
 - ESPN (`espn`, Premier League primary source, ADR 0001) is throttled
   (`FOOTBALL_RESULTS_ESPN_MIN_REQUEST_INTERVAL_SECONDS`, default 2s) and has no rounds. Provider
   team names are mapped to stored names by per-competition `team_aliases`.
+- OpenLigaDB (`openligadb`, 3. Liga primary source, ADR 0004) is key-free, throttled
+  (`FOOTBALL_RESULTS_OPENLIGADB_MIN_REQUEST_INTERVAL_SECONDS`, default 2s), and has no postponed
+  status (`providers.openligadb.postponed_after_hours`, default 24). Its data is ODbL-licensed:
+  `/llms.txt` and `/agents` attribute it via `PROVIDER_ATTRIBUTIONS` in `app/agent_docs.py`.
 - Tests must not hit the network. Parser tests use inline HTML/JSON fixtures.
 - The integration test database name must contain `test`; the fixtures truncate all tables and
   the migration test downgrades to `base`.

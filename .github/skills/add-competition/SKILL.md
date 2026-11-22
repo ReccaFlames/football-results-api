@@ -16,6 +16,7 @@ removed from the file are disabled, not deleted.
 | `90minut` | `http://www.90minut.pl/liga/1/liga<ID>.html` (ID is per season) |
 | `football-data` | `https://api.football-data.org/v4/competitions/<CODE>/matches?season=<start year>` |
 | `espn` | `https://site.api.espn.com/apis/site/v2/sports/soccer/<league>/scoreboard?season=<start year>` |
+| `openligadb` | `https://api.openligadb.de/getmatchdata/<shortcut>/<start year>` (ODbL data; attribute OpenLigaDB) |
 
 football-data.org accepts any competition code (`PL`, `BL1`, `SA`, `PD`, `CL`, `BSA`, ...) and ESPN
 any league (`eng.1`, `ger.1`, ...); all seasons of one competition must use the same code or

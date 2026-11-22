@@ -15,10 +15,14 @@ ESPN_PATH_RE = re.compile(rf"^/apis/site/v2/sports/soccer/({ESPN_LEAGUE_PATTERN}
 THESPORTSDB_HOST = "www.thesportsdb.com"
 THESPORTSDB_LEAGUE_RE = re.compile(r"[1-9][0-9]{0,9}")
 THESPORTSDB_PATH_RE = re.compile(r"^/league/([1-9][0-9]{0,9})$")
+OPENLIGADB_HOST = "api.openligadb.de"
+OPENLIGADB_SHORTCUT_RE = re.compile(r"[a-z0-9]{1,20}")
+OPENLIGADB_PATH_RE = re.compile(r"^/getmatchdata/([a-z0-9]{1,20})/[0-9]{4}$")
 PROVIDER_CODE_PATHS = {
     "football-data": FOOTBALL_DATA_PATH_RE,
     "espn": ESPN_PATH_RE,
     "thesportsdb": THESPORTSDB_PATH_RE,
+    "openligadb": OPENLIGADB_PATH_RE,
 }
 
 
@@ -62,11 +66,18 @@ def thesportsdb_source_url(league: str, season: str) -> str:
     return f"https://{THESPORTSDB_HOST}/league/{league}?season={season}"
 
 
+def openligadb_source_url(shortcut: str, season: str) -> str:
+    if OPENLIGADB_SHORTCUT_RE.fullmatch(shortcut) is None:
+        raise ValueError(f"invalid OpenLigaDB league shortcut {shortcut!r}")
+    start_year, _ = season_years(season)
+    return f"https://{OPENLIGADB_HOST}/getmatchdata/{shortcut}/{start_year}"
+
+
 def provider_competition_code(source: SeasonSource) -> str | None:
     """Return the provider's own competition identifier when the source URL contains one.
 
-    That is the football-data.org code (``PL``), the ESPN league (``eng.1``), or the TheSportsDB
-    league id (``4422``). 90minut uses a
+    That is the football-data.org code (``PL``), the ESPN league (``eng.1``), the TheSportsDB
+    league id (``4422``), or the OpenLigaDB league shortcut (``bl3``). 90minut uses a
     different page ID for each season, so it has no stable code.
     """
     pattern = PROVIDER_CODE_PATHS.get(source.provider)
@@ -110,12 +121,22 @@ def source_from_url(season: str, source_url: str) -> SeasonSource:
         and THESPORTSDB_PATH_RE.fullmatch(parsed.path) is not None
         and query == {"season": [season]}
     )
-    if common_invalid or not (is_90minut or is_football_data or is_espn or is_thesportsdb):
+    is_openligadb = (
+        parsed.scheme == "https"
+        and parsed.hostname == OPENLIGADB_HOST
+        and OPENLIGADB_PATH_RE.fullmatch(parsed.path) is not None
+        and parsed.path.rsplit("/", 1)[1] == str(start_year)
+        and not parsed.query
+    )
+    if common_invalid or not (
+        is_90minut or is_football_data or is_espn or is_thesportsdb or is_openligadb
+    ):
         raise ValueError(
             "source_url must be a supported 90minut page, a football-data.org "
             "/v4/competitions/<CODE>/matches?season=<start year> endpoint, an ESPN "
             "/apis/site/v2/sports/soccer/<league>/scoreboard?season=<start year> endpoint, or a "
-            "TheSportsDB https://www.thesportsdb.com/league/<id>?season=<season> page"
+            "TheSportsDB https://www.thesportsdb.com/league/<id>?season=<season> page, or an "
+            "OpenLigaDB https://api.openligadb.de/getmatchdata/<shortcut>/<start year> endpoint"
         )
     provider = (
         "football-data"
@@ -124,6 +145,8 @@ def source_from_url(season: str, source_url: str) -> SeasonSource:
         if is_espn
         else "thesportsdb"
         if is_thesportsdb
+        else "openligadb"
+        if is_openligadb
         else "90minut"
     )
     return SeasonSource(season=season, source_url=source_url, provider=provider)

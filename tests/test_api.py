@@ -272,6 +272,7 @@ def test_lists_configured_competitions(tmp_path: Path) -> None:
         "pierwsza-liga",
         "europa-league",
         "premier-league",
+        "3-liga",
     }
     ekstraklasa = next(item for item in response.json() if item["slug"] == "ekstraklasa")
     assert ekstraklasa["current_season"] == "2026-2027"
