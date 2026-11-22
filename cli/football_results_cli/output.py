@@ -153,6 +153,7 @@ SCRAPE_RUN_COLUMNS = (
     Column("Queued (UTC)", lambda item: format_value(item.get("queued_at"), "_at")),
     Column("Completed (UTC)", lambda item: format_value(item.get("completed_at"), "_at")),
     Column("Matches", lambda item: format_value(item.get("matches_found")), numeric=True),
+    Column("Skipped", lambda item: format_value(item.get("matches_skipped")), numeric=True),
     Column("Error", lambda item: truncate(item.get("error_message"))),
 )
 SEASON_SCHEDULE_COLUMNS = (

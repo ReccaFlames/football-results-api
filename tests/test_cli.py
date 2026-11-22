@@ -299,6 +299,20 @@ def test_scheduler_table_shows_seasons_and_workers(
     assert "host:1:abc" in result.stdout
 
 
+def test_scrape_runs_table_shows_skipped_fallback_matches(
+    requests, repository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(output, "stdout_is_tty", lambda: True)
+    repository.scrape_runs = [scrape_run(1, "completed").model_copy(update={"matches_skipped": 7})]
+
+    env = {"FOOTBALL_RESULTS_API_KEY": "test-api-key", "COLUMNS": "200"}
+    result = invoke("scrape-runs", env=env)
+
+    assert result.exit_code == 0, result.stderr
+    assert "Skipped" in result.stdout
+    assert " 7 " in result.stdout
+
+
 def test_disabled_writes_exit_5(requests, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(main_module.settings, "api_keys", "")
     result = invoke("--api-key", "anything", "refresh", "-c", "ekstraklasa")

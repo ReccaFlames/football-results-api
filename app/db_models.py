@@ -223,6 +223,8 @@ class ScrapeRunRow(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     matches_found: Mapped[int | None] = mapped_column(Integer)
+    # Fallback matches skipped because a team is unknown in the season (ADR 0002).
+    matches_skipped: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
     error_message: Mapped[str | None] = mapped_column(Text)
     worker_id: Mapped[str | None] = mapped_column(String(200))
 

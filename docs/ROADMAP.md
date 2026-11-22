@@ -266,10 +266,10 @@ How to use this list:
     - [x] Free key `123` by default, optional `FOOTBALL_RESULTS_THESPORTSDB_API_KEY`; key-free
           source URL allow-list `https://www.thesportsdb.com/league/<id>?season=<YYYY-YYYY>`
     - [x] `discover_seasons` via `search_all_seasons.php?id=<league>` (fills missing fallback URLs)
-    - [ ] Fallback refreshes (all providers, ADR 0002 amendment): skip matches with teams unknown
+    - [x] Fallback refreshes (all providers, ADR 0002 amendment): skip matches with teams unknown
           in the season and log a warning; an empty windowed result is a success with no changes;
           next check from stored matches after the merge
-    - [ ] Migration: `scrape_run.matches_skipped`, shown in the admin endpoints
+    - [x] Migration: `scrape_run.matches_skipped`, shown in the admin endpoints
     - [ ] Ekstraklasa (4422) and I liga (4661): `fallback_provider: thesportsdb`, `fallback_url`
           for 2026-2027, `team_aliases` for all teams
     - [ ] Docs (README, `PROVIDERS.md`, ADR 0003, glossary); version 0.19.0

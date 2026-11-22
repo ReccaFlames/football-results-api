@@ -359,7 +359,8 @@ def test_refresh_is_queued_and_status_is_protected(tmp_path: Path) -> None:
         "status_url": "/api/v1/jobs/1",
     }
     assert response.headers["location"] == "/api/v1/jobs/1"
-    assert client.get("/api/v1/jobs/1", headers=AUTH_HEADERS).json()["status"] == "queued"
+    job = client.get("/api/v1/jobs/1", headers=AUTH_HEADERS).json()
+    assert (job["status"], job["matches_skipped"]) == ("queued", 0)
     assert client.get("/api/v1/jobs/1").status_code == 401
     assert client.get("/api/v1/jobs/999", headers=AUTH_HEADERS).status_code == 404
 
@@ -1211,6 +1212,7 @@ def test_scrape_runs_are_newest_first_filtered_and_paginated(tmp_path: Path) -> 
         scrape_run(3, "failed", "premier-league"),
         scrape_run(4, "failed"),
     ]
+    repository.scrape_runs[0].matches_skipped = 2
     url = "/api/v1/admin/scrape-runs"
 
     first = client.get(url, params={"status": "failed", "limit": 2}, headers=AUTH_HEADERS).json()
@@ -1226,6 +1228,7 @@ def test_scrape_runs_are_newest_first_filtered_and_paginated(tmp_path: Path) -> 
     assert client.get(url, params={"cursor": cursor}, headers=AUTH_HEADERS).status_code == 400
     only_league = client.get(url, params={"competition": "ekstraklasa"}, headers=AUTH_HEADERS)
     assert [item["job_id"] for item in only_league.json()["data"]] == [4, 2, 1]
+    assert [item["matches_skipped"] for item in only_league.json()["data"]] == [0, 0, 2]
     unknown = client.get(url, params={"status": "done"}, headers=AUTH_HEADERS)
     assert unknown.status_code == 422
     assert unknown.json()["valid_values"] == [

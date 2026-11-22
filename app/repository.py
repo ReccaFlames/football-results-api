@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -55,6 +56,8 @@ from app.scheduling import (
     rollover_target,
 )
 from app.seasons import season_for_date, season_years, validate_season
+
+logger = logging.getLogger(__name__)
 
 
 def _now() -> datetime:
@@ -762,6 +765,7 @@ class PostgresResultRepository:
                 started_at=run.started_at,
                 completed_at=run.completed_at,
                 matches_found=run.matches_found,
+                matches_skipped=run.matches_skipped,
                 error_message=run.error_message,
             )
 
@@ -810,15 +814,19 @@ class PostgresResultRepository:
         run_id: int | None = None,
         policy: SchedulePolicy = DEFAULT_POLICY,
         fallback: SeasonSource | None = None,
+        windowed: bool = False,
     ) -> datetime:
         """Store a refresh of one competition-season in one transaction.
 
         ``source`` is the season's primary source. With ``fallback`` (the source ``fresh`` came
         from), the refresh is a fallback refresh (ADR 0002): it updates only the fixture fields of
-        stored matches, adds new ones, never deletes, and never writes provider match IDs.
+        stored matches, adds new ones, never deletes, never writes provider match IDs, and skips
+        (logs and counts) matches with a team that is not yet a team of the season. ``windowed``
+        marks a fallback from a windowed source, for which an empty result is a success.
         """
         started = _now()
         used = fallback or source
+        skipped: list[tuple[str, str, list[str]]] = []
         async with self.sessions.begin() as session:
             row = await session.scalar(
                 select(CompetitionRow).where(CompetitionRow.slug == competition.slug)
@@ -852,7 +860,7 @@ class PostgresResultRepository:
                     )
                 ).all()
             )
-            if not fresh and previous:
+            if not fresh and previous and not (fallback is not None and windowed):
                 raise EmptySeasonError(
                     f"{used.provider} returned no matches for {source.season}, "
                     f"which has {len(previous)} stored matches"
@@ -875,7 +883,21 @@ class PostgresResultRepository:
             retained_ids: set[int] = set()
             team_ids: dict[str, int] = {}
             additions: list[MatchRow] = []
+            season_team_ids = {
+                team_id for item in previous for team_id in (item.home_team_id, item.away_team_id)
+            }
             for match in fresh:
+                if fallback is not None:
+                    # A fallback never creates teams: an unmapped provider name would otherwise
+                    # add a duplicate team and match that only a primary refresh could remove.
+                    unknown = [
+                        name
+                        for name in (match.home_team, match.away_team)
+                        if not await self._known_team(session, name, season_team_ids, team_ids)
+                    ]
+                    if unknown:
+                        skipped.append((match.home_team, match.away_team, unknown))
+                        continue
                 home_team_id = await self._ensure_team(session, match.home_team, team_ids, now)
                 away_team_id = await self._ensure_team(session, match.away_team, team_ids, now)
                 existing = (
@@ -954,13 +976,52 @@ class PostgresResultRepository:
             season.consecutive_failures, season.updated_at = 0, now
             season.last_success_provider, season.last_success_url = used.provider, used.source_url
             if season.is_current and season.automatic_refresh_enabled:
-                decision = calculate_next_check(fresh, competition.format, now, policy)
+                if fallback is None:
+                    decision = calculate_next_check(fresh, competition.format, now, policy)
+                else:
+                    # A windowed fallback sees only part of the season; the stored matches after
+                    # the merge also know the rounds outside the window.
+                    kickoffs = await session.scalars(
+                        select(MatchRow.played_at).where(
+                            MatchRow.competition_season_id == season.id,
+                            MatchRow.status == "scheduled",
+                            MatchRow.played_at.is_not(None),
+                        )
+                    )
+                    decision = next_check_for_kickoffs(
+                        kickoffs.all(), competition.format, now, policy
+                    )
                 season.scheduler_state, season.next_check_at = (
                     decision.state,
                     decision.next_check_at,
                 )
             run.status, run.completed_at, run.matches_found = "completed", now, len(fresh)
+            run.matches_skipped = len(skipped)
+        for home_team, away_team, unknown in skipped:
+            logger.warning(
+                "skipped fallback match %s - %s for %s %s: unknown teams %s; "
+                "add team_aliases for them",
+                home_team,
+                away_team,
+                competition.slug,
+                source.season,
+                ", ".join(unknown),
+            )
         return now
+
+    @staticmethod
+    async def _known_team(
+        session: AsyncSession, name: str, season_team_ids: set[int], team_ids: dict[str, int]
+    ) -> bool:
+        """Whether ``name`` is an alias of a team that already plays in the season."""
+        normalized_alias = _normalize_team_alias(name)
+        if normalized_alias in team_ids:
+            return True
+        alias = await session.get(TeamAliasRow, normalized_alias)
+        if alias is None or alias.team_id not in season_team_ids:
+            return False
+        team_ids[normalized_alias] = alias.team_id
+        return True
 
     @staticmethod
     async def _ensure_team(
@@ -1431,6 +1492,7 @@ class PostgresResultRepository:
                 started_at=run.started_at,
                 completed_at=run.completed_at,
                 matches_found=run.matches_found,
+                matches_skipped=run.matches_skipped,
                 error_message=run.error_message,
                 source_url=run.source_url,
                 provider=run.provider,

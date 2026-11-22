@@ -116,3 +116,42 @@ def test_stable_match_migration_backfills_existing_rows(migrated_database: str) 
     assert match_row.source_key == (
         f"2026-2027|1|{match_row.home_team_id}|{match_row.away_team_id}"
     )
+
+
+def test_matches_skipped_migration_sets_existing_runs_to_zero(migrated_database: str) -> None:
+    async def execute(statement: str) -> list:
+        engine = create_async_engine(migrated_database)
+        async with engine.begin() as connection:
+            result = await connection.execute(text(statement))
+            rows = list(result.all()) if result.returns_rows else []
+        await engine.dispose()
+        return rows
+
+    run_alembic(migrated_database, "downgrade", "base")
+    run_alembic(migrated_database, "upgrade", "0011_fallback_sources")
+    asyncio.run(
+        execute(
+            """
+            WITH league AS (
+                INSERT INTO competition (slug, name, country, format, created_at, updated_at)
+                VALUES ('legacy-league', 'Legacy League', 'Poland', 'league', now(), now())
+                RETURNING id
+            ), season AS (
+                INSERT INTO competition_season
+                    (competition_id, season, source_url, provider, is_current,
+                     created_at, updated_at)
+                SELECT id, '2026-2027', 'http://www.90minut.pl/liga/1/liga123.html',
+                       '90minut', true, now(), now()
+                FROM league
+                RETURNING id
+            )
+            INSERT INTO scrape_run
+                (competition_season_id, status, source_url, queued_at, matches_found)
+            SELECT id, 'completed', 'http://www.90minut.pl/liga/1/liga123.html', now(), 5
+            FROM season
+            """
+        )
+    )
+    run_alembic(migrated_database, "upgrade", "head")
+
+    assert asyncio.run(execute("SELECT matches_found, matches_skipped FROM scrape_run")) == [(5, 0)]

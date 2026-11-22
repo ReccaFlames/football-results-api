@@ -32,10 +32,14 @@ class FakeProvider:
         discovery: bool,
         error: Exception | None = None,
         discovered: SeasonSource = NEXT_SEASON,
+        windowed: bool = False,
     ) -> None:
         self.name = name
         self.capabilities = ProviderCapabilities(
-            statistics=frozenset(), season_discovery=discovery, requires_api_token=False
+            statistics=frozenset(),
+            season_discovery=discovery,
+            requires_api_token=False,
+            windowed=windowed,
         )
         self.error = error
         self.discovered = discovered
@@ -62,6 +66,7 @@ class FakeRepository:
         self.fallbacks: list[list[SeasonSource]] = []
         self.primary_failures = primary_failures
         self.stored: list[SeasonSource | None] = []
+        self.windowed: list[bool] = []
         self.failed: list[SeasonSource | None] = []
 
     async def apply_season_check(self, slug, discovered, next_check_at, policy, fallbacks):
@@ -70,9 +75,10 @@ class FakeRepository:
         return SeasonCheckResult()
 
     async def replace_competition(
-        self, competition, source, matches, run_id=None, policy=None, fallback=None
+        self, competition, source, matches, run_id=None, policy=None, fallback=None, windowed=False
     ):
         self.stored.append(fallback)
+        self.windowed.append(windowed)
 
     async def record_scrape_failure(
         self, competition, source, error, run_id=None, policy=None, fallback=None
@@ -172,6 +178,21 @@ async def test_fallback_is_used_once_the_primary_failed_often_enough() -> None:
     assert football_data.scraped == [FALLBACK]
     assert repository.stored == [FALLBACK]
     assert repository.primary_failures == 3
+
+
+@pytest.mark.parametrize("windowed", [True, False])
+async def test_fallback_refresh_tells_the_repository_whether_the_source_is_windowed(
+    windowed: bool,
+) -> None:
+    espn = FakeProvider("espn", discovery=False, error=RuntimeError("HTTP 503"))
+    football_data = FakeProvider("football-data", discovery=False, windowed=windowed)
+    repository = FakeRepository(primary_failures=10)
+
+    await refresh_target(
+        repository, registry(espn, football_data), target(), SchedulePolicy(), "football-data"
+    )
+
+    assert (repository.stored, repository.windowed) == ([FALLBACK], [windowed])
 
 
 async def test_primary_success_does_not_try_the_fallback() -> None:

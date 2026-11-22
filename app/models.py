@@ -283,6 +283,10 @@ class ScrapeJobStatus(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     matches_found: int | None
+    matches_skipped: int = Field(
+        default=0,
+        description="Fallback matches skipped because a team is not yet a team of the season",
+    )
     error_message: str | None
 
 

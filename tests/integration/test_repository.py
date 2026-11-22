@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 from unittest.mock import ANY
 
@@ -13,6 +14,7 @@ from app.db_models import (
     SchedulerHeartbeatRow,
     ScrapeRunRow,
     TeamAliasRow,
+    TeamRow,
 )
 from app.models import Competition, MatchQuery, ScrapedMatch, SeasonSource
 from app.repository import (
@@ -23,6 +25,7 @@ from app.repository import (
     ScheduledRefresh,
 )
 from app.scheduling import SchedulePolicy
+from app.scraper import apply_team_aliases
 from app.standings import compute_standings
 
 
@@ -1220,6 +1223,139 @@ async def test_an_empty_result_for_a_stored_season_fails_without_deleting(
         await repository.replace_competition(competition, season, [])
 
     assert set(await stored_matches(sessions)) == {"Legia-Lech"}
+
+
+async def team_names(sessions: async_sessionmaker[AsyncSession]) -> set[str]:
+    async with sessions() as session:
+        return set((await session.scalars(select(TeamRow.name))).all())
+
+
+async def test_fallback_skips_matches_with_teams_unknown_in_the_season(
+    repository: PostgresResultRepository,
+    sessions: async_sessionmaker[AsyncSession],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    competition = league_with_fallback()
+    primary = competition.seasons["2026-2027"]
+    await repository.seed_competitions({"test-league": competition})
+    kickoff = datetime.now(UTC) - timedelta(days=1)
+    await repository.replace_competition(
+        competition, primary, [match("Legia", "Lech", kickoff), match("Wisła", "Cracovia", kickoff)]
+    )
+    # A team of another season is not a team of this one.
+    await repository.replace_competition(
+        competition,
+        competition.seasons["2025-2026"],
+        [match("Legia", "Górnik", kickoff, (1, 1), season="2025-2026")],
+    )
+    teams_before = await team_names(sessions)
+
+    provider_matches = [
+        match("Legia Warsaw", "Lech Poznan", kickoff, (2, 0)),
+        match("Wisła", "Polonia Warsaw", kickoff, (1, 1)),
+        match("Górnik", "Arka", kickoff + timedelta(days=7)),
+    ]
+    aliased = apply_team_aliases(provider_matches, {"Legia Warsaw": "Legia", "Lech Poznan": "Lech"})
+    with caplog.at_level(logging.WARNING, logger="app.repository"):
+        await repository.replace_competition(
+            competition, primary, aliased, fallback=primary.fallback()
+        )
+
+    after = await stored_matches(sessions)
+    assert set(after) == {"Legia-Lech", "Wisła-Cracovia", "Legia-Górnik"}
+    assert (after["Legia-Lech"].status, after["Legia-Lech"].home_score) == ("finished", 2)
+    assert after["Wisła-Cracovia"].status == "scheduled"
+    assert await team_names(sessions) == teams_before
+    run = (await scrape_runs(sessions))[-1]
+    assert (run.fallback, run.matches_found, run.matches_skipped) == (True, 3, 2)
+    [listed, *_] = await repository.list_scrape_runs()
+    assert listed.matches_skipped == 2
+    assert (await repository.get_scrape_job(run.id)).matches_skipped == 2
+    warnings = [record.getMessage() for record in caplog.records]
+    assert len(warnings) == 2
+    assert "test-league 2026-2027" in warnings[0] and "Polonia Warsaw" in warnings[0]
+    assert "Wisła" not in warnings[0].split("unknown teams")[1]
+    assert "Górnik, Arka" in warnings[1]
+
+
+async def test_primary_refresh_never_skips_matches(
+    repository: PostgresResultRepository, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    competition = league_with_fallback()
+    primary = competition.seasons["2026-2027"]
+    await repository.seed_competitions({"test-league": competition})
+    kickoff = datetime.now(UTC)
+    await repository.replace_competition(competition, primary, [match("Legia", "Lech", kickoff)])
+
+    await repository.replace_competition(
+        competition, primary, [match("Legia", "Lech", kickoff), match("Arka", "Wisła", kickoff)]
+    )
+
+    assert set(await stored_matches(sessions)) == {"Legia-Lech", "Arka-Wisła"}
+    assert {"Arka", "Wisła"} <= await team_names(sessions)
+    assert [run.matches_skipped for run in await scrape_runs(sessions)] == [0, 0]
+
+
+@pytest.mark.parametrize("windowed", [True, False])
+async def test_an_empty_fallback_result_succeeds_only_for_a_windowed_source(
+    repository: PostgresResultRepository,
+    sessions: async_sessionmaker[AsyncSession],
+    windowed: bool,
+) -> None:
+    competition = league_with_fallback()
+    primary = competition.seasons["2026-2027"]
+    await repository.seed_competitions({"test-league": competition})
+    await repository.replace_competition(
+        competition, primary, [match("Legia", "Lech", datetime.now(UTC) + timedelta(days=30))]
+    )
+    await repository.record_scrape_failure(competition, primary, RuntimeError("HTTP 503"))
+    before = await stored_matches(sessions)
+
+    if windowed:
+        await repository.replace_competition(
+            competition, primary, [], fallback=primary.fallback(), windowed=True
+        )
+        run = (await scrape_runs(sessions))[-1]
+        assert (run.status, run.fallback, run.matches_found) == ("completed", True, 0)
+        row = await season_row(sessions, "test-league", "2026-2027")
+        assert (row.consecutive_failures, row.primary_consecutive_failures) == (0, 1)
+        assert row.scheduler_state != "retrying"
+    else:
+        with pytest.raises(EmptySeasonError, match="no matches"):
+            await repository.replace_competition(
+                competition, primary, [], fallback=primary.fallback()
+            )
+    after = await stored_matches(sessions)
+    assert {key: (row.id, row.updated_at) for key, row in after.items()} == {
+        key: (row.id, row.updated_at) for key, row in before.items()
+    }
+
+
+async def test_fallback_next_check_uses_stored_matches_outside_the_window(
+    repository: PostgresResultRepository, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    competition = league_with_fallback()
+    primary = competition.seasons["2026-2027"]
+    await repository.seed_competitions({"test-league": competition})
+    now = datetime.now(UTC)
+    next_round = now + timedelta(days=30)
+    played = match("Legia", "Lech", now - timedelta(days=2))
+    await repository.replace_competition(
+        competition, primary, [played, match("Lech", "Legia", next_round, round_number=2)]
+    )
+
+    await repository.replace_competition(
+        competition,
+        primary,
+        [played.model_copy(update={"status": "finished", "home_score": 1, "away_score": 0})],
+        fallback=primary.fallback(),
+        windowed=True,
+    )
+
+    # From the scraped window alone (no scheduled match) the state would be waiting_for_schedule.
+    row = await season_row(sessions, "test-league", "2026-2027")
+    assert row.scheduler_state == "waiting_for_match"
+    assert row.next_check_at <= next_round - SchedulePolicy().pre_match_check
 
 
 async def test_season_check_fills_only_missing_fallback_sources(

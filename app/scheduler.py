@@ -191,7 +191,12 @@ async def refresh_target(
     try:
         matches = await scraper.scrape(competition, fallback)
         await repository.replace_competition(
-            competition, source, matches, policy=policy, fallback=fallback
+            competition,
+            source,
+            matches,
+            policy=policy,
+            fallback=fallback,
+            windowed=scraper.provider(fallback.provider).capabilities.windowed,
         )
         logger.info("refreshed %s from fallback source (%d fixtures)", name, len(matches))
     except Exception as error:
