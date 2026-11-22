@@ -35,8 +35,15 @@ PROBLEM_GUIDANCE: dict[str, tuple[str, str]] = {
         ),
     ),
     "unauthorized": (
-        "The operation needs an API key, and `X-API-Key` is missing or wrong.",
-        "Send a key issued by the operator in the `X-API-Key` header. Read operations need no key.",
+        (
+            "The operation needs an API key, and `X-API-Key` is missing or wrong; or, on `/mcp`, "
+            "the OAuth access token is invalid or expired, or sign-in is required."
+        ),
+        (
+            "Send a key issued by the operator in the `X-API-Key` header. Read operations need no "
+            "key. On `/mcp`, sign in again through the MCP client (the `WWW-Authenticate` "
+            "header's `resource_metadata` names the authorization server)."
+        ),
     ),
     "forbidden": (
         "The API key is valid, but its role (`client`) does not allow this operation.",
@@ -539,6 +546,17 @@ class RateLimits:
 
 
 @dataclass(frozen=True)
+class OAuthInfo:
+    """Optional OAuth on `/mcp` (ADR 0006), shown only when an issuer is configured."""
+
+    issuer: str
+    audience: str
+    metadata_url: str
+    required: bool
+    scopes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class AgentGuide:
     title: str
     version: str
@@ -554,6 +572,7 @@ class AgentGuide:
     cache_max_age_seconds: int
     tools: tuple[ToolLink, ...] = ()
     attributions: tuple[str, ...] = ()
+    oauth: OAuthInfo | None = None
 
     def url(self, path: str) -> str:
         return f"{self.base_url}{path}"
@@ -575,6 +594,7 @@ def build_guide(
     cache_max_age_seconds: int,
     tools: Sequence[ToolLink] = (),
     provider_competitions: Mapping[str, Sequence[str]] | None = None,
+    oauth: OAuthInfo | None = None,
 ) -> AgentGuide:
     info = spec.get("info", {})
     description = info.get("description", "").strip()
@@ -594,6 +614,7 @@ def build_guide(
         cache_max_age_seconds=cache_max_age_seconds,
         tools=tuple(tools),
         attributions=data_attributions(provider_competitions or {}),
+        oauth=oauth,
     )
 
 
@@ -1006,7 +1027,22 @@ def _auth_text(guide: AgentGuide) -> str:
         "the instance has no admin key. Any key may be sent on reads: it identifies the caller "
         "and selects that key's rate limit. Request imports only when data is missing or stale: "
         "the scheduler refreshes current seasons automatically. Admin operations are for the "
-        "operator."
+        "operator." + _oauth_auth_text(guide)
+    )
+
+
+def _oauth_auth_text(guide: AgentGuide) -> str:
+    if guide.oauth is None:
+        return ""
+    access = (
+        "requires sign-in or an API key"
+        if guide.oauth.required
+        else "also works anonymously and with an API key"
+    )
+    return (
+        f" The MCP server (`{MCP_PATH}`) accepts OAuth access tokens from "
+        f"`{guide.oauth.issuer}` as `Authorization: Bearer` and {access}; MCP clients discover "
+        f"this from `{guide.oauth.metadata_url}`. The REST API uses `X-API-Key` only."
     )
 
 
@@ -1189,6 +1225,34 @@ def _skill_blocks(guide: AgentGuide) -> list[Block]:
     ]
 
 
+def _mcp_oauth_blocks(guide: AgentGuide) -> list[Block]:
+    oauth = guide.oauth
+    if oauth is None:
+        return []
+    mode = (
+        "Sign-in is required: an anonymous request gets `401` with a `WWW-Authenticate` header "
+        "pointing to the metadata, which starts the client's sign-in."
+        if oauth.required
+        else "Sign-in is optional: anonymous read tools keep working, so start sign-in from the "
+        "client (for example `/mcp auth` in GitHub Copilot CLI or `claude mcp login "
+        f"{MCP_SERVER_NAME}` in Claude Code)."
+    )
+    scopes = (
+        " Scopes: " + ", ".join(f"`{item}`" for item in oauth.scopes) + "." if oauth.scopes else ""
+    )
+    return [
+        Paragraph(
+            f"**OAuth:** this MCP server is an OAuth protected resource. Its metadata "
+            f"(RFC 9728) is at `{oauth.metadata_url}`, and the authorization server is "
+            f"`{oauth.issuer}`. Clients send the access token as `Authorization: Bearer`; the "
+            f"token's audience must be `{oauth.audience}`. {mode} An invalid "
+            'or expired token gets `401` with `error="invalid_token"`. The token\'s subject '
+            "gets the role and quota the operator assigned (else a `client` with the default "
+            f"keyed quota), so an admin subject may use `request_refresh`.{scopes}"
+        )
+    ]
+
+
 def _mcp_blocks(guide: AgentGuide) -> list[Block]:
     if not guide.has_tool("mcp"):
         return []
@@ -1216,6 +1280,7 @@ def _mcp_blocks(guide: AgentGuide) -> list[Block]:
             "against the write limit and needs an admin key in that header (a `client` key gets "
             "`forbidden`). Leave the header out for anonymous read-only use."
         ),
+        *_mcp_oauth_blocks(guide),
         Code(
             "# GitHub Copilot CLI\n"
             f"copilot mcp add --transport http {MCP_SERVER_NAME} {url}\n"

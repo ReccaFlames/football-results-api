@@ -18,6 +18,7 @@ CACHEABLE_PAGES = frozenset(
         "/problems",
         "/problems/{slug}",
         "/skills/football-results/SKILL.md",
+        "/.well-known/oauth-protected-resource/mcp",
     }
 )
 

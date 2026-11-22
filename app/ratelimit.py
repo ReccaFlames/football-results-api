@@ -12,7 +12,15 @@ from ipaddress import IPv4Address, IPv4Network, IPv6Address, IPv6Network, ip_add
 
 READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 EXEMPT_PATHS = frozenset(
-    {"/health", "/metrics", "/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"}
+    {
+        "/health",
+        "/metrics",
+        "/docs",
+        "/docs/oauth2-redirect",
+        "/redoc",
+        "/openapi.json",
+        "/.well-known/oauth-protected-resource/mcp",
+    }
 )
 
 

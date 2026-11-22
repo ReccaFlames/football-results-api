@@ -51,6 +51,12 @@ services:
       FOOTBALL_RESULTS_CACHE_MAX_AGE_SECONDS: ${FOOTBALL_RESULTS_CACHE_MAX_AGE_SECONDS:-}
       FOOTBALL_RESULTS_PUBLIC_BASE_URL: ${FOOTBALL_RESULTS_PUBLIC_BASE_URL:-}
       FOOTBALL_RESULTS_LOG_FORMAT: ${FOOTBALL_RESULTS_LOG_FORMAT:-json}
+      # Optional OAuth for /mcp (ADR 0006); off while the issuer is empty.
+      FOOTBALL_RESULTS_OAUTH_ISSUER: ${FOOTBALL_RESULTS_OAUTH_ISSUER:-}
+      FOOTBALL_RESULTS_OAUTH_AUDIENCE: ${FOOTBALL_RESULTS_OAUTH_AUDIENCE:-}
+      FOOTBALL_RESULTS_OAUTH_MODE: ${FOOTBALL_RESULTS_OAUTH_MODE:-optional}
+      FOOTBALL_RESULTS_OAUTH_SCOPES: ${FOOTBALL_RESULTS_OAUTH_SCOPES:-}
+      FOOTBALL_RESULTS_OAUTH_JWKS_URL: ${FOOTBALL_RESULTS_OAUTH_JWKS_URL:-}
     volumes:
       - ./config/competitions.yaml:/app/config/competitions.yaml:ro
       # Optional keys file: FOOTBALL_RESULTS_API_KEYS_FILE=/app/secrets/api-keys.yaml
@@ -132,6 +138,23 @@ services:
       - grafana_data:/var/lib/grafana
 
   # Disposable database for integration tests: docker compose --profile test up -d test-db
+  # Example authorization server for OAuth on /mcp (README "OAuth for the MCP server").
+  # Development mode on plain HTTP; not for production. No users ship with the realm.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.2
+    profiles: ["oauth-example"]
+    restart: unless-stopped
+    logging: *logging
+    command: ["start-dev", "--import-realm", "--hostname=http://localhost:8080"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USER:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-}
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+    volumes:
+      - ./keycloak:/opt/keycloak/data/import:ro
+    ports:
+      - "127.0.0.1:${KEYCLOAK_PORT:-8080}:8080"
+
   test-db:
     image: postgres:17-alpine
     profiles: ["test"]

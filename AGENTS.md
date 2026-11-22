@@ -23,6 +23,7 @@ API.
 | `app/ratelimit.py` | In-process fixed-window rate limiter, `RateLimit` headers, trusted-proxy client IP |
 | `app/access.py` | Named API keys (ADR 0005): keys-file models, SHA-256 hashing, constant-time key resolution to an `Identity` (name, role, quotas) |
 | `app/agent_docs.py` | Pure generator of `/llms.txt`, `/agents`, `/agents.md`, `/llms-full.txt`, `/problems/<slug>` from the OpenAPI spec and competitions; `SKILL_PATH`/`SKILL_FILE` for the served skill; `MCP_TOOLS` (tool → operation) |
+| `app/oauth.py` | Optional OAuth for `/mcp` (ADR 0006): `OAuthConfig` (RFC 9728 metadata, `WWW-Authenticate` challenge), `JwksCache`, `JwtVerifier`; `create_http_client` is the test seam |
 | `app/mcp_server.py` | Curated MCP server (`mcp` SDK `MCPServer`) at `/mcp`: 5 tools calling the API in-process, output models, Host/Origin checks, `McpRoute` |
 | `app/caching.py` | Weak body-hash `ETag`, `If-None-Match`, and `Cache-Control` rules for read endpoints |
 | `app/observability.py` | Stale-season and stalled-scheduler rules (`STALE_GRACE`, `stall_window`), Prometheus rendering for `/metrics`, HTTP request metrics |
@@ -48,6 +49,7 @@ API.
 | `cli/football_results_cli/problems.py` | Exit codes, CLI problem slugs (`urn:football-results:cli:<slug>`), `exit_code_for` |
 | `skills/football-results/SKILL.md` | Consumer Agent Skill for API users (teaches the CLI), served unchanged at `/skills/football-results/SKILL.md` |
 | `server.json` | MCP Registry metadata (remote `/mcp`), validated against `tests/schemas/server.schema.json` |
+| `keycloak/` | Realm import for the `oauth-example` Compose profile (no users, no secrets) |
 | `observability/` | Prometheus scrape config and Grafana provisioning (data source, dashboard, alert rules, policy; the Telegram contact point is in `compose.yaml`) for the `observability` Compose profile |
 | `GLOSSARY.md` | Domain terms (stale season, stalled scheduler, grace period) |
 | `tests/` | pytest; API tests use `FakeRepository` and need no database; `test_cli.py` runs the CLI against the app in-process |
@@ -135,6 +137,11 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
   rate-limited again; inner writes count against the outer client's write quota. `server.json`
   `version` must equal `pyproject.toml` (a test checks). MCP tests need
   `with TestClient(app, base_url="http://localhost")` so the lifespan starts the session manager.
+- OAuth (ADR 0006) covers `/mcp` only; the API is a resource server, never an authorization
+  server, and does not use the SDK's `auth=`/`token_verifier=`. `McpEndpoint` resolves the caller
+  once per request (`AUTH_SCOPE_KEY`, also used for the rate-limit client) and passes the identity
+  to inner calls in `IDENTITY_SCOPE_KEY`; never forward the token. A valid `X-API-Key` wins over a
+  token. Tests generate keys locally and patch `app.oauth.create_http_client`.
 - Two kinds of skills: `.github/skills/` holds *contributor* skills for working on this repo;
   `skills/football-results/SKILL.md` is the *consumer* skill for people and agents using the API.
   The consumer skill is a static, single file (`copilot skill add <url>` installs one file) that

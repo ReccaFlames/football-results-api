@@ -344,33 +344,33 @@ How to use this list:
           (`secrets/` git-ignored); `.env.example` updated
     - [x] Docs (README errors, rate limits, configuration, MCP, deployment; ADR 0005; glossary);
           version 0.21.0 (`pyproject.toml`, `cli/pyproject.toml`, `server.json`, `uv lock`)
-  - [ ] 18b. Optional OAuth for `/mcp`
+  - [x] 18b. Optional OAuth for `/mcp`
         ([ADR 0006](adr/0006-optional-oauth-resource-server-for-mcp.md))
-    - [ ] Spike: check OAuth on remote HTTP servers in Copilot CLI, VS Code, and Claude Code
+    - [x] Spike: check OAuth on remote HTTP servers in Copilot CLI, VS Code, and Claude Code
           (CIMD, DCR, or pre-registered client) against Keycloak; add the results to the
           research note; stop and re-plan if no client works
-    - [ ] Settings: `FOOTBALL_RESULTS_OAUTH_ISSUER` (enables OAuth), `..._OAUTH_AUDIENCE`
+    - [x] Settings: `FOOTBALL_RESULTS_OAUTH_ISSUER` (enables OAuth), `..._OAUTH_AUDIENCE`
           (default `<public base URL>/mcp`), `..._OAUTH_MODE` (`optional` | `required`, default
           `optional`), `..._OAUTH_SCOPES`; an issuer requires `FOOTBALL_RESULTS_PUBLIC_BASE_URL`
-    - [ ] `GET /.well-known/oauth-protected-resource/mcp` (RFC 9728: `resource`,
+    - [x] `GET /.well-known/oauth-protected-resource/mcp` (RFC 9728: `resource`,
           `authorization_servers`, `bearer_methods_supported`, `scopes_supported`); not an OpenAPI
           operation, rate-limit exempt, cacheable
-    - [ ] Bearer check in `McpEndpoint` (PyJWT, JWKS cached and refetched on an unknown `kid`,
+    - [x] Bearer check in `McpEndpoint` (PyJWT, JWKS cached and refetched on an unknown `kid`,
           asymmetric algorithms only; `iss`, `aud`, `exp`, `nbf`): an invalid token → 401 with
           `WWW-Authenticate: Bearer error="invalid_token", resource_metadata="..."`; `required`
           mode: anonymous → 401 with `resource_metadata`
-    - [ ] Identity: a keys-file entry has either `hash` or `subject`; a mapped subject gets its
+    - [x] Identity: a keys-file entry has either `hash` or `subject`; a mapped subject gets its
           name, role, and quotas; an unknown valid subject is a `client` with default keyed
           quotas (metric `key` = `oauth`); X-API-Key keeps working on `/mcp`
-    - [ ] Inner tool calls carry the resolved identity in the ASGI scope, never the token, so an
+    - [x] Inner tool calls carry the resolved identity in the ASGI scope, never the token, so an
           admin subject can `request_refresh`
-    - [ ] Optional `oauth-example` Compose profile (Keycloak, realm import without committed
+    - [x] Optional `oauth-example` Compose profile (Keycloak, realm import without committed
           secrets) and a README walkthrough
-    - [ ] `/agents#mcp` and `/llms.txt` mention OAuth when an issuer is set; `server.json`
+    - [x] `/agents#mcp` and `/llms.txt` mention OAuth when an issuer is set; `server.json`
           unchanged (clients discover OAuth at runtime)
-    - [ ] Tests with locally generated keys and JWKS (no network): valid, expired, wrong
+    - [x] Tests with locally generated keys and JWKS (no network): valid, expired, wrong
           audience, wrong issuer, unknown `kid`, `required` mode, mapped admin refresh
-    - [ ] Docs (README MCP and configuration; ADR 0006); version 0.22.0 (`pyproject.toml`,
+    - [x] Docs (README MCP and configuration; ADR 0006); version 0.22.0 (`pyproject.toml`,
           `cli/pyproject.toml`, `server.json`, `uv lock`)
   - [ ] 18c. Public demo instance
         ([ADR 0007](adr/0007-read-only-demo-instance-serves-only-redistributable-sources.md))

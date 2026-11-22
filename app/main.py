@@ -14,7 +14,7 @@ from prometheus_client import CONTENT_TYPE_LATEST
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.routing import Match as RouteMatch
 
-from app import access, agent_docs, observability
+from app import access, agent_docs, oauth, observability
 from app import api_docs as docs
 from app.caching import (
     CACHEABLE_OPERATIONS,
@@ -43,7 +43,9 @@ from app.contract import (
 from app.database import session_factory
 from app.logs import configure_logging
 from app.mcp_server import (
+    AUTH_SCOPE_KEY,
     CLIENT_SCOPE_KEY,
+    IDENTITY_SCOPE_KEY,
     INTERNAL_SCOPE_KEY,
     MCP_PATH,
     McpEndpoint,
@@ -104,10 +106,15 @@ def _identity(supplied: str | None) -> access.Identity | None:
     return access.resolve(supplied or "", access.env_keys(settings.api_keys), file_keys)
 
 
-def _require_admin(supplied: str, *, scheme: str, disabled: str, hint: str) -> None:
+def _subject_identity(subject: str) -> access.Identity:
+    return access.resolve_subject(subject, file_keys)
+
+
+def _require_admin(
+    identity: access.Identity | None, *, scheme: str, disabled: str, hint: str
+) -> None:
     if not access.has_admin_key(access.env_keys(settings.api_keys), file_keys):
         raise ProblemError("writes-disabled", disabled, hint=ADMIN_KEY_HINT)
-    identity = _identity(supplied)
     if identity is None:
         raise ProblemError(
             "unauthorized",
@@ -118,16 +125,21 @@ def _require_admin(supplied: str, *, scheme: str, disabled: str, hint: str) -> N
     if identity.role != "admin":
         raise ProblemError(
             "forbidden",
-            f"The API key {identity.name!r} has role {identity.role}, which does not allow "
+            f"The caller {identity.name!r} has role {identity.role}, which does not allow "
             "this operation",
             hint="Use an admin key, or leave this operation to the operator. Read operations "
             "work with any key or none.",
         )
 
 
-async def require_api_key(api_key: str | None = Depends(api_key_header)) -> None:
+async def require_api_key(request: Request, api_key: str | None = Depends(api_key_header)) -> None:
+    # A tool's in-process call acts as the identity of the `/mcp` caller (key or OAuth subject).
+    if INTERNAL_SCOPE_KEY in request.scope:
+        identity = request.scope.get(IDENTITY_SCOPE_KEY)
+    else:
+        identity = _identity(api_key)
     _require_admin(
-        api_key or "",
+        identity,
         scheme="ApiKey",
         disabled="Write endpoints are disabled",
         hint="Send an admin API key in the X-API-Key header.",
@@ -139,7 +151,7 @@ def require_metrics_key(request: Request) -> None:
     scheme, _, credentials = request.headers.get("Authorization", "").partition(" ")
     supplied = credentials.strip() if scheme.lower() == "bearer" else ""
     _require_admin(
-        supplied or request.headers.get("X-API-Key", ""),
+        _identity(supplied or request.headers.get("X-API-Key", "")),
         scheme="Bearer",
         disabled="Metrics are disabled",
         hint="Send an admin API key as Authorization: Bearer <key> or in X-API-Key.",
@@ -220,7 +232,7 @@ app = FastAPI(
 install_problem_handlers(app)
 docs.install_openapi(app)
 # The MCP server is a plain Starlette route, so it stays out of the OpenAPI spec.
-mcp_endpoint = McpEndpoint(create_server(app), settings)
+mcp_endpoint = McpEndpoint(create_server(app), settings, _identity, _subject_identity)
 app.router.routes.append(McpRoute(mcp_endpoint))
 
 
@@ -228,9 +240,11 @@ _trusted_proxies = lru_cache(maxsize=8)(parse_networks)
 
 
 def _rate_limit_client(request: Request) -> Client:
-    """A keyed client for a valid `X-API-Key` (its own quotas), otherwise the client IP."""
+    """A keyed client for a valid `X-API-Key` or, on `/mcp`, OAuth subject (its own quotas),
+    otherwise the client IP."""
     read, write = settings.rate_limit_read_per_minute, settings.rate_limit_write_per_minute
-    identity = _identity(request.headers.get("X-API-Key"))
+    auth = request.scope.get(AUTH_SCOPE_KEY)
+    identity = auth.identity if auth is not None else _identity(request.headers.get("X-API-Key"))
     if identity is not None:
         return Client(
             identity.bucket,
@@ -269,6 +283,8 @@ async def rate_limit_and_cache(
     request: Request, call_next: Callable[[Request], Awaitable[Response]]
 ) -> Response:
     rate_headers: dict[str, str] = {}
+    if request.url.path == MCP_PATH and INTERNAL_SCOPE_KEY not in request.scope:
+        await mcp_endpoint.authenticate(request.scope)
     if (hit := _rate_limit_hit(request)) is not None:
         policy, client = hit
         decision = rate_limiter.hit(policy, client.bucket, time.monotonic())
@@ -1093,6 +1109,25 @@ async def metrics() -> Response:
     return Response(body, media_type=CONTENT_TYPE_LATEST, headers={"Cache-Control": "no-store"})
 
 
+@app.get(oauth.METADATA_PATH, include_in_schema=False)
+async def protected_resource_metadata() -> Response:
+    """RFC 9728 metadata of `/mcp` when OAuth is configured (ADR 0006)."""
+    config = oauth.OAuthConfig.from_settings(settings)
+    if config is None:
+        raise ProblemError(
+            "not-found",
+            "OAuth is not configured on this instance",
+            hint="Use /mcp anonymously or with an X-API-Key header.",
+        )
+    return JSONResponse(
+        config.metadata(documentation=f"{settings.public_base_url}/agents#mcp"),
+        headers={
+            "Cache-Control": cache_control(settings.cache_max_age_seconds),
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+
 def _public_base_url(request: Request) -> tuple[str, bool]:
     """The base URL for links and examples, and whether it was derived from the request."""
     if settings.public_base_url:
@@ -1155,8 +1190,22 @@ async def _agent_guide(
             agent_docs.mcp_tool(base_url),
         ),
         provider_competitions=_configured_provider_competitions(),
+        oauth=_oauth_info(),
     )
     return guide, base_url, request_derived
+
+
+def _oauth_info() -> agent_docs.OAuthInfo | None:
+    config = oauth.OAuthConfig.from_settings(settings)
+    if config is None:
+        return None
+    return agent_docs.OAuthInfo(
+        config.issuer,
+        config.audience,
+        config.metadata_url,
+        config.mode == "required",
+        config.scopes,
+    )
 
 
 def _configured_provider_competitions() -> dict[str, list[str]]:

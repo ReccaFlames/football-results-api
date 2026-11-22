@@ -80,7 +80,42 @@ class Settings(BaseSettings):
     public_base_url: str | None = None
     mcp_allowed_hosts: str = ""
     mcp_allowed_origins: str = ""
+    # Optional OAuth for `/mcp` (ADR 0006): an issuer turns it on.
+    oauth_issuer: str | None = None
+    oauth_audience: str | None = None
+    oauth_mode: Literal["optional", "required"] = "optional"
+    oauth_scopes: str = ""
+    # JWKS location when the issuer's discovery URL is unreachable from the API (Compose).
+    oauth_jwks_url: str | None = None
     log_format: Literal["text", "json"] = "text"
+
+    @field_validator("oauth_issuer", "oauth_jwks_url")
+    @classmethod
+    def _validate_oauth_urls(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        parts = urlsplit(value)
+        if parts.scheme not in {"http", "https"} or not parts.hostname or parts.fragment:
+            raise ValueError("must be an absolute http(s) URL without a fragment")
+        return value
+
+    @model_validator(mode="after")
+    def _oauth_needs_public_base_url(self) -> "Settings":
+        if self.oauth_issuer and not self.public_base_url:
+            raise ValueError(
+                "FOOTBALL_RESULTS_OAUTH_ISSUER requires FOOTBALL_RESULTS_PUBLIC_BASE_URL"
+            )
+        return self
+
+    @property
+    def mcp_resource(self) -> str | None:
+        """The public `/mcp` URL: the OAuth protected resource, or None without a base URL."""
+        return f"{self.public_base_url}/mcp" if self.public_base_url else None
+
+    @property
+    def oauth_token_audience(self) -> str | None:
+        return self.oauth_audience or self.mcp_resource
 
     @field_validator("trusted_proxies")
     @classmethod
@@ -599,7 +634,16 @@ def cli(argv: list[str] | None = None) -> int:
         except ValueError as error:
             parser.error(str(error))
         admins = sum(1 for key in keys if key.role == "admin")
-        print(f"API keys file valid: {args.api_keys_file} ({len(keys)} keys, {admins} admin)")
+        subjects = sum(1 for key in keys if key.subject is not None)
+        counts = f"{len(keys) - subjects} keys, {admins} admin"
+        if subjects:
+            counts += f", {subjects} OAuth subjects"
+        print(f"API keys file valid: {args.api_keys_file} ({counts})")
+    if settings.oauth_issuer:
+        print(
+            f"OAuth for /mcp: issuer {settings.oauth_issuer}, audience "
+            f"{settings.oauth_token_audience}, mode {settings.oauth_mode}"
+        )
     return 0
 
 

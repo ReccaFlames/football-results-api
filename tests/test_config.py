@@ -348,10 +348,12 @@ def test_api_keys_file_is_validated_by_check(
         "keys:\n"
         f"  - {{name: ops, hash: '{access.hash_key('a')}', role: admin}}\n"
         f"  - {{name: partner-app, hash: '{access.hash_key('b')}', read_per_minute: 600}}\n"
+        "  - {name: operator, subject: 3f6c-user, role: admin}\n"
     )
     args = ["check", "--config-file", str(DEFAULT_CONFIG), "--api-keys-file", str(keys)]
     assert cli(args) == 0
-    assert f"API keys file valid: {keys} (2 keys, 1 admin)" in capsys.readouterr().out
+    expected = f"API keys file valid: {keys} (2 keys, 2 admin, 1 OAuth subjects)"
+    assert expected in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(

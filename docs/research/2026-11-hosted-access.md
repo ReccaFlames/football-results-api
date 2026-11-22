@@ -44,9 +44,9 @@ accessible primary source; do not rely on them without checking again.
 
 | Client | Remote HTTP | Static headers (API key) | OAuth | Source |
 | --- | --- | --- | --- | --- |
-| GitHub Copilot CLI | Yes | Yes (`--header`, `headers` in config) | Unverified (DCR/CIMD) | [docs](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers) |
-| VS Code (Copilot Chat) | Yes | Yes (environment-backed headers) | Documented, incl. pre-registered `oauthClientId`; DCR/CIMD unverified | [docs](https://code.visualstudio.com/docs/agents/reference/mcp-configuration) |
-| Claude Code | Yes (`claude mcp add --transport http`) | Unverified | Unverified (docs blocked by organization policy) | — |
+| GitHub Copilot CLI | Yes | Yes (`--header`, `headers` in config) | Yes: CIMD, DCR, pre-registered (see §7) | [docs](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers) |
+| VS Code (Copilot Chat) | Yes | Yes (environment-backed headers) | Yes: pre-registered, CIMD, DCR (see §7) | [docs](https://code.visualstudio.com/docs/agents/reference/mcp-configuration) |
+| Claude Code | Yes (`claude mcp add --transport http`) | Unverified | Yes: CIMD, DCR, `--client-id` (see §7) | [changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md) |
 
 Conclusion: shell and IDE clients can already send `X-API-Key`. OAuth matters mainly for hosted
 chat clients that cannot set headers; their support must be verified per client before relying
@@ -157,6 +157,60 @@ default, so add a cache rule only for public GETs
 ([docs](https://developers.cloudflare.com/cache/concepts/default-cache-behavior/)). Behind
 Cloudflare, `FOOTBALL_RESULTS_TRUSTED_PROXIES` must list Cloudflare's ranges.
 
+## 7. Spike: OAuth in MCP clients and Keycloak (item 18b, 2026-11-22)
+
+Checked before implementing [ADR 0006](../adr/0006-optional-oauth-resource-server-for-mcp.md).
+Client claims come from official changelogs, docs, and source; the Keycloak claims were also
+tested locally against `quay.io/keycloak/keycloak:26.8.2` (`start-dev --import-realm`).
+
+| Client | PRM discovery | Registration | Redirect | `resource` (RFC 8707) | Explicit sign-in |
+| --- | --- | --- | --- | --- | --- |
+| GitHub Copilot CLI | Yes; header vs. well-known order **unverified** | CIMD ([changelog](https://github.com/github/copilot-cli/blob/main/changelog.md#L2447)), DCR ([changelog](https://github.com/github/copilot-cli/blob/main/changelog.md#L1104)), pre-registered `oauthClientId` ([changelog](https://github.com/github/copilot-cli/blob/main/changelog.md#L3607)) | Loopback; `auth.redirectPort` pins the port ([changelog](https://github.com/github/copilot-cli/blob/main/changelog.md#L3656)) | Yes, exact value without an added slash ([changelog](https://github.com/github/copilot-cli/blob/main/changelog.md#L891)) | `/mcp auth` ([changelog](https://github.com/github/copilot-cli/blob/main/changelog.md#L4137)); lists servers that return `401` ([changelog](https://github.com/github/copilot-cli/blob/main/changelog.md#L752)) |
+| VS Code | `WWW-Authenticate` header, then path and root well-known ([source](https://github.com/microsoft/vscode/blob/main/src/vs/base/common/oauth.ts#L1201-L1283)) | Pre-registered `oauth.clientId`, then CIMD, then DCR ([source](https://github.com/microsoft/vscode/blob/main/src/vs/workbench/api/browser/mainThreadAuthentication.ts#L185-L203)) | Desktop `http://127.0.0.1:<port>/callback`; web `https://vscode.dev/redirect` ([Keycloak guide](https://www.keycloak.org/securing-apps/mcp-authz-server#_visual_studio_code_desktop_integration)) | Yes, the PRM `resource`, in both requests ([source](https://github.com/microsoft/vscode/blob/main/src/vs/workbench/api/common/extHostAuthentication.ts#L822-L837)) | Sign-in on first connection when OAuth is configured ([docs](https://code.visualstudio.com/docs/agents/reference/mcp-configuration#_http-and-server-sent-events-sse-servers)); with anonymous success **unverified** |
+| Claude Code | RFC 9728 ([changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#L9074)); order **unverified** | CIMD ([changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#L9247)), DCR, `--client-id`/`--client-secret` ([changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#L10078)) | `http://127.0.0.1:<port>` ([changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#L6222)) | Yes per the [Keycloak guide](https://www.keycloak.org/securing-apps/mcp-authz-server#_claude_code_integration); value **unverified** | `claude mcp login <name>` ([changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#L7141)); servers that work without sign-in are used signed out ([changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#L1934)) |
+
+The MCP 2026-07-28 spec orders registration as pre-registration, CIMD, DCR, then asking the
+user ([client registration](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/client-registration)),
+and PRM discovery as the `WWW-Authenticate` URL, then the path-specific, then the root
+well-known URL ([discovery](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/authorization-server-discovery)).
+
+**Keycloak 26.8.2** ([release](https://github.com/keycloak/keycloak/releases/tag/26.8.2),
+[MCP guide](https://www.keycloak.org/securing-apps/mcp-authz-server)):
+
+- Serves OIDC discovery at `/realms/<realm>/.well-known/openid-configuration` and RFC 8414 at
+  `/.well-known/oauth-authorization-server/realms/<realm>` (both `200` locally); advertises
+  `code_challenge_methods_supported: [plain, S256]` and RFC 9207 `iss` in responses.
+- RFC 8707 and CIMD are **experimental** (`--features=resource-indicators`, `--features=cimd`).
+  Without the feature, `resource` is ignored (tested: no error, `aud` unchanged), and the guide's
+  binding is an `mcp:tools` client scope with an Audience mapper whose *Included Custom Audience*
+  is the exact `/mcp` URL. Tested: requesting `mcp:tools` yields `aud: http://localhost:8000/mcp`.
+- A scope that is unknown or not assigned to the client fails with `invalid_scope` (tested), so
+  advertised `scopes_supported` must exist in the realm and be assigned to the client.
+- A realm import that lists `clientScopes` replaces the built-in scopes (tested: no `basic`
+  scope, so tokens had no `sub`); the import must define `basic` itself.
+- Anonymous DCR is blocked by the *Trusted Hosts* policy until hosts are listed
+  ([client registration](https://www.keycloak.org/securing-apps/client-registration#_client_registration_policies)).
+- Inside Compose, the browser-visible issuer (`http://localhost:8080/...`) is unreachable from
+  the API container, so the API needs a separate JWKS URL (added as
+  `FOOTBALL_RESULTS_OAUTH_JWKS_URL`).
+
+**Conclusions for 18b:**
+
+- Every client can work with this design: pre-registration (a public Keycloak client with
+  loopback redirects and PKCE) is the common path; CIMD for VS Code and Claude Code needs
+  Keycloak's experimental `cimd` feature and client policies.
+- In `optional` mode a client may never start sign-in, because anonymous requests succeed:
+  Copilot CLI's `/mcp auth` lists servers that return `401`, and Claude Code uses such servers
+  signed out. Operators who want OAuth sign-in from these clients should use `required` mode (or
+  an explicit sign-in such as `claude mcp login`); API keys stay the fallback.
+- Advertise `mcp:tools` in `scopes_supported` and make it a default scope of the
+  pre-registered client, so the `/mcp` audience is present even when a client sends no scope.
+
+**Needs a person (unverified here):** a browser login in each installed client against the
+example realm; the exact discovery requests, registration choice, redirect port, and `resource`
+values each client sends; whether VS Code and Copilot CLI offer sign-in after an anonymous
+success; refresh and stale-token behaviour.
+
 ## Sources
 
 - MCP specification 2026-07-28: <https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization>
@@ -165,4 +219,6 @@ Cloudflare, `FOOTBALL_RESULTS_TRUSTED_PROXIES` must list Cloudflare's ranges.
 - draft-ietf-httpapi-ratelimit-headers-11 and -12: <https://www.ietf.org/archive/id/>
 - `mcp` 2.3.0 source in `.venv` (paths above)
 - Client docs: GitHub Copilot CLI, VS Code MCP configuration (links above)
+- Client changelogs and source: [Copilot CLI](https://github.com/github/copilot-cli/blob/main/changelog.md), [Claude Code](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md), [VS Code](https://github.com/microsoft/vscode)
+- Keycloak MCP guide: <https://www.keycloak.org/securing-apps/mcp-authz-server>
 - Provider terms and hosting pages (links in the tables)

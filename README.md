@@ -174,6 +174,9 @@ keys:
     hash: sha256:9f2a...
     role: admin
     write_per_minute: 30         # optional, admin keys only
+  - name: alice                  # OAuth on /mcp only: a token subject instead of a hash
+    subject: f5195edd-3660-457a-934a-dd3dd7d0d802
+    role: admin
 ~~~
 
 - A `client` key gets its own read quota; on refresh, history fetch, job status, admin endpoints,
@@ -184,6 +187,9 @@ keys:
 - The file is read at startup: restart the API after editing it. `python -m app.config check`
   validates it too (`--api-keys-file`, default the setting) without printing any hash.
 - Quotas are per minute and kept in memory (see [rate limits](#errors-rate-limits-and-caching)).
+- An entry has either `hash` or `subject`, never both. A `subject` entry maps the `sub` claim of an
+  OAuth access token on `/mcp` to a name, role, and quotas (see
+  [OAuth for the MCP server](#oauth-for-the-mcp-server)); subjects are unique and not secret.
 
 ### Run PostgreSQL in Docker and FastAPI locally
 
@@ -816,6 +822,7 @@ operation, so it is absent from `/openapi.json`.
   `FOOTBALL_RESULTS_MCP_ALLOWED_HOSTS` and `FOOTBALL_RESULTS_MCP_ALLOWED_ORIGINS` are allowed
   (`421` for another host, `403` for another origin; requests without `Origin` pass).
 - Tool names are public; tool descriptions are kept short (`tests/test_mcp.py` caps them).
+- With OAuth configured, `/mcp` also accepts `Authorization: Bearer` access tokens (see below).
 
 ~~~bash
 # GitHub Copilot CLI (add --header "X-API-Key: <key>" for request_refresh)
@@ -837,6 +844,77 @@ a project `.mcp.json`):
 optional secret `X-API-Key` header) and is validated against the vendored schema in
 `tests/schemas/`. It is not published yet: replace `OWNER` in its `name` with the GitHub account
 that publishes it, then run `mcp-publisher login github` and `mcp-publisher publish`.
+
+### OAuth for the MCP server
+
+OAuth on `/mcp` is optional and off by default (ADR 0006). The API is only an OAuth *resource
+server*: it validates JWT access tokens from an authorization server you run (Keycloak, Entra ID,
+Auth0, ...) and never issues tokens. The REST API keeps `X-API-Key`.
+
+- Set `FOOTBALL_RESULTS_OAUTH_ISSUER` (requires `FOOTBALL_RESULTS_PUBLIC_BASE_URL`). The API then
+  serves RFC 9728 metadata at `/.well-known/oauth-protected-resource/mcp` (cacheable, not rate
+  limited, not in `/openapi.json`), which MCP clients use to find the issuer.
+- Tokens must be signed with an asymmetric algorithm (RS*, PS*, ES*, EdDSA) by a key from the
+  issuer's JWKS (from `FOOTBALL_RESULTS_OAUTH_JWKS_URL`, else OIDC or RFC 8414 discovery; cached
+  for an hour and refetched for an unknown `kid`), and carry `iss` = the issuer, `aud` = the
+  public `/mcp` URL (or `FOOTBALL_RESULTS_OAUTH_AUDIENCE`), `exp`, and `sub`; `nbf` is checked
+  when present (30 s leeway).
+- An invalid or expired token gets `401 unauthorized` with
+  `WWW-Authenticate: Bearer error="invalid_token", resource_metadata="..."`, even in optional
+  mode. An unreachable issuer gives `503 service-unavailable`.
+- `FOOTBALL_RESULTS_OAUTH_MODE=optional` (default): anonymous and `X-API-Key` requests work as
+  before. `required`: a request with neither a valid token nor a valid key gets `401` with
+  `resource_metadata`, which starts sign-in in the client.
+- The token's `sub` gets the name, role, and quotas of a keys-file `subject` entry; an unknown
+  subject is a `client` named `oauth` (default keyed quotas, metric label `oauth`). An admin
+  subject may use `request_refresh`. A valid `X-API-Key` on the same request wins over the token.
+  Scopes (`FOOTBALL_RESULTS_OAUTH_SCOPES`) are advertised to clients, not enforced.
+- Client support (checked November 2026, see `docs/research/2026-11-hosted-access.md` §7):
+  GitHub Copilot CLI, VS Code, and Claude Code discover the metadata, register by client ID
+  metadata document, dynamic registration, or a pre-registered client ID, and send `resource`.
+  In optional mode a client may stay signed out because anonymous access works; start sign-in
+  yourself (`/mcp auth` in Copilot CLI, `claude mcp login football-results`) or use `required`.
+
+#### Local walkthrough with Keycloak
+
+The `oauth-example` Compose profile runs Keycloak 26 in development mode on
+`http://localhost:8080` and imports `keycloak/football-realm.json`: realm `football`, a public
+client `football-mcp` (PKCE, loopback redirects), and a `mcp:tools` scope whose audience mapper
+adds `http://localhost:8000/mcp` to access tokens. The realm ships no users and no secrets. It is
+an example, not a production setup (plain HTTP, `start-dev`).
+
+1. In `.env`, set a Keycloak admin password and the OAuth settings (the issuer is the
+   browser-visible URL; the API container fetches keys through the Compose network):
+
+   ~~~bash
+   KEYCLOAK_ADMIN_PASSWORD=<choose one>
+   FOOTBALL_RESULTS_PUBLIC_BASE_URL=http://localhost:8000
+   FOOTBALL_RESULTS_OAUTH_ISSUER=http://localhost:8080/realms/football
+   FOOTBALL_RESULTS_OAUTH_JWKS_URL=http://keycloak:8080/realms/football/protocol/openid-connect/certs
+   FOOTBALL_RESULTS_OAUTH_SCOPES=mcp:tools
+   FOOTBALL_RESULTS_OAUTH_MODE=required   # optional: also allow anonymous access
+   ~~~
+
+2. Start Keycloak and the stack: `docker compose --profile oauth-example up -d`.
+3. Create a user: sign in to `http://localhost:8080/admin` as `admin`, open realm `football`,
+   **Users → Create user**, then set a password under **Credentials**.
+4. Check the metadata: `curl -s http://localhost:8000/.well-known/oauth-protected-resource/mcp`.
+5. Add the server to a client with the pre-registered client ID and sign in in the browser:
+
+   ~~~bash
+   claude mcp add --transport http --client-id football-mcp football-results http://localhost:8000/mcp
+   claude mcp login football-results
+   ~~~
+
+   In VS Code, add `"oauth": {"clientId": "football-mcp"}` to the server in `mcp.json`; in Copilot
+   CLI, set `oauthClientId` to `football-mcp` in `~/.copilot/mcp-config.json` and run `/mcp auth`.
+6. To let that user use `request_refresh`, copy the user's ID (Keycloak **Users → Details**, the
+   token's `sub`) into a keys-file `subject` entry with `role: admin` and restart the API.
+
+For another issuer or public URL, change the audience mapper's `included.custom.audience` to your
+public `/mcp` URL (or set `FOOTBALL_RESULTS_OAUTH_AUDIENCE` to the audience your issuer puts in
+tokens). Keycloak ignores the `resource` parameter unless its experimental `resource-indicators`
+feature is enabled, which is why the realm uses a scope mapper.
 
 ## Ubuntu deployment
 
@@ -1131,6 +1209,11 @@ Application variables:
 | FOOTBALL_RESULTS_PUBLIC_BASE_URL | empty | Absolute public URL (optionally with a path prefix) used in `/llms.txt` and `/agents` links and examples; empty derives it from the request. Its host and origin are allowed by `/mcp` |
 | FOOTBALL_RESULTS_MCP_ALLOWED_HOSTS | empty | Extra comma-separated `Host` values accepted by `/mcp` (`host` or `host:port`; `host:*` for any port) |
 | FOOTBALL_RESULTS_MCP_ALLOWED_ORIGINS | empty | Extra comma-separated `Origin` values accepted by `/mcp` (for example `https://chat.example.com`) |
+| FOOTBALL_RESULTS_OAUTH_ISSUER | empty | OAuth authorization server whose access tokens `/mcp` accepts; empty turns OAuth off. Requires `FOOTBALL_RESULTS_PUBLIC_BASE_URL` (see [OAuth for the MCP server](#oauth-for-the-mcp-server)) |
+| FOOTBALL_RESULTS_OAUTH_MODE | `optional` | `optional` keeps anonymous and `X-API-Key` access on `/mcp`; `required` answers other requests with `401` and `resource_metadata` |
+| FOOTBALL_RESULTS_OAUTH_AUDIENCE | public `/mcp` URL | Required `aud` of access tokens, when the issuer cannot put the `/mcp` URL there |
+| FOOTBALL_RESULTS_OAUTH_SCOPES | empty | Comma-separated scopes advertised in the metadata and the `401` challenge (not enforced) |
+| FOOTBALL_RESULTS_OAUTH_JWKS_URL | discovered | JWKS URL when the issuer URL is not reachable from the API (for example `http://keycloak:8080/...` in Compose) |
 
 Deployment variables (Docker Compose):
 
@@ -1143,6 +1226,8 @@ Deployment variables (Docker Compose):
 - Observability profile: PROMETHEUS_API_KEY, PROMETHEUS_RETENTION (`15d`), GRAFANA_ADMIN_USER,
   GRAFANA_ADMIN_PASSWORD, GRAFANA_BIND_ADDRESS (`127.0.0.1`), GRAFANA_PORT (`3000`),
   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID (see [Observability](#observability))
+- OAuth example profile: KEYCLOAK_ADMIN_USER (`admin`), KEYCLOAK_ADMIN_PASSWORD, KEYCLOAK_PORT
+  (`8080`; bound to `127.0.0.1`) (see [OAuth for the MCP server](#oauth-for-the-mcp-server))
 
 Never commit .env.
 

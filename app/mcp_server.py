@@ -3,12 +3,15 @@
 Each tool calls the existing HTTP routes in-process, so validation, problem types, freshness,
 IDs, and cursors are exactly those of the API. API errors become tool results with
 `isError: true` whose text is the RFC 9457 problem JSON, unchanged. Tool names are public:
-add, never rename.
+add, never rename. With OAuth configured (ADR 0006), `McpEndpoint` also checks bearer tokens;
+tools then act as the resolved identity, never with the token.
 """
 
 import json
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from importlib.metadata import version
 from typing import Annotated, Any, Literal, NotRequired, TypedDict
@@ -22,11 +25,13 @@ from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from mcp_types import INVALID_PARAMS
 from pydantic import BaseModel, Field
+from starlette.datastructures import Headers
 from starlette.requests import Request
 from starlette.routing import Match as RouteMatch
 from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from app.access import Identity, resolve_subject
 from app.agent_docs import MCP_PATH, MCP_SERVER_NAME, MCP_TOOLS
 from app.config import Settings
 from app.contract import MAX_LIMIT
@@ -39,12 +44,20 @@ from app.models import (
     StandingRow,
     Team,
 )
-from app.problems import problem_body
+from app.oauth import InvalidToken, IssuerUnavailable, JwtVerifier, OAuthConfig, bearer_token
+from app.problems import problem_body, problem_response
+
+logger = logging.getLogger(__name__)
 
 # Set by the rate-limit middleware on the `/mcp` request: the rate-limit client of the caller.
 CLIENT_SCOPE_KEY = "football_results.client"
 # Set on in-process API calls made by tools; the value is the outer client (or "").
 INTERNAL_SCOPE_KEY = "football_results.mcp_internal"
+# The caller's `Identity` (or None): set on the `/mcp` request and copied to the tools' API calls,
+# which authorize with it instead of a key or token.
+IDENTITY_SCOPE_KEY = "football_results.identity"
+# The `McpAuth` result of the `/mcp` request, computed once.
+AUTH_SCOPE_KEY = "football_results.mcp_auth"
 FORM_DEFAULT = 5
 FORM_MAX = 20
 # Budget for all tool descriptions together (about 600 tokens); a test enforces it.
@@ -193,15 +206,9 @@ class ApiError(Exception):
         self.problem = problem
 
 
-def _headers(ctx: Context) -> Mapping[str, str]:
-    return ctx.headers or {}
-
-
-def _outer_client(ctx: Context) -> Any:
-    """The rate-limit client of the `/mcp` request (`app.ratelimit.Client`), or None."""
+def _outer_scope(ctx: Context) -> Mapping[str, Any]:
     request = getattr(ctx.request_context, "request", None)
-    scope = getattr(request, "scope", None) or {}
-    return scope.get(CLIENT_SCOPE_KEY)
+    return getattr(request, "scope", None) or {}
 
 
 class Api:
@@ -218,19 +225,20 @@ class Api:
         *,
         params: Mapping[str, Any] | None = None,
         body: Mapping[str, Any] | None = None,
-        api_key: str | None = None,
     ) -> Any:
-        client = _outer_client(ctx)
+        outer = _outer_scope(ctx)
+        client = outer.get(CLIENT_SCOPE_KEY)
+        identity = outer.get(IDENTITY_SCOPE_KEY)
 
         async def marked(scope: Scope, receive: Receive, send: Send) -> None:
             scope[INTERNAL_SCOPE_KEY] = client
+            scope[IDENTITY_SCOPE_KEY] = identity
             await self.app(scope, receive, send)
 
         query = {key: value for key, value in (params or {}).items() if value is not None}
-        headers = {"X-API-Key": api_key} if api_key else {}
         transport = httpx.ASGITransport(app=marked)
         async with httpx.AsyncClient(transport=transport, base_url="http://mcp.internal") as http:
-            response = await http.request(method, path, params=query, json=body, headers=headers)
+            response = await http.request(method, path, params=query, json=body)
         payload = response.json()
         if response.status_code >= 400:
             raise ApiError(payload)
@@ -481,17 +489,16 @@ def create_server(app: ASGIApp) -> MCPServer:
         ] = None,
     ) -> Annotated[CallToolResult, JobAccepted]:
         """Queue a re-import of the current season when its data is stale. Needs an admin
-        X-API-Key header on the MCP connection. Returns a job; the scheduler runs it within a minute."""
+        X-API-Key header or admin OAuth sign-in. Returns a job; the scheduler runs it within a
+        minute."""
 
         body = {"competition": competition, "season": season}
-        api_key = _headers(ctx).get("x-api-key")
         return await _tool(
             lambda: api.call(
                 ctx,
                 "POST",
                 "/api/v1/results/refresh",
                 body={key: value for key, value in body.items() if value is not None},
-                api_key=api_key,
             )
         )
 
@@ -509,12 +516,93 @@ def create_server(app: ASGIApp) -> MCPServer:
 # --- HTTP endpoint -------------------------------------------------------------------------------
 
 
-class McpEndpoint:
-    """The `/mcp` ASGI endpoint: Host/Origin checks from the current settings, then the SDK."""
+@dataclass(frozen=True)
+class McpAuth:
+    """Who calls `/mcp`, or why the request is rejected before it reaches the MCP server."""
 
-    def __init__(self, server: MCPServer, settings: Settings) -> None:
+    identity: Identity | None
+    rejection: Literal["invalid_token", "missing", "unavailable"] | None = None
+    detail: str = ""
+
+
+class McpEndpoint:
+    """The `/mcp` ASGI endpoint: Host/Origin checks from the current settings, the optional
+    bearer check, then the SDK.
+
+    ``identify_key`` resolves an `X-API-Key`; ``identify_subject`` maps a valid token subject.
+    """
+
+    def __init__(
+        self,
+        server: MCPServer,
+        settings: Settings,
+        identify_key: Callable[[str | None], Identity | None] = lambda _: None,
+        identify_subject: Callable[[str], Identity] = lambda subject: resolve_subject(subject, ()),
+    ) -> None:
         self.server = server
         self.settings = settings
+        self.identify_key = identify_key
+        self.identify_subject = identify_subject
+        self._verifiers: dict[OAuthConfig, JwtVerifier] = {}
+
+    def verifier(self, config: OAuthConfig) -> JwtVerifier:
+        if config not in self._verifiers:
+            self._verifiers = {config: JwtVerifier(config)}
+        return self._verifiers[config]
+
+    async def authenticate(self, scope: Scope) -> McpAuth:
+        """The caller of a `/mcp` request; computed once and kept in the scope."""
+        if AUTH_SCOPE_KEY not in scope:
+            scope[AUTH_SCOPE_KEY] = await self._authenticate(Headers(scope=scope))
+        return scope[AUTH_SCOPE_KEY]
+
+    async def _authenticate(self, headers: Headers) -> McpAuth:
+        key_identity = self.identify_key(headers.get("x-api-key"))
+        config = OAuthConfig.from_settings(self.settings)
+        token = bearer_token(headers.get("authorization")) if config else None
+        if config is None or token is None:
+            if config is not None and config.mode == "required" and key_identity is None:
+                return McpAuth(None, "missing", "This MCP server requires sign-in")
+            return McpAuth(key_identity)
+        if not token:
+            return McpAuth(None, "invalid_token", "The bearer token is empty")
+        try:
+            access = await self.verifier(config).check(token)
+        except InvalidToken as error:
+            return McpAuth(None, "invalid_token", str(error))
+        except IssuerUnavailable as error:
+            logger.warning("OAuth token not checked: %s", error)
+            return McpAuth(None, "unavailable", "The authorization server cannot be reached")
+        # A valid API key on the same request takes precedence over the token's subject.
+        if key_identity is not None or access.subject is None:
+            return McpAuth(key_identity)
+        return McpAuth(self.identify_subject(access.subject))
+
+    async def _reject(self, auth: McpAuth, scope: Scope, receive: Receive, send: Send) -> None:
+        config = OAuthConfig.from_settings(self.settings)
+        assert config is not None
+        request = Request(scope, receive)
+        if auth.rejection == "unavailable":
+            response = problem_response(
+                request,
+                "service-unavailable",
+                auth.detail,
+                headers={"Retry-After": "30"},
+                hint="Retry later, or use an X-API-Key header.",
+            )
+        else:
+            error = "invalid_token" if auth.rejection == "invalid_token" else None
+            response = problem_response(
+                request,
+                "unauthorized",
+                auth.detail,
+                headers={"WWW-Authenticate": config.challenge(error, auth.detail)},
+                hint=(
+                    "Sign in again with the authorization server in resource_metadata, or send "
+                    "an API key in X-API-Key."
+                ),
+            )
+        await response(scope, receive, send)
 
     @asynccontextmanager
     async def lifespan(self) -> AsyncIterator[None]:
@@ -534,6 +622,11 @@ class McpEndpoint:
         if rejection is not None:
             await rejection(scope, receive, send)
             return
+        auth = await self.authenticate(scope)
+        if auth.rejection is not None:
+            await self._reject(auth, scope, receive, send)
+            return
+        scope[IDENTITY_SCOPE_KEY] = auth.identity
         await self.server.session_manager.handle_request(scope, receive, send)
 
 
