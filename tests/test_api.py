@@ -7,6 +7,7 @@ from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
 import app.main as main_module
+from app import access
 from app.competitions import competition_summary, source_from_url
 from app.config import load_config
 from app.main import app
@@ -1324,3 +1325,147 @@ def test_metrics_report_scheduler_seasons_jobs_and_requests(tmp_path: Path) -> N
     teams = {"operation": "list_teams", "method": "GET", "status": "200"}
     assert metric(body, "football_results_http_requests_total", **teams) >= 1
     assert "/api/v1/matches/does-not-exist" not in body
+
+
+CLIENT_HEADERS = {"X-API-Key": "client-key"}
+ADMIN_FILE_HEADERS = {"X-API-Key": "admin-file-key"}
+
+
+def use_file_keys(monkeypatch: pytest.MonkeyPatch, *entries: access.FileKey) -> None:
+    monkeypatch.setattr(main_module, "file_keys", entries)
+
+
+def file_key(key: str, name: str, role: access.Role = "client", **quotas: int) -> access.FileKey:
+    digest = bytes.fromhex(access.hash_key(key).removeprefix(access.HASH_PREFIX))
+    return access.FileKey(
+        name, digest, role, quotas.get("read_per_minute"), quotas.get("write_per_minute")
+    )
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("POST", "/api/v1/results/refresh"),
+        ("POST", "/api/v1/results/history/fetch"),
+        ("GET", "/api/v1/jobs/1"),
+        ("GET", "/api/v1/admin/scrape-runs"),
+        ("GET", "/api/v1/admin/scheduler"),
+        ("GET", "/metrics"),
+    ],
+)
+def test_client_keys_are_forbidden_on_admin_operations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, method: str, path: str
+) -> None:
+    client, _ = client_with_empty_store(tmp_path)
+    use_file_keys(
+        monkeypatch,
+        file_key("client-key", "partner-app"),
+        file_key("admin-file-key", "ops", "admin"),
+    )
+    body = {"competition": "ekstraklasa", "season": "2024-2025"}
+
+    forbidden = client.request(method, path, json=body, headers=CLIENT_HEADERS)
+    problem = assert_problem(forbidden, 403, "forbidden")
+    assert "'partner-app' has role client" in problem["detail"]
+    assert forbidden.headers["cache-control"] == "no-store"
+    unauthorized = client.request(method, path, json=body, headers={"X-API-Key": "wrong"})
+    assert unauthorized.status_code == 401
+    assert client.request(method, path, json=body, headers=ADMIN_FILE_HEADERS).status_code != 403
+    assert client.request(method, path, json=body, headers=AUTH_HEADERS).status_code != 403
+    if path != "/metrics":
+        template = path.replace("/1", "/{job_id}")
+        responses = app.openapi()["paths"][template][method.lower()]["responses"]
+        assert {"401", "403", "503"} <= set(responses)
+
+
+def test_writes_are_disabled_when_only_client_keys_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _ = client_with_empty_store(tmp_path)
+    monkeypatch.setattr(main_module.settings, "api_keys", "")
+    use_file_keys(monkeypatch, file_key("client-key", "partner-app"))
+    refresh = client.post(
+        "/api/v1/results/refresh", json={"competition": "ekstraklasa"}, headers=CLIENT_HEADERS
+    )
+    assert_problem(refresh, 503, "writes-disabled")
+    assert client.get("/api/v1/competitions", headers=CLIENT_HEADERS).status_code == 200
+
+    use_file_keys(monkeypatch, file_key("admin-file-key", "ops", "admin"))
+    queued = client.post(
+        "/api/v1/results/refresh", json={"competition": "ekstraklasa"}, headers=ADMIN_FILE_HEADERS
+    )
+    assert queued.status_code == 202
+
+
+def test_keyed_clients_have_their_own_quotas(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _ = client_with_matches(tmp_path)
+    monkeypatch.setattr(main_module.settings, "rate_limit_read_per_minute", 2)
+    use_file_keys(
+        monkeypatch,
+        file_key("client-key", "partner-app", read_per_minute=3),
+        file_key("small-key", "small", read_per_minute=1),
+        file_key("admin-file-key", "ops", "admin", write_per_minute=1),
+    )
+
+    before = client.get("/metrics", headers={"Authorization": "Bearer test-api-key"}).text
+    keyed = client.get("/api/v1/competitions", headers=CLIENT_HEADERS)
+    assert keyed.headers["ratelimit-policy"] == '"read";q=3;w=60'
+    assert keyed.headers["ratelimit"] == '"read";r=2;t=60'
+    assert client.get("/api/v1/competitions", headers=CLIENT_HEADERS).status_code == 200
+    assert client.get("/api/v1/competitions", headers=CLIENT_HEADERS).status_code == 200
+    limited = client.get("/api/v1/competitions", headers=CLIENT_HEADERS)
+    body = assert_problem(limited, 429, "rate-limited")
+    assert body["detail"] == "Rate limit exceeded: 3 read requests per 60 seconds"
+
+    # Anonymous clients keep the default quota per IP; a key may also have a lower quota.
+    assert client.get("/api/v1/competitions").headers["ratelimit-policy"] == '"read";q=2;w=60'
+    assert client.get("/api/v1/competitions", headers={"X-API-Key": "small-key"}).status_code == 200
+    assert client.get("/api/v1/competitions", headers={"X-API-Key": "small-key"}).status_code == 429
+
+    refresh = {"competition": "ekstraklasa"}
+    first = client.post("/api/v1/results/refresh", json=refresh, headers=ADMIN_FILE_HEADERS)
+    assert first.headers["ratelimit-policy"] == '"write";q=1;w=60'
+    second = client.post("/api/v1/results/refresh", json=refresh, headers=ADMIN_FILE_HEADERS)
+    assert second.status_code == 429
+    # Environment keys keep the default quotas.
+    env = client.post("/api/v1/results/refresh", json=refresh, headers=AUTH_HEADERS)
+    assert env.headers["ratelimit-policy"] == '"write";q=10;w=60'
+
+    after = client.get("/metrics", headers=AUTH_HEADERS).text
+    assert used(before, after, "keyed_requests", "partner-app", "read") == 4
+    assert used(before, after, "rate_limited", "partner-app", "read") == 1
+    assert used(before, after, "rate_limited", "ops", "write") == 1
+    assert used(before, after, "keyed_requests", "env", "write") == 1
+    assert used(before, after, "keyed_requests", "anonymous", "read") == 1
+
+
+def used(before: str, after: str, name: str, key: str, policy: str) -> float:
+    series = f"football_results_{name}_total"
+
+    def value(body: str) -> float:
+        try:
+            return metric(body, series, key=key, policy=policy)
+        except AssertionError:
+            return 0.0
+
+    return value(after) - value(before)
+
+
+def test_startup_loads_the_api_keys_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client_with_empty_store(tmp_path)
+    keys = tmp_path / "keys.yaml"
+    keys.write_text(
+        f"keys:\n  - {{name: ops, hash: '{access.hash_key('file-admin')}', role: admin}}\n"
+    )
+    monkeypatch.setattr(main_module.settings, "api_keys", "")
+    monkeypatch.setattr(main_module.settings, "api_keys_file", keys)
+    monkeypatch.setattr(main_module, "file_keys", ())
+    with TestClient(app) as client:
+        response = client.get("/api/v1/admin/scheduler", headers={"X-API-Key": "file-admin"})
+        assert response.status_code == 200
+
+    keys.write_text("keys:\n  - {name: ops, hash: plain}\n")
+    with pytest.raises(ValueError, match="invalid API keys file"), TestClient(app):
+        pass

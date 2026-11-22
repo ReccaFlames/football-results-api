@@ -38,6 +38,10 @@ PROBLEM_GUIDANCE: dict[str, tuple[str, str]] = {
         "The operation needs an API key, and `X-API-Key` is missing or wrong.",
         "Send a key issued by the operator in the `X-API-Key` header. Read operations need no key.",
     ),
+    "forbidden": (
+        "The API key is valid, but its role (`client`) does not allow this operation.",
+        "Ask the operator for an admin key, or leave the operation to the operator.",
+    ),
     "unknown-competition": (
         "No competition has this slug.",
         "Use a slug from `valid_values` or from `list_competitions`.",
@@ -997,10 +1001,12 @@ def _auth_text(guide: AgentGuide) -> str:
     return (
         "**Auth:** other operations need no authentication. "
         + ", ".join(f"`{item}`" for item in protected)
-        + " need an `X-API-Key` header with a key issued by the operator; without one they "
-        "return `401` (or `503` when the instance has no keys configured). Request imports only "
-        "when data is missing or stale: the scheduler refreshes current seasons automatically. "
-        "Admin operations are for the operator."
+        + " need an `X-API-Key` header with an admin key issued by the operator; without a "
+        "valid key they return `401`, with a `client` key `403` (`forbidden`), and `503` when "
+        "the instance has no admin key. Any key may be sent on reads: it identifies the caller "
+        "and selects that key's rate limit. Request imports only when data is missing or stale: "
+        "the scheduler refreshes current seasons automatically. Admin operations are for the "
+        "operator."
     )
 
 
@@ -1019,7 +1025,8 @@ def _rules(guide: AgentGuide) -> tuple[str, ...]:
     limits = guide.rate_limits
     rate = (
         f"Rate limits: {limits.read_per_minute} reads and {limits.write_per_minute} writes per "
-        "minute per client (`RateLimit` and `RateLimit-Policy` headers); on `429` wait "
+        "minute per client IP; requests with an API key count against that key, which may have "
+        "its own quota (`RateLimit` and `RateLimit-Policy` show yours); on `429` wait "
         "`Retry-After` seconds."
         if limits.enabled
         else "Rate limiting is disabled on this instance."
@@ -1106,13 +1113,13 @@ def _cli_blocks(guide: AgentGuide) -> list[Block]:
         ),
         Code(CLI_INSTALL),
         Paragraph(
-            "Configure it with environment variables (or `--url`, `--api-key`, `--timeout`). The "
-            "API key is sent only for `refresh`, `fetch-season`, `status`, `scrape-runs`, and "
-            "`scheduler`."
+            "Configure it with environment variables (or `--url`, `--api-key`, `--timeout`). A "
+            "configured API key is sent on every request and selects your quota; `refresh`, "
+            "`fetch-season`, `status`, `scrape-runs`, and `scheduler` need an admin key."
         ),
         Code(
             f"export FOOTBALL_RESULTS_URL={guide.base_url}\n"
-            "export FOOTBALL_RESULTS_API_KEY=...   # only for refresh, fetch-season, status, admin"
+            "export FOOTBALL_RESULTS_API_KEY=...   # optional; admin key for jobs and admin"
         ),
         Table(
             ("Command", "Operation", "Summary"),
@@ -1204,9 +1211,10 @@ def _mcp_blocks(guide: AgentGuide) -> list[Block]:
             ),
         ),
         Paragraph(
-            "Each MCP request counts once against the read rate limit; `request_refresh` also "
-            "counts against the write limit and needs an API key in the `X-API-Key` header of "
-            "the MCP connection. Leave the header out for read-only use."
+            "Each MCP request counts once against the read rate limit (of the `X-API-Key` of the "
+            "connection, if any, otherwise of the client IP); `request_refresh` also counts "
+            "against the write limit and needs an admin key in that header (a `client` key gets "
+            "`forbidden`). Leave the header out for anonymous read-only use."
         ),
         Code(
             "# GitHub Copilot CLI\n"

@@ -81,24 +81,23 @@ class ApiClient:
         self.http = http
         self.sleep = sleep
 
-    def get(
-        self, path: str, params: Mapping[str, Any] | None = None, *, auth: bool = False
-    ) -> ApiResponse:
+    def get(self, path: str, params: Mapping[str, Any] | None = None) -> ApiResponse:
         query = {key: value for key, value in (params or {}).items() if value is not None}
         for attempt in range(MAX_RETRIES + 1):
-            response = self._send("GET", path, params=query, auth=auth)
+            response = self._send("GET", path, params=query)
             delay = retry_delay(response)
             if attempt == MAX_RETRIES or delay is None:
                 break
             self.sleep(delay)
         return self._result(response)
 
-    def post(self, path: str, body: Mapping[str, Any], *, auth: bool = True) -> ApiResponse:
+    def post(self, path: str, body: Mapping[str, Any]) -> ApiResponse:
         payload = {key: value for key, value in body.items() if value is not None}
-        return self._result(self._send("POST", path, json=payload, auth=auth))
+        return self._result(self._send("POST", path, json=payload))
 
-    def _send(self, method: str, path: str, *, auth: bool, **kwargs: Any) -> httpx.Response:
-        headers = {"X-API-Key": self.config.api_key} if auth and self.config.api_key else {}
+    def _send(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        # Sent on every request: a key selects the caller's quota as well as its role (ADR 0005).
+        headers = {"X-API-Key": self.config.api_key} if self.config.api_key else {}
         url = f"{self.config.url}{path}"
         try:
             return self.http.request(method, path, headers=headers, **kwargs)

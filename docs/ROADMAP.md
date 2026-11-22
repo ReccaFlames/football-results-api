@@ -312,6 +312,80 @@ How to use this list:
             `PROVIDERS.md` capability and URL tables; ADR 0004); version 0.20.0
             (`pyproject.toml`, `cli/pyproject.toml`, `server.json`, `uv lock`)
 - [ ] **18. Optional hosted access**
-  - [ ] OAuth for remote MCP
-  - [ ] Per-key quotas
-  - [ ] Public demo instance
+      ([research](research/2026-11-hosted-access.md); everything stays optional and free to
+      self-host)
+  - [x] 18a. Named API keys, roles, and per-key quotas
+        ([ADR 0005](adr/0005-named-api-keys-with-roles-and-quotas.md))
+    - [x] Keys file `FOOTBALL_RESULTS_API_KEYS_FILE` (YAML, optional): `keys[]` with `name`
+          (`[a-z0-9-]`, unique, not `env` or `anonymous`), `hash` (`sha256:<64 hex>`; plain keys
+          rejected), `role` (`client` | `admin`), optional `read_per_minute` and
+          `write_per_minute` (admin only); validated at startup and by `python -m app.config check`
+    - [x] `python -m app.config hash-key --name <name> [--role client|admin]` prints a new random
+          key (32 bytes) and its YAML entry
+    - [x] Key resolution: SHA-256 of the supplied key compared in constant time with every hash;
+          `FOOTBALL_RESULTS_API_KEYS` keys are `admin` keys named `env`; both sources combine
+    - [x] Roles: every currently protected operation (refresh, history fetch, jobs, admin,
+          `/metrics`) needs `admin`; a valid `client` key gets the new problem `forbidden` (403)
+          in `PROBLEM_TYPES`, `PROBLEM_GUIDANCE`, and each route's `responses=`; a missing or
+          wrong key stays `unauthorized`; `writes-disabled` only when no admin key exists
+    - [x] Per-key quotas: keyed clients are counted per key name with their own read and write
+          quotas (defaults: `FOOTBALL_RESULTS_RATE_LIMIT_*_PER_MINUTE`); anonymous clients stay
+          per IP; `RateLimit-Policy` `q` shows the client's quota (draft -11 syntax unchanged);
+          `rate-limited` (429) unchanged
+    - [x] MCP: a key on `/mcp` sets the quota of the `/mcp` read count; `request_refresh` with a
+          `client` key returns `forbidden` as an `isError` tool result
+    - [x] Metrics: `football_results_keyed_requests_total{key,policy}` and
+          `football_results_rate_limited_total{key,policy}` (`key` = name, `env`, or `anonymous`;
+          never the key itself)
+    - [x] CLI sends `FOOTBALL_RESULTS_API_KEY` on every request when set (AGENTS.md rule updated);
+          `forbidden` maps to exit code 5; consumer skill wording updated
+    - [x] Agent docs: `/llms.txt` and `/agents` describe roles, keyed quotas, and `forbidden`
+    - [x] Compose passes `FOOTBALL_RESULTS_API_KEYS_FILE` and mounts `./secrets` read-only
+          (`secrets/` git-ignored); `.env.example` updated
+    - [x] Docs (README errors, rate limits, configuration, MCP, deployment; ADR 0005; glossary);
+          version 0.21.0 (`pyproject.toml`, `cli/pyproject.toml`, `server.json`, `uv lock`)
+  - [ ] 18b. Optional OAuth for `/mcp`
+        ([ADR 0006](adr/0006-optional-oauth-resource-server-for-mcp.md))
+    - [ ] Spike: check OAuth on remote HTTP servers in Copilot CLI, VS Code, and Claude Code
+          (CIMD, DCR, or pre-registered client) against Keycloak; add the results to the
+          research note; stop and re-plan if no client works
+    - [ ] Settings: `FOOTBALL_RESULTS_OAUTH_ISSUER` (enables OAuth), `..._OAUTH_AUDIENCE`
+          (default `<public base URL>/mcp`), `..._OAUTH_MODE` (`optional` | `required`, default
+          `optional`), `..._OAUTH_SCOPES`; an issuer requires `FOOTBALL_RESULTS_PUBLIC_BASE_URL`
+    - [ ] `GET /.well-known/oauth-protected-resource/mcp` (RFC 9728: `resource`,
+          `authorization_servers`, `bearer_methods_supported`, `scopes_supported`); not an OpenAPI
+          operation, rate-limit exempt, cacheable
+    - [ ] Bearer check in `McpEndpoint` (PyJWT, JWKS cached and refetched on an unknown `kid`,
+          asymmetric algorithms only; `iss`, `aud`, `exp`, `nbf`): an invalid token → 401 with
+          `WWW-Authenticate: Bearer error="invalid_token", resource_metadata="..."`; `required`
+          mode: anonymous → 401 with `resource_metadata`
+    - [ ] Identity: a keys-file entry has either `hash` or `subject`; a mapped subject gets its
+          name, role, and quotas; an unknown valid subject is a `client` with default keyed
+          quotas (metric `key` = `oauth`); X-API-Key keeps working on `/mcp`
+    - [ ] Inner tool calls carry the resolved identity in the ASGI scope, never the token, so an
+          admin subject can `request_refresh`
+    - [ ] Optional `oauth-example` Compose profile (Keycloak, realm import without committed
+          secrets) and a README walkthrough
+    - [ ] `/agents#mcp` and `/llms.txt` mention OAuth when an issuer is set; `server.json`
+          unchanged (clients discover OAuth at runtime)
+    - [ ] Tests with locally generated keys and JWKS (no network): valid, expired, wrong
+          audience, wrong issuer, unknown `kid`, `required` mode, mapped admin refresh
+    - [ ] Docs (README MCP and configuration; ADR 0006); version 0.22.0 (`pyproject.toml`,
+          `cli/pyproject.toml`, `server.json`, `uv lock`)
+  - [ ] 18c. Public demo instance
+        ([ADR 0007](adr/0007-read-only-demo-instance-serves-only-redistributable-sources.md))
+    - [ ] `FOOTBALL_RESULTS_DEMO_MODE`: startup and `config check` reject admin keys and
+          competitions whose primary or fallback provider is not publicly redistributable (allow
+          list: `openligadb`)
+    - [ ] `config/demo-competitions.yaml`: the 3. Liga only
+    - [ ] Demo notice in `/llms.txt` and `/agents`: read-only, no SLA, data licences and
+          attribution, quotas
+    - [ ] `compose.demo.yaml` override: demo competitions, demo mode, low anonymous quotas (for
+          example 30 reads per minute), JSON logs
+    - [ ] `docs/DEMO.md`: Oracle Cloud Always Free VM, Caddy, Cloudflare free in front (cache rule
+          for public GETs, IP rate-limit rule, Cloudflare ranges in
+          `FOOTBALL_RESULTS_TRUSTED_PROXIES`), and how to add a provider after written
+          permission (90minut.pl)
+    - [ ] Tests: demo-mode validation, notice rendering
+    - [ ] Docs (README, ADR 0007, glossary); version 0.23.0 (`pyproject.toml`,
+          `cli/pyproject.toml`, `server.json`, `uv lock`)

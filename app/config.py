@@ -20,6 +20,7 @@ from pydantic import (
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app import access
 from app.competitions import provider_competition_code, source_from_url
 from app.models import Competition, SeasonSource
 from app.scheduling import (
@@ -60,6 +61,8 @@ class Settings(BaseSettings):
     # Running scrape jobs of a worker without a heartbeat for this long are failed as abandoned.
     scheduler_worker_timeout_seconds: float = Field(default=300.0, gt=0)
     api_keys: str = ""
+    # YAML file of named, hashed API keys with roles and quotas (ADR 0005).
+    api_keys_file: Path | None = None
     football_data_api_token: str | None = None
     football_data_min_request_interval_seconds: float | None = Field(default=None, ge=0)
     ninety_minut_min_request_interval_seconds: float | None = Field(default=None, ge=0)
@@ -564,11 +567,23 @@ class ConfigFileWatcher:
 
 
 def cli(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Validate the football competition config.")
+    parser = argparse.ArgumentParser(
+        description="Validate the football competition config, or create an API key."
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
-    check_parser = subparsers.add_parser("check", help="validate the configured YAML file")
+    check_parser = subparsers.add_parser(
+        "check", help="validate the configured YAML file and the API keys file"
+    )
     check_parser.add_argument("--config-file", type=Path, default=settings.config_file)
+    check_parser.add_argument("--api-keys-file", type=Path, default=settings.api_keys_file)
+    hash_parser = subparsers.add_parser(
+        "hash-key", help="print a new random API key and its keys-file entry"
+    )
+    hash_parser.add_argument("--name", required=True, help="key name ([a-z0-9-])")
+    hash_parser.add_argument("--role", choices=access.ROLES, default="client")
     args = parser.parse_args(argv)
+    if args.command == "hash-key":
+        return _hash_key(parser, args.name, args.role)
     try:
         config = load_config(args.config_file)
     except (TypeError, ValueError) as error:
@@ -578,6 +593,26 @@ def cli(argv: list[str] | None = None) -> int:
     ):
         print(f"warning: {warning}", file=sys.stderr)
     print(f"Configuration valid: {args.config_file} ({len(config.competitions)} competitions)")
+    if args.api_keys_file is not None:
+        try:
+            keys = access.load_keys(args.api_keys_file)
+        except ValueError as error:
+            parser.error(str(error))
+        admins = sum(1 for key in keys if key.role == "admin")
+        print(f"API keys file valid: {args.api_keys_file} ({len(keys)} keys, {admins} admin)")
+    return 0
+
+
+def _hash_key(parser: argparse.ArgumentParser, name: str, role: str) -> int:
+    key = access.generate_key()
+    entry = access.key_entry_yaml(name, role, key)  # type: ignore[arg-type]
+    try:
+        access.KeysFile.model_validate(yaml.safe_load("keys:\n" + entry))
+    except ValidationError as error:
+        parser.error(f"invalid key name {name!r}: {error.errors()[0]['msg']}")
+    print(f"API key (give it to the client; it is not stored): {key}", file=sys.stderr)
+    print("Add this entry under `keys:` in the API keys file:", file=sys.stderr)
+    print(entry, end="")
     return 0
 
 

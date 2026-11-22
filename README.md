@@ -149,7 +149,41 @@ FOOTBALL_RESULTS_API_KEYS=replace-with-a-long-random-key
 ~~~
 
 Send a configured key in the `X-API-Key` header. Keep API keys out of source control and logs.
-With no keys configured, the write endpoints are disabled and return `503`.
+With no admin key configured, the write endpoints are disabled and return `503`.
+
+#### Named API keys, roles, and quotas
+
+For more than one caller, list named keys in a YAML keys file (ADR 0005) and point
+`FOOTBALL_RESULTS_API_KEYS_FILE` at it. The file stores only SHA-256 hashes; plain keys are
+rejected. Create a key and its entry with:
+
+~~~bash
+uv run python -m app.config hash-key --name partner-app            # role client (default)
+uv run python -m app.config hash-key --name ops --role admin
+~~~
+
+The key goes to stderr (hand it to the caller; it is stored nowhere), the entry to stdout:
+
+~~~yaml
+keys:
+  - name: partner-app            # [a-z0-9-], unique; not `env` or `anonymous`
+    hash: sha256:3b5c...         # 64 hex digits
+    role: client                 # client (reads) or admin (jobs, admin endpoints, /metrics)
+    read_per_minute: 600         # optional; default FOOTBALL_RESULTS_RATE_LIMIT_READ_PER_MINUTE
+  - name: ops
+    hash: sha256:9f2a...
+    role: admin
+    write_per_minute: 30         # optional, admin keys only
+~~~
+
+- A `client` key gets its own read quota; on refresh, history fetch, job status, admin endpoints,
+  and `/metrics` it gets `403 forbidden`. A missing or unknown key gets `401 unauthorized`.
+- Keys in `FOOTBALL_RESULTS_API_KEYS` stay valid: they are admin keys named `env` with the default
+  quotas. Both sources can be combined; `503 writes-disabled` applies only when neither has an
+  admin key.
+- The file is read at startup: restart the API after editing it. `python -m app.config check`
+  validates it too (`--api-keys-file`, default the setting) without printing any hash.
+- Quotas are per minute and kept in memory (see [rate limits](#errors-rate-limits-and-caching)).
 
 ### Run PostgreSQL in Docker and FastAPI locally
 
@@ -308,11 +342,11 @@ go through Alembic.
 | GET | `/api/v1/standings` | `get_standings` | League table computed from stored finished matches for one competition-season (`stage` required for cups) |
 | GET | `/api/v1/teams` | `list_teams` | Teams with canonical slugs and aliases; filters: `competition`, `season`, `q`; cursor pagination |
 | GET | `/api/v1/results` | `list_results` | Deprecated: finished matches with stable `id` and canonical team slugs; filters: `competition`, `season`, `round`, `stage`, `team` (kept unchanged for backward compatibility; use `/matches`) |
-| POST | `/api/v1/results/refresh` | `request_refresh` | Queue a current-season refresh (`202 Accepted`; requires `X-API-Key`) |
-| POST | `/api/v1/results/history/fetch` | `fetch_historical_season` | Queue a non-current-season fetch (`202 Accepted`; requires `X-API-Key`); cached results return immediately |
-| GET | `/api/v1/jobs/{job_id}` | `get_job` | Get queued, running, completed, or failed scrape-job status (`X-API-Key` required) |
-| GET | `/api/v1/admin/scrape-runs` | `list_scrape_runs` | Import jobs, newest first, with source URL, worker, error, and `matches_skipped` (fallback matches skipped for unknown teams); filters: `competition`, `season`, `status`; cursor pagination (`X-API-Key` required) |
-| GET | `/api/v1/admin/scheduler` | `get_scheduler_status` | Scheduler workers and heartbeats plus every scheduled season's next update, overdue time, staleness, and failure count (`X-API-Key` required) |
+| POST | `/api/v1/results/refresh` | `request_refresh` | Queue a current-season refresh (`202 Accepted`; requires an admin `X-API-Key`) |
+| POST | `/api/v1/results/history/fetch` | `fetch_historical_season` | Queue a non-current-season fetch (`202 Accepted`; requires an admin `X-API-Key`); cached results return immediately |
+| GET | `/api/v1/jobs/{job_id}` | `get_job` | Get queued, running, completed, or failed scrape-job status (admin `X-API-Key` required) |
+| GET | `/api/v1/admin/scrape-runs` | `list_scrape_runs` | Import jobs, newest first, with source URL, worker, error, and `matches_skipped` (fallback matches skipped for unknown teams); filters: `competition`, `season`, `status`; cursor pagination (admin `X-API-Key` required) |
+| GET | `/api/v1/admin/scheduler` | `get_scheduler_status` | Scheduler workers and heartbeats plus every scheduled season's next update, overdue time, staleness, and failure count (admin `X-API-Key` required) |
 
 Interactive documentation is available at `/docs`; the OpenAPI document is at `/openapi.json`.
 Agents should start at `/llms.txt` (see [Agent documentation](#agent-documentation)).
@@ -385,7 +419,8 @@ type `application/problem+json` and `Cache-Control: no-store`:
 ~~~
 
 - `type` is a stable relative URI; branch on it rather than on `detail`. Types: `invalid-cursor`
-  (400), `unauthorized` (401), `unknown-competition`, `unknown-season`, `unknown-job`,
+  (400), `unauthorized` (401), `forbidden` (403, a `client` key on an admin operation),
+  `unknown-competition`, `unknown-season`, `unknown-job`,
   `not-found` (404), `method-not-allowed` (405), `job-conflict` (409), `invalid-parameter`
   (`fields`, `status`, dates, cup `stage`), `validation-error` (type, range, pattern, or missing
   values), `invalid-request` (write-endpoint rules) (all 422), `rate-limited` (429),
@@ -399,7 +434,10 @@ type `application/problem+json` and `Cache-Control: no-store`:
 
 **Rate limits** are counted per client in fixed 60-second windows: `GET` requests use the `read`
 policy (120 per minute by default), other methods the `write` policy (10 per minute). The client is
-the API key when a valid `X-API-Key` is sent, otherwise the IP address. `/health`, `/docs`,
+the API key when a valid `X-API-Key` is sent, otherwise the IP address. A named key from the keys
+file can carry its own `read_per_minute` (and, for admin keys, `write_per_minute`); `q` in
+`RateLimit-Policy` shows the caller's own quota, and exceeding it returns `429 rate-limited` as
+usual. Any valid key may be sent on reads; an unknown key counts against the IP address. `/health`, `/docs`,
 `/redoc`, `/openapi.json`, and `/metrics` are exempt. Responses carry the
 [draft-ietf-httpapi-ratelimit-headers-11](https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/)
 fields; a `429` adds `Retry-After`:
@@ -635,7 +673,7 @@ Use `./cli`, not `.`: `uvx --from .` would install the whole API with its depend
 | Variable | Option | Default | Purpose |
 | --- | --- | --- | --- |
 | `FOOTBALL_RESULTS_URL` | `--url` | `http://localhost:8000` | API base URL, optionally with a path prefix |
-| `FOOTBALL_RESULTS_API_KEY` | `--api-key` | none | Sent as `X-API-Key`, only by `refresh`, `fetch-season`, `status`, `scrape-runs`, and `scheduler` |
+| `FOOTBALL_RESULTS_API_KEY` | `--api-key` | none | Sent as `X-API-Key` on every request (it selects the key's quota); `refresh`, `fetch-season`, `status`, `scrape-runs`, and `scheduler` need an admin key |
 | `FOOTBALL_RESULTS_TIMEOUT` | `--timeout` | `30` | HTTP timeout in seconds |
 
 Global options go before the command (`football-results --url URL matches`). The API key is never
@@ -769,9 +807,10 @@ operation, so it is absent from `/openapi.json`.
   `invalid-parameter` with the candidate slugs. An unknown tool name is a JSON-RPC
   `-32602` error.
 - The four read tools need no key. `request_refresh` sends the `X-API-Key` header of the MCP
-  connection; configure it in the client only if you want refreshes.
-- Each `/mcp` request counts once against the `read` rate limit; `request_refresh` also counts
-  against the caller's `write` limit. Responses are `Cache-Control: no-store`.
+  connection and needs an admin key (a `client` key gets `forbidden` as an `isError` result);
+  configure the header only if you want refreshes or your key's own quota.
+- Each `/mcp` request counts once against the `read` rate limit of the connection's key (or of the
+  client IP without one); `request_refresh` also counts against the caller's `write` limit. Responses are `Cache-Control: no-store`.
 - `Host` and `Origin` are checked against DNS rebinding: `localhost`, `127.0.0.1`, `[::1]`, the
   host of `FOOTBALL_RESULTS_PUBLIC_BASE_URL`, and the hosts and origins in
   `FOOTBALL_RESULTS_MCP_ALLOWED_HOSTS` and `FOOTBALL_RESULTS_MCP_ALLOWED_ORIGINS` are allowed
@@ -813,6 +852,10 @@ chmod 600 .env
 ~~~
 
 4. Set a long random POSTGRES_PASSWORD, a contact USER_AGENT, and the desired API_BIND_ADDRESS.
+   For named API keys, create `secrets/api-keys.yaml` (git-ignored; mounted read-only at
+   `/app/secrets`), make it readable by the container user (UID 10001, for example `chmod 644`;
+   it holds only hashes), and set
+   `FOOTBALL_RESULTS_API_KEYS_FILE=/app/secrets/api-keys.yaml`.
 5. Start the services:
 
 ~~~bash
@@ -840,9 +883,10 @@ about 200 MB of RAM. Terms such as *stale season* and *stalled scheduler* are de
 
 **Signals**
 
-- `GET /metrics` (Prometheus text format, not in OpenAPI, not rate-limited) needs one of
-  `FOOTBALL_RESULTS_API_KEYS`, sent as `Authorization: Bearer <key>` or `X-API-Key`. Without
-  configured keys it returns `503 writes-disabled`. Scheduler and season values are read from
+- `GET /metrics` (Prometheus text format, not in OpenAPI, not rate-limited) needs an admin key
+  (from `FOOTBALL_RESULTS_API_KEYS` or the keys file), sent as `Authorization: Bearer <key>` or
+  `X-API-Key`; a `client` key gets `403 forbidden`. Without an admin key it returns
+  `503 writes-disabled`. Scheduler and season values are read from
   PostgreSQL at scrape time, so they are correct even when the scheduler is down:
   - `football_results_scheduler_stalled`, `football_results_scheduler_heartbeat_age_seconds`
   - per `{competition, season}` of every current, automatically refreshed season:
@@ -854,7 +898,10 @@ about 200 MB of RAM. Terms such as *stale season* and *stalled scheduler* are de
   - `football_results_http_requests_total{operation, method, status}` and
     `football_results_http_request_duration_seconds{operation}` (labelled by operation ID, so paths
     with IDs do not create new series), `football_results_build_info{version}`, and `process_*`
-- Admin endpoints (`X-API-Key`): `list_scrape_runs` and `get_scheduler_status`, also available as
+  - `football_results_keyed_requests_total{key, policy}` and
+    `football_results_rate_limited_total{key, policy}`: rate-limited requests and `429`s per key
+    name (`env` for `FOOTBALL_RESULTS_API_KEYS`, `anonymous` without a valid key) and policy
+- Admin endpoints (admin `X-API-Key`): `list_scrape_runs` and `get_scheduler_status`, also available as
   `football-results scrape-runs` and `football-results scheduler`. They are not MCP tools. Import
   jobs include their `provider`, a `fallback` flag, and `matches_skipped` (matches a fallback
   refresh skipped because a team is not yet a team of the season; the `scrape-runs` table shows
@@ -875,8 +922,8 @@ stalled scheduler as `stale` for backward compatibility; the admin endpoint and 
 1. Create a Telegram bot with [@BotFather](https://t.me/BotFather) and note its token. Send the bot
    a message, then read your chat ID from
    `https://api.telegram.org/bot<token>/getUpdates` (`message.chat.id`).
-2. In `.env`, add a dedicated key to `FOOTBALL_RESULTS_API_KEYS` and set the same value as
-   `PROMETHEUS_API_KEY`. Set `GRAFANA_ADMIN_PASSWORD`, `TELEGRAM_BOT_TOKEN`, and
+2. In `.env`, add a dedicated admin key to `FOOTBALL_RESULTS_API_KEYS` (or the keys file) and set
+   the same value as `PROMETHEUS_API_KEY`. Set `GRAFANA_ADMIN_PASSWORD`, `TELEGRAM_BOT_TOKEN`, and
    `TELEGRAM_CHAT_ID`.
 3. Start the stack:
 
@@ -1065,7 +1112,8 @@ Application variables:
 | FOOTBALL_RESULTS_SCHEDULER_LOOP_SECONDS | `30` | Pause between scheduler cycles |
 | FOOTBALL_RESULTS_SCHEDULER_CLAIM_LIMIT | `5` | Max queued jobs and due seasons claimed per cycle (each limit applies separately) |
 | FOOTBALL_RESULTS_SCHEDULER_WORKER_TIMEOUT_SECONDS | `300` | A scheduler worker without a heartbeat for this long is treated as dead: its `running` scrape jobs are marked `failed` so their seasons are claimed again |
-| FOOTBALL_RESULTS_API_KEYS | empty | Comma-separated API keys; required for write endpoints, job status, admin endpoints, and `/metrics` |
+| FOOTBALL_RESULTS_API_KEYS | empty | Comma-separated admin API keys (named `env`); an admin key is required for write endpoints, job status, admin endpoints, and `/metrics` |
+| FOOTBALL_RESULTS_API_KEYS_FILE | empty | YAML file of named, hashed keys with roles and per-minute quotas; read at startup (see [Named API keys](#named-api-keys-roles-and-quotas)) |
 | FOOTBALL_RESULTS_LOG_FORMAT | `text` | `text` or `json` (one JSON object per line on stderr, including uvicorn access logs); Docker Compose sets `json` |
 | FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN | empty | football-data.org token (needed only for football-data competitions) |
 | FOOTBALL_RESULTS_FOOTBALL_DATA_MIN_REQUEST_INTERVAL_SECONDS | `6` (from YAML) | Optional environment override for the football-data.org throttle (free tier: 10 req/min) |

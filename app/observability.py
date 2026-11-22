@@ -149,6 +149,27 @@ HTTP_DURATION = Histogram(
 )
 
 
+# Label `key` is a keys-file name, `env`, or `anonymous`: bounded by the operator's keys file.
+KEYED_REQUESTS = Counter(
+    f"{PREFIX}_keyed_requests",
+    "Rate-limited requests by API key name and quota policy",
+    ("key", "policy"),
+    registry=HTTP_REGISTRY,
+)
+RATE_LIMITED = Counter(
+    f"{PREFIX}_rate_limited",
+    "Requests rejected with 429 by API key name and quota policy",
+    ("key", "policy"),
+    registry=HTTP_REGISTRY,
+)
+
+
+def record_quota_use(key: str, policy: str, allowed: bool) -> None:
+    KEYED_REQUESTS.labels(key, policy).inc()
+    if not allowed:
+        RATE_LIMITED.labels(key, policy).inc()
+
+
 def record_request(operation: str, method: str, status: int, seconds: float) -> None:
     HTTP_REQUESTS.labels(operation, method, str(status)).inc()
     HTTP_DURATION.labels(operation).observe(seconds)

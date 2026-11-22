@@ -238,7 +238,7 @@ def test_exit_codes_for_http_errors(status: int, problem_type: str | None, code:
     assert problems.exit_code_for(status, problem_type) == code
 
 
-def test_api_key_is_sent_only_for_jobs_and_never_printed(requests, repository) -> None:
+def test_api_key_is_sent_on_every_request_and_never_printed(requests, repository) -> None:
     missing = invoke("refresh", "-c", "ekstraklasa")
     assert missing.exit_code == 5
     assert problem(missing)["type"].endswith("/problems/unauthorized")
@@ -255,7 +255,7 @@ def test_api_key_is_sent_only_for_jobs_and_never_printed(requests, repository) -
         ("POST", None),
         ("POST", "test-api-key"),
         ("GET", "test-api-key"),
-        ("GET", None),
+        ("GET", "test-api-key"),
     ]
     assert json.loads(requests[1].content) == {"competition": "ekstraklasa"}
     for result in (missing, queued):

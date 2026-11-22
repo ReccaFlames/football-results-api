@@ -1,5 +1,4 @@
 import logging
-import secrets
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -15,7 +14,7 @@ from prometheus_client import CONTENT_TYPE_LATEST
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.routing import Match as RouteMatch
 
-from app import agent_docs, observability
+from app import access, agent_docs, observability
 from app import api_docs as docs
 from app.caching import (
     CACHEABLE_OPERATIONS,
@@ -77,9 +76,9 @@ from app.problems import ProblemError, install_problem_handlers, problem_respons
 from app.ratelimit import (
     EXEMPT_PATHS,
     READ_METHODS,
+    Client,
     FixedWindowRateLimiter,
     RateLimitPolicy,
-    api_key_client,
     client_ip,
 )
 from app.repository import ActiveScrapeJobConflict, PostgresResultRepository
@@ -93,53 +92,58 @@ rate_limiter = FixedWindowRateLimiter()
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
-def _configured_api_keys() -> tuple[str, ...]:
-    return tuple(key.strip() for key in settings.api_keys.split(",") if key.strip())
+# Keys from FOOTBALL_RESULTS_API_KEYS_FILE, loaded at startup (ADR 0005).
+file_keys: tuple[access.FileKey, ...] = ()
+ADMIN_KEY_HINT = (
+    "The operator must configure an admin API key (FOOTBALL_RESULTS_API_KEYS or "
+    "FOOTBALL_RESULTS_API_KEYS_FILE)."
+)
 
 
-def _is_valid_api_key(supplied_key: str, configured_keys: tuple[str, ...]) -> bool:
-    authenticated = False
-    for configured_key in configured_keys:
-        authenticated = secrets.compare_digest(supplied_key, configured_key) | authenticated
-    return authenticated
+def _identity(supplied: str | None) -> access.Identity | None:
+    return access.resolve(supplied or "", access.env_keys(settings.api_keys), file_keys)
 
 
-async def require_api_key(api_key: str | None = Depends(api_key_header)) -> None:
-    configured_keys = _configured_api_keys()
-    if not configured_keys:
-        raise ProblemError(
-            "writes-disabled",
-            "Write endpoints are disabled",
-            hint="The operator must set FOOTBALL_RESULTS_API_KEYS.",
-        )
-    if not _is_valid_api_key(api_key or "", configured_keys):
+def _require_admin(supplied: str, *, scheme: str, disabled: str, hint: str) -> None:
+    if not access.has_admin_key(access.env_keys(settings.api_keys), file_keys):
+        raise ProblemError("writes-disabled", disabled, hint=ADMIN_KEY_HINT)
+    identity = _identity(supplied)
+    if identity is None:
         raise ProblemError(
             "unauthorized",
             "Invalid or missing API key",
-            headers={"WWW-Authenticate": "ApiKey"},
-            hint="Send a configured API key in the X-API-Key header.",
+            headers={"WWW-Authenticate": scheme},
+            hint=hint,
         )
+    if identity.role != "admin":
+        raise ProblemError(
+            "forbidden",
+            f"The API key {identity.name!r} has role {identity.role}, which does not allow "
+            "this operation",
+            hint="Use an admin key, or leave this operation to the operator. Read operations "
+            "work with any key or none.",
+        )
+
+
+async def require_api_key(api_key: str | None = Depends(api_key_header)) -> None:
+    _require_admin(
+        api_key or "",
+        scheme="ApiKey",
+        disabled="Write endpoints are disabled",
+        hint="Send an admin API key in the X-API-Key header.",
+    )
 
 
 def require_metrics_key(request: Request) -> None:
     """Like `require_api_key`, but also accepts `Authorization: Bearer` (Prometheus' native auth)."""
-    configured_keys = _configured_api_keys()
-    if not configured_keys:
-        raise ProblemError(
-            "writes-disabled",
-            "Metrics are disabled",
-            hint="The operator must set FOOTBALL_RESULTS_API_KEYS.",
-        )
     scheme, _, credentials = request.headers.get("Authorization", "").partition(" ")
     supplied = credentials.strip() if scheme.lower() == "bearer" else ""
-    supplied = supplied or request.headers.get("X-API-Key", "")
-    if not _is_valid_api_key(supplied, configured_keys):
-        raise ProblemError(
-            "unauthorized",
-            "Invalid or missing API key",
-            headers={"WWW-Authenticate": "Bearer"},
-            hint="Send a configured API key as Authorization: Bearer <key> or in X-API-Key.",
-        )
+    _require_admin(
+        supplied or request.headers.get("X-API-Key", ""),
+        scheme="Bearer",
+        disabled="Metrics are disabled",
+        hint="Send an admin API key as Authorization: Bearer <key> or in X-API-Key.",
+    )
 
 
 def _job_accepted(response: Response, job_id: int, status: str) -> JobAccepted:
@@ -200,6 +204,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     ):
         logger.warning(warning)
     await store.seed_competitions(config.to_competitions(), config.auto_rollover_slugs())
+    global file_keys
+    file_keys = access.load_keys(settings.api_keys_file)
     async with mcp_endpoint.lifespan():
         yield
 
@@ -221,23 +227,24 @@ app.router.routes.append(McpRoute(mcp_endpoint))
 _trusted_proxies = lru_cache(maxsize=8)(parse_networks)
 
 
-def _rate_limit_client(request: Request) -> str:
-    api_key = request.headers.get("X-API-Key")
-    configured_keys = _configured_api_keys()
-    if api_key and configured_keys and _is_valid_api_key(api_key, configured_keys):
-        return api_key_client(api_key)
+def _rate_limit_client(request: Request) -> Client:
+    """A keyed client for a valid `X-API-Key` (its own quotas), otherwise the client IP."""
+    read, write = settings.rate_limit_read_per_minute, settings.rate_limit_write_per_minute
+    identity = _identity(request.headers.get("X-API-Key"))
+    if identity is not None:
+        return Client(
+            identity.bucket,
+            identity.name,
+            identity.read_per_minute or read,
+            identity.write_per_minute or write,
+        )
     peer = request.client.host if request.client else None
     forwarded = request.headers.getlist("X-Forwarded-For")
-    return "ip:" + client_ip(peer, forwarded, _trusted_proxies(settings.trusted_proxies))
+    address = client_ip(peer, forwarded, _trusted_proxies(settings.trusted_proxies))
+    return Client("ip:" + address, access.ANONYMOUS, read, write)
 
 
-def _rate_limit_policy(method: str) -> RateLimitPolicy:
-    if method in READ_METHODS:
-        return RateLimitPolicy("read", settings.rate_limit_read_per_minute, 60)
-    return RateLimitPolicy("write", settings.rate_limit_write_per_minute, 60)
-
-
-def _rate_limit_hit(request: Request) -> tuple[RateLimitPolicy, str] | None:
+def _rate_limit_hit(request: Request) -> tuple[RateLimitPolicy, Client] | None:
     """The policy and client to count this request against, or None if it is not limited.
 
     A `/mcp` request counts once as a read. The tools' in-process API calls are not counted
@@ -245,16 +252,16 @@ def _rate_limit_hit(request: Request) -> tuple[RateLimitPolicy, str] | None:
     """
     if not settings.rate_limit_enabled or request.url.path in EXEMPT_PATHS:
         return None
-    internal_client = request.scope.get(INTERNAL_SCOPE_KEY)
-    if internal_client is not None:
-        if request.method in READ_METHODS or not internal_client:
+    if INTERNAL_SCOPE_KEY in request.scope:
+        outer: Client | None = request.scope[INTERNAL_SCOPE_KEY]
+        if request.method in READ_METHODS or outer is None:
             return None
-        return _rate_limit_policy(request.method), internal_client
+        return outer.policy(request.method), outer
     client = _rate_limit_client(request)
     if request.url.path == MCP_PATH:
         request.scope[CLIENT_SCOPE_KEY] = client
-        return _rate_limit_policy("GET"), client
-    return _rate_limit_policy(request.method), client
+        return client.policy("GET"), client
+    return client.policy(request.method), client
 
 
 @app.middleware("http")
@@ -263,7 +270,9 @@ async def rate_limit_and_cache(
 ) -> Response:
     rate_headers: dict[str, str] = {}
     if (hit := _rate_limit_hit(request)) is not None:
-        decision = rate_limiter.hit(*hit, time.monotonic())
+        policy, client = hit
+        decision = rate_limiter.hit(policy, client.bucket, time.monotonic())
+        observability.record_quota_use(client.label, policy.name, decision.allowed)
         rate_headers = decision.headers()
         if not decision.allowed:
             policy = decision.policy

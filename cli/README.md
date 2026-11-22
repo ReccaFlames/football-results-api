@@ -8,7 +8,7 @@ line of RFC 9457 problem JSON, with stable exit codes.
 ~~~bash
 uv tool install ./cli        # from a checkout of the repository (or: pipx install ./cli)
 export FOOTBALL_RESULTS_URL=http://localhost:8000
-export FOOTBALL_RESULTS_API_KEY=...   # only for refresh, fetch-season, status
+export FOOTBALL_RESULTS_API_KEY=...   # optional; admin key for refresh, fetch-season, status
 football-results competitions
 football-results matches -c ekstraklasa --team legia-warszawa --status finished --order desc --limit 5
 football-results standings -c ekstraklasa --fields position,team_name,points --json

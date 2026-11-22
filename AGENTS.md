@@ -21,6 +21,7 @@ API.
 | `app/contract.py` | API v1.1 request rules: opaque cursors, `fields=`, status and date parsing, limits |
 | `app/problems.py` | RFC 9457 problem details: `ProblemError`, exception handlers for every error |
 | `app/ratelimit.py` | In-process fixed-window rate limiter, `RateLimit` headers, trusted-proxy client IP |
+| `app/access.py` | Named API keys (ADR 0005): keys-file models, SHA-256 hashing, constant-time key resolution to an `Identity` (name, role, quotas) |
 | `app/agent_docs.py` | Pure generator of `/llms.txt`, `/agents`, `/agents.md`, `/llms-full.txt`, `/problems/<slug>` from the OpenAPI spec and competitions; `SKILL_PATH`/`SKILL_FILE` for the served skill; `MCP_TOOLS` (tool → operation) |
 | `app/mcp_server.py` | Curated MCP server (`mcp` SDK `MCPServer`) at `/mcp`: 5 tools calling the API in-process, output models, Host/Origin checks, `McpRoute` |
 | `app/caching.py` | Weak body-hash `ETag`, `If-None-Match`, and `Cache-Control` rules for read endpoints |
@@ -152,7 +153,8 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
   freshness, and errors go to stderr, errors as one-line problem JSON. Server problems are passed
   through unchanged. `FOOTBALL_RESULTS_URL`, `FOOTBALL_RESULTS_API_KEY`, and
   `FOOTBALL_RESULTS_TIMEOUT` belong to the CLI; never add `url`, `api_key`, or `timeout` fields to
-  the server `Settings` (a test checks). Send the API key only on job/write operations.
+  the server `Settings` (a test checks). The CLI sends the API key on every request (it selects
+  the caller's quota, ADR 0005), only to the configured URL, and never prints it.
 - Both packages share one version; bump `pyproject.toml` and `cli/pyproject.toml` together (a test
   checks). The Docker image installs only the API (`uv sync --frozen --no-dev`), not `cli/`.
 - Observability: `/metrics` (not an OpenAPI operation, rate-limit exempt) and the `Admin`
@@ -183,6 +185,10 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
 - Read the application and default User-Agent versions from the `football-results-api` package
   metadata; `pyproject.toml` is the authoritative version source.
 - Build Docker images from `uv.lock` with `uv sync --frozen`.
+- API keys (ADR 0005): `FOOTBALL_RESULTS_API_KEYS` keys are admin keys named `env`; the optional
+  keys file holds only `sha256:` hashes with a name, a role (`client` or `admin`), and per-minute
+  quotas. Protected operations and `/metrics` need an admin key (`403 forbidden` for a client
+  key). Key names are metric labels; never log keys or hashes.
 - `RefreshRequest.competition` is required. Competition summaries may have a null `current_season`.
 - Update `README.md` when behaviour, endpoints, or configuration change.
 

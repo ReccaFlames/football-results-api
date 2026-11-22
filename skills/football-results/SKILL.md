@@ -111,8 +111,9 @@ means never fetched), `next_update_at` (next scheduled check), and `source`.
 ## Refresh and history fetch
 
 The scheduler refreshes current seasons on its own, timed around kickoffs, so reads are almost
-always enough. `refresh`, `fetch-season`, and `status` need `FOOTBALL_RESULTS_API_KEY`, a key the
-API operator issues. Ask the user before queuing a job, and use one only for missing or stale data:
+always enough. `refresh`, `fetch-season`, and `status` need an admin key in
+`FOOTBALL_RESULTS_API_KEY`, issued by the API operator. When the variable is set, the CLI sends the
+key on every request, so reads use that key's quota too. Ask the user before queuing a job, and use one only for missing or stale data:
 
 ```sh
 football-results refresh -c ekstraklasa --wait
@@ -122,8 +123,8 @@ football-results status 42
 
 - `refresh` is for an overdue current season; `fetch-season` imports a past season that is absent
   from `fetched_seasons`, which you then read with `-s`.
-- Exit 5 means no key, a wrong key, or writes disabled on this instance: answer from the stored
-  data and its `data_as_of`.
+- Exit 5 means no key, a wrong key, a client key without the admin role (`forbidden`), or writes
+  disabled on this instance: answer from the stored data and its `data_as_of`.
 
 ## Errors
 
@@ -137,7 +138,7 @@ correct the request from `valid_values` or `hint` and retry once.
 | 2 | Usage error: invalid option or value | Fix `parameter` using `valid_values` or `hint`. |
 | 3 | Not found: competition, season, or job | Re-check slugs with `competitions` and seasons with `fetched_seasons`. |
 | 4 | Upstream or stale: unreachable API, timeout, server error, job conflict, rate limit, failed job, stale data | `connection-failed`: check `FOOTBALL_RESULTS_URL`; `stale-data`: answer with a caveat; otherwise retry later. |
-| 5 | Auth: missing or invalid API key, or writes disabled | Reads need no key; skip the write. |
+| 5 | Auth: missing or invalid API key, a client key on an admin operation, or writes disabled | Reads need no key; skip the write. |
 
 Server problem types are `/problems/<slug>` (for example `/problems/unknown-competition` or
 `/problems/invalid-parameter`); the CLI's own are `urn:football-results:cli:<slug>`. The API

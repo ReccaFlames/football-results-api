@@ -5,6 +5,7 @@ import pytest
 import yaml
 from pydantic import SecretStr
 
+from app import access
 from app import config as config_module
 from app.competitions import source_from_url
 from app.config import ConfigFileWatcher, cli, load_config
@@ -337,3 +338,81 @@ def test_shipped_polish_competitions_fall_back_to_thesportsdb(slug: str, league:
     assert fallback.provider == "thesportsdb"
     assert fallback.source_url == f"https://www.thesportsdb.com/league/{league}?season=2026-2027"
     assert source_from_url("2026-2027", fallback.source_url).provider == "thesportsdb"
+
+
+def test_api_keys_file_is_validated_by_check(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    keys = tmp_path / "keys.yaml"
+    keys.write_text(
+        "keys:\n"
+        f"  - {{name: ops, hash: '{access.hash_key('a')}', role: admin}}\n"
+        f"  - {{name: partner-app, hash: '{access.hash_key('b')}', read_per_minute: 600}}\n"
+    )
+    args = ["check", "--config-file", str(DEFAULT_CONFIG), "--api-keys-file", str(keys)]
+    assert cli(args) == 0
+    assert f"API keys file valid: {keys} (2 keys, 1 admin)" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("entry", "message"),
+    [
+        ("{name: app, hash: plain-secret-key}", "String should match pattern"),
+        ("{name: env, hash: H}", "reserved"),
+        ("{name: Bad_Name, hash: H}", "String should match pattern"),
+        ("{name: app, hash: H, write_per_minute: 5}", "only for admin keys"),
+        ("{name: app, hash: H, role: owner}", "Input should be 'client' or 'admin'"),
+        ("{name: app, hash: H, read_per_minute: 0}", "greater than or equal to 1"),
+        ("{name: app, hash: H, quota: 5}", "Extra inputs are not permitted"),
+    ],
+)
+def test_invalid_api_keys_files_are_rejected_without_echoing_values(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], entry: str, message: str
+) -> None:
+    keys = tmp_path / "keys.yaml"
+    keys.write_text(f"keys:\n  - {entry.replace('H', repr(access.hash_key('k')))}\n")
+    with pytest.raises(SystemExit):
+        cli(["check", "--config-file", str(DEFAULT_CONFIG), "--api-keys-file", str(keys)])
+    error = capsys.readouterr().err
+    assert message in error
+    assert "plain-secret-key" not in error
+
+
+def test_duplicate_api_key_names_are_rejected(tmp_path: Path) -> None:
+    keys = tmp_path / "keys.yaml"
+    keys.write_text(
+        "keys:\n"
+        f"  - {{name: app, hash: '{access.hash_key('a')}'}}\n"
+        f"  - {{name: app, hash: '{access.hash_key('b')}'}}\n"
+    )
+    with pytest.raises(ValueError, match="duplicate key names: app"):
+        access.load_keys(keys)
+
+
+def test_hash_key_prints_a_new_key_and_its_entry(capsys: pytest.CaptureFixture[str]) -> None:
+    assert cli(["hash-key", "--name", "ops", "--role", "admin"]) == 0
+    output = capsys.readouterr()
+    key = output.err.split("it is not stored): ", 1)[1].split("\n", 1)[0]
+    assert len(key) >= 43
+    entry = yaml.safe_load("keys:\n" + output.out)["keys"][0]
+    assert entry == {"name": "ops", "hash": access.hash_key(key), "role": "admin"}
+    assert key not in output.out
+
+    with pytest.raises(SystemExit):
+        cli(["hash-key", "--name", "anonymous"])
+
+
+def test_keys_resolve_by_hash_and_environment_keys_are_admin(tmp_path: Path) -> None:
+    keys = tmp_path / "keys.yaml"
+    keys.write_text(
+        f"keys:\n  - {{name: partner-app, hash: '{access.hash_key('k1')}', read_per_minute: 5}}\n"
+    )
+    file_keys = access.load_keys(keys)
+    partner = access.resolve("k1", ("env-key",), file_keys)
+    assert partner is not None
+    assert (partner.name, partner.role, partner.read_per_minute) == ("partner-app", "client", 5)
+    env = access.resolve("env-key", ("env-key",), file_keys)
+    assert env is not None and (env.name, env.role) == ("env", "admin")
+    assert access.resolve("wrong", ("env-key",), file_keys) is None
+    assert access.resolve("", ("",), ()) is None
+    assert not access.has_admin_key((), file_keys)

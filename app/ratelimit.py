@@ -5,7 +5,6 @@ Header syntax follows draft-ietf-httpapi-ratelimit-headers-11:
 Counters live in this process only; several API workers would each enforce the full quota.
 """
 
-import hashlib
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -108,5 +107,16 @@ def is_trusted_proxy(value: str, trusted_proxies: Sequence[IPv4Network | IPv6Net
     return address is not None and any(address in network for network in trusted_proxies)
 
 
-def api_key_client(api_key: str) -> str:
-    return "key:" + hashlib.sha256(api_key.encode()).hexdigest()[:16]
+@dataclass(frozen=True)
+class Client:
+    """A rate-limited caller: its counter bucket, metrics label, and per-minute quotas."""
+
+    bucket: str
+    label: str
+    read_per_minute: int
+    write_per_minute: int
+
+    def policy(self, method: str) -> RateLimitPolicy:
+        if method in READ_METHODS:
+            return RateLimitPolicy("read", self.read_per_minute, 60)
+        return RateLimitPolicy("write", self.write_per_minute, 60)

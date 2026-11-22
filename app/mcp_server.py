@@ -197,10 +197,11 @@ def _headers(ctx: Context) -> Mapping[str, str]:
     return ctx.headers or {}
 
 
-def _outer_client(ctx: Context) -> str:
+def _outer_client(ctx: Context) -> Any:
+    """The rate-limit client of the `/mcp` request (`app.ratelimit.Client`), or None."""
     request = getattr(ctx.request_context, "request", None)
     scope = getattr(request, "scope", None) or {}
-    return scope.get(CLIENT_SCOPE_KEY) or ""
+    return scope.get(CLIENT_SCOPE_KEY)
 
 
 class Api:
@@ -479,8 +480,8 @@ def create_server(app: ASGIApp) -> MCPServer:
             str | None, Field(description="Must be the current season; omit to use it")
         ] = None,
     ) -> Annotated[CallToolResult, JobAccepted]:
-        """Queue a re-import of the current season when its data is stale. Needs the X-API-Key
-        header on the MCP connection. Returns a job; the scheduler runs it within a minute."""
+        """Queue a re-import of the current season when its data is stale. Needs an admin
+        X-API-Key header on the MCP connection. Returns a job; the scheduler runs it within a minute."""
 
         body = {"competition": competition, "season": season}
         api_key = _headers(ctx).get("x-api-key")

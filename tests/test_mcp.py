@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main_module
+from app import access
 from app.agent_docs import MCP_TOOLS
 from app.main import app
 from app.mcp_server import DESCRIPTION_BUDGET, FORM_MAX
@@ -315,3 +316,18 @@ def test_server_json_is_valid_and_versioned() -> None:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
     assert server["version"] == project["version"]
     assert server["remotes"][0]["url"].endswith("/mcp")
+
+
+def test_a_client_key_selects_the_quota_and_cannot_refresh(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    digest = bytes.fromhex(access.hash_key("client-key").removeprefix(access.HASH_PREFIX))
+    entry = access.FileKey("partner-app", digest, "client", 5, None)
+    monkeypatch.setattr(main_module, "file_keys", (entry,))
+    key = {"X-API-Key": "client-key"}
+
+    listed = post(client, "tools/list", headers=key)
+    assert listed.headers["ratelimit-policy"] == '"read";q=5;w=60'
+    _, forbidden = call(client, "request_refresh", key, competition="ekstraklasa")
+    assert forbidden["type"] == "/problems/forbidden"
+    assert forbidden["status"] == 403

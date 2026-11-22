@@ -168,8 +168,9 @@ def root(
             envvar="FOOTBALL_RESULTS_API_KEY",
             show_envvar=True,
             help=(
-                "API key for refresh, fetch-season, status, scrape-runs, and scheduler; sent only "
-                "to the API URL, never printed. Prefer the environment variable over the option."
+                "API key, sent on every request (it selects your quota); refresh, fetch-season, "
+                "status, scrape-runs, and scheduler need an admin key. Sent only to the API URL, "
+                "never printed. Prefer the environment variable over the option."
             ),
             show_default=False,
         ),
@@ -315,14 +316,13 @@ def _fetch_list(
     *,
     all_pages: bool,
     max_items: int,
-    auth: bool = False,
 ) -> dict[str, Any]:
     if not all_pages:
-        return api.get(path, params, auth=auth).body
+        return api.get(path, params).body
     limit = params.get("limit") or 200
     data: list[Any] = []
     while True:
-        page = api.get(path, {**params, "limit": min(limit, max_items - len(data))}, auth=auth).body
+        page = api.get(path, {**params, "limit": min(limit, max_items - len(data))}).body
         data.extend(page["data"])
         cursor = page["pagination"]["next_cursor"]
         if not cursor or len(data) >= max_items:
@@ -353,7 +353,7 @@ def _wait_for_job(
 ) -> dict[str, Any]:
     deadline = _monotonic() + timeout
     while True:
-        job = api.get(f"/api/v1/jobs/{job_id}", auth=True).body
+        job = api.get(f"/api/v1/jobs/{job_id}").body
         status = job.get("status")
         if status in JOB_DONE_STATUSES:
             return job
@@ -757,7 +757,7 @@ def status(
     if wait:
         body = _wait_for_job(api, job_id, timeout=wait_timeout, interval=poll_interval)
     else:
-        body = api.get(f"/api/v1/jobs/{job_id}", auth=True).body
+        body = api.get(f"/api/v1/jobs/{job_id}").body
     _print_record(body, json_output=json_output, title="Job")
 
 
@@ -807,7 +807,6 @@ def scrape_runs(
         params,
         all_pages=all_pages,
         max_items=max_items,
-        auth=True,
     )
     if output.use_json(json_output):
         output.print_json(body)
@@ -830,7 +829,7 @@ def scheduler(ctx: typer.Context, json_output: JsonOption = False) -> None:
     The status is 'stalled' when no worker heartbeat is recent; a season is stale when it was
     never fetched or its update is more than the grace period overdue.
     """
-    body = _api(ctx).get("/api/v1/admin/scheduler", auth=True).body
+    body = _api(ctx).get("/api/v1/admin/scheduler").body
     if output.use_json(json_output):
         output.print_json(body)
         return

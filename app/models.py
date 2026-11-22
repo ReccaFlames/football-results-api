@@ -392,6 +392,7 @@ class HealthStatus(BaseModel):
 PROBLEM_TYPES: dict[str, tuple[int, str]] = {
     "invalid-cursor": (400, "Invalid cursor"),
     "unauthorized": (401, "Unauthorized"),
+    "forbidden": (403, "Forbidden"),
     "unknown-competition": (404, "Unknown competition"),
     "unknown-season": (404, "Unknown season"),
     "unknown-job": (404, "Unknown job"),

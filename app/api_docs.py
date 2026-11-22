@@ -58,7 +58,7 @@ OPENAPI_TAGS = [
     {
         "name": TAG_REFRESH,
         "description": (
-            "Queue imports from the upstream source and track them. Requires `X-API-Key`. "
+            "Queue imports from the upstream source and track them. Requires an admin `X-API-Key`. "
             "Use only when data is missing or stale; the scheduler refreshes current seasons "
             "automatically."
         ),
@@ -67,8 +67,8 @@ OPENAPI_TAGS = [
     {
         "name": TAG_ADMIN,
         "description": (
-            "Operator views of import jobs and the scheduler. Requires `X-API-Key`. Use to find "
-            "out why data is stale; Prometheus metrics are served separately at `/metrics`."
+            "Operator views of import jobs and the scheduler. Requires an admin `X-API-Key`. Use to "
+            "find out why data is stale; Prometheus metrics are served separately at `/metrics`."
         ),
     },
 ]
@@ -318,17 +318,33 @@ def auth_errors(path: str) -> dict[int | str, dict[str, Any]]:
                 "unauthorized",
                 "Invalid or missing API key",
                 path,
-                hint="Send a configured API key in the X-API-Key header.",
+                hint="Send an admin API key in the X-API-Key header.",
+            ),
+        ),
+        403: error(
+            "The API key is valid but has the `client` role; this operation needs an admin key",
+            forbidden=example(
+                "Client key",
+                "forbidden",
+                "The API key 'partner-app' has role client, which does not allow this operation",
+                path,
+                hint=(
+                    "Use an admin key, or leave this operation to the operator. Read operations "
+                    "work with any key or none."
+                ),
             ),
         ),
         503: error(
-            "No API keys are configured, so operations that need a key are disabled",
+            "No admin API key is configured, so operations that need one are disabled",
             disabled=example(
                 "Writes disabled",
                 "writes-disabled",
                 "Write endpoints are disabled",
                 path,
-                hint="The operator must set FOOTBALL_RESULTS_API_KEYS.",
+                hint=(
+                    "The operator must configure an admin API key (FOOTBALL_RESULTS_API_KEYS or "
+                    "FOOTBALL_RESULTS_API_KEYS_FILE)."
+                ),
             ),
         ),
     }
