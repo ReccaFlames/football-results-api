@@ -36,6 +36,8 @@ API.
 | `app/competitions.py` | Competition summary helpers and `source_from_url` validation |
 | `app/config.py` | Environment settings, validated competition configuration, and `python -m app.config check` |
 | `config/competitions.yaml` | Competition, provider, and schedule defaults |
+| `config/demo-competitions.yaml` | Demo instance competitions: only redistributable providers (the 3. Liga) |
+| `compose.demo.yaml` | Compose override for the public read-only demo (ADR 0007); guide in `docs/DEMO.md` |
 | `app/repository.py` | `PostgresResultRepository`: seeding, queries, atomic season replace, scheduler claims |
 | `app/models.py` | Pydantic API/domain models (`Competition`, `SeasonSource`, `ScrapedMatch`, `MatchResult`, ...) |
 | `app/db_models.py` | SQLAlchemy ORM tables |
@@ -196,6 +198,12 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
   keys file holds only `sha256:` hashes with a name, a role (`client` or `admin`), and per-minute
   quotas. Protected operations and `/metrics` need an admin key (`403 forbidden` for a client
   key). Key names are metric labels; never log keys or hashes.
+- Demo mode (`FOOTBALL_RESULTS_DEMO_MODE`, ADR 0007): `check_demo_mode` in `app/config.py` runs
+  at API startup (before seeding), in the scheduler before every (re)seed, and in `config check`.
+  It rejects admin keys and providers not in `REDISTRIBUTABLE_PROVIDERS` (code, not config;
+  adding one needs written permission). Messages name the key, never the secret or hash. Writes
+  use the existing `writes-disabled` problem. The demo notice in the agent docs reads quotas
+  from settings; keep instance facts out of the consumer skill.
 - `RefreshRequest.competition` is required. Competition summaries may have a null `current_season`.
 - Update `README.md` when behaviour, endpoints, or configuration change.
 

@@ -1,0 +1,44 @@
+# Competitions of the public, read-only demo instance (ADR 0007, docs/DEMO.md). Used with
+# FOOTBALL_RESULTS_DEMO_MODE=true, which accepts only publicly redistributable providers
+# (openligadb). Check it with:
+#   FOOTBALL_RESULTS_DEMO_MODE=true uv run python -m app.config check \
+#     --config-file config/demo-competitions.yaml
+# Keep the defaults and the 3. Liga entry in step with config/competitions.yaml.
+defaults:
+  schedule:
+    policy: adaptive
+    pre_match_check_minutes: 30
+    match_duration_minutes:
+      league: 105
+      cup: 135
+    result_poll_minutes: [5, 15, 60]
+    result_poll_until_minutes: [30, 240]
+    idle_interval: 1d
+    off_season_interval: 7d
+    off_season_after: 30d
+    failure_backoff_minutes: [5, 15, 30, 60]
+    season_rollover: auto
+    season_check_interval: 1d
+    fallback_after_failures: 3
+
+providers:
+  # Key-free JSON API with ODbL-licensed data (ADR 0004): keep the attribution, and a database
+  # derived from it is subject to share-alike.
+  openligadb:
+    min_request_interval_seconds: 2
+    postponed_after_hours: 24
+
+competitions:
+  - slug: 3-liga
+    name: 3. Liga
+    country: Germany
+    format: league
+    provider: openligadb
+    season_format: split
+    season_start_month: 7
+    current_season: 2026-2027
+    seasons:
+      "2025-2026":
+        source_url: https://api.openligadb.de/getmatchdata/bl3/2025
+      "2026-2027":
+        source_url: https://api.openligadb.de/getmatchdata/bl3/2026

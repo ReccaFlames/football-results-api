@@ -1469,3 +1469,89 @@ def test_startup_loads_the_api_keys_file(tmp_path: Path, monkeypatch: pytest.Mon
     keys.write_text("keys:\n  - {name: ops, hash: plain}\n")
     with pytest.raises(ValueError, match="invalid API keys file"), TestClient(app):
         pass
+
+
+DEFAULT_CONFIG = Path(__file__).parents[1] / "config/competitions.yaml"
+DEMO_CONFIG = Path(__file__).parents[1] / "config/demo-competitions.yaml"
+
+
+def use_demo_mode(monkeypatch: pytest.MonkeyPatch, config_file: Path = DEMO_CONFIG) -> None:
+    monkeypatch.setattr(main_module.settings, "demo_mode", True)
+    monkeypatch.setattr(main_module.settings, "api_keys", "")
+    monkeypatch.setattr(main_module.settings, "api_keys_file", None)
+    monkeypatch.setattr(main_module.settings, "config_file", config_file)
+    monkeypatch.setattr(main_module, "file_keys", ())
+
+
+def test_demo_mode_startup_rejects_admin_keys_and_non_redistributable_providers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, repository = client_with_empty_store(tmp_path)
+    seeded: list[set[str]] = []
+
+    async def seed(seeds, _auto_rollover=frozenset()) -> None:
+        seeded.append(set(seeds))
+
+    monkeypatch.setattr(repository, "seed_competitions", seed)
+    use_demo_mode(monkeypatch)
+    keys = tmp_path / "keys.yaml"
+    keys.write_text(
+        f"keys:\n  - {{name: partner, hash: '{access.hash_key('client-key')}'}}\n"
+        "  - {name: sso-admin, subject: user-123, role: admin}\n"
+    )
+    monkeypatch.setattr(main_module.settings, "api_keys_file", keys)
+    with pytest.raises(ValueError, match="entry 'sso-admin' has role admin"), TestClient(app):
+        pass
+
+    keys.write_text(f"keys:\n  - {{name: partner, hash: '{access.hash_key('client-key')}'}}\n")
+    monkeypatch.setattr(main_module.settings, "api_keys", "env-admin-key")
+    with pytest.raises(ValueError, match="FOOTBALL_RESULTS_API_KEYS is set"), TestClient(app):
+        pass
+
+    monkeypatch.setattr(main_module.settings, "api_keys", "")
+    monkeypatch.setattr(main_module.settings, "config_file", DEFAULT_CONFIG)
+    with pytest.raises(ValueError, match="'premier-league' uses provider 'espn'"), TestClient(app):
+        pass
+    # Rejected configurations are never seeded.
+    assert seeded == []
+
+    monkeypatch.setattr(main_module.settings, "config_file", DEMO_CONFIG)
+    with TestClient(app) as client:
+        assert client.get("/api/v1/competitions", headers=CLIENT_HEADERS).status_code == 200
+    assert seeded == [{"3-liga"}]
+
+
+def test_demo_mode_writes_and_metrics_are_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _ = client_with_empty_store(tmp_path)
+    use_demo_mode(monkeypatch)
+    use_file_keys(monkeypatch, file_key("client-key", "partner-app"))
+
+    for headers in ({}, CLIENT_HEADERS, AUTH_HEADERS):
+        refresh = client.post(
+            "/api/v1/results/refresh", json={"competition": "3-liga"}, headers=headers
+        )
+        body = assert_problem(refresh, 503, "writes-disabled")
+        assert "read-only demo instance" in body["hint"]
+    metrics = client.get("/metrics", headers={"Authorization": "Bearer test-api-key"})
+    assert_problem(metrics, 503, "writes-disabled")
+    assert client.get("/api/v1/matches", params={"competition": "3-liga"}).status_code == 200
+
+
+def test_demo_notice_is_served_only_in_demo_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _ = client_with_empty_store(tmp_path)
+    paths = ("/llms.txt", "/agents", "/agents.md", "/llms-full.txt")
+    for path in paths:
+        assert "demo instance" not in client.get(path).text.lower()
+
+    use_demo_mode(monkeypatch)
+    monkeypatch.setattr(main_module.settings, "rate_limit_read_per_minute", 17)
+    for path in paths:
+        text = client.get(path).text
+        assert "public, read-only demo instance with no SLA" in text, path
+        assert "17 reads per minute per IP" in text, path
+        assert "Open Database License (ODbL)" in text, path
+        assert "share-alike" in text, path

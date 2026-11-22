@@ -275,7 +275,7 @@ wheels = [
 
 [[package]]
 name = "football-results-api"
-version = "0.22.0"
+version = "0.23.0"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
@@ -323,7 +323,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "football-results-cli"
-version = "0.22.0"
+version = "0.23.0"
 source = { editable = "cli" }
 dependencies = [
     { name = "httpx" },

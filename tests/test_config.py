@@ -418,3 +418,108 @@ def test_keys_resolve_by_hash_and_environment_keys_are_admin(tmp_path: Path) -> 
     assert access.resolve("wrong", ("env-key",), file_keys) is None
     assert access.resolve("", ("",), ()) is None
     assert not access.has_admin_key((), file_keys)
+
+
+DEMO_CONFIG = Path(__file__).parents[1] / "config/demo-competitions.yaml"
+DEMO_COMPOSE = Path(__file__).parents[1] / "compose.demo.yaml"
+
+
+@pytest.fixture
+def demo_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config_module.settings, "demo_mode", True)
+    monkeypatch.setattr(config_module.settings, "api_keys", "")
+
+
+def check_fails(capsys: pytest.CaptureFixture[str], *argv: str) -> str:
+    with pytest.raises(SystemExit) as error:
+        cli(["check", *argv])
+    assert error.value.code == 2
+    return capsys.readouterr().err
+
+
+@pytest.mark.usefixtures("demo_mode")
+def test_demo_mode_accepts_the_demo_competitions_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    keys = tmp_path / "keys.yaml"
+    keys.write_text(f"keys:\n  - {{name: partner, hash: '{access.hash_key('client')}'}}\n")
+
+    assert cli(["check", "--config-file", str(DEMO_CONFIG), "--api-keys-file", str(keys)]) == 0
+    output = capsys.readouterr().out
+    assert "(1 competitions)" in output
+    assert "Demo mode: read-only (no admin keys), providers limited to openligadb" in output
+    assert set(load_config(DEMO_CONFIG).to_competitions()) == {"3-liga"}
+
+
+@pytest.mark.usefixtures("demo_mode")
+def test_demo_mode_rejects_the_shipped_configuration(capsys: pytest.CaptureFixture[str]) -> None:
+    error = check_fails(capsys, "--config-file", str(DEFAULT_CONFIG))
+
+    assert "FOOTBALL_RESULTS_DEMO_MODE is on" in error
+    assert (
+        "competition 'premier-league' uses provider 'espn', which is not publicly "
+        "redistributable (allowed: openligadb)"
+    ) in error
+    assert "competition 'ekstraklasa' uses fallback_provider 'thesportsdb'" in error
+    assert "'3-liga'" not in error
+
+
+@pytest.mark.usefixtures("demo_mode")
+def test_demo_mode_rejects_a_non_redistributable_fallback_provider(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    data = yaml.safe_load(DEMO_CONFIG.read_text())
+    data["providers"]["thesportsdb"] = {"min_request_interval_seconds": 3}
+    competition = data["competitions"][0]
+    competition["fallback_provider"] = "thesportsdb"
+    competition["seasons"]["2026-2027"]["fallback_url"] = (
+        "https://www.thesportsdb.com/league/4426?season=2026-2027"
+    )
+    path = tmp_path / "competitions.yaml"
+    path.write_text(yaml.safe_dump(data))
+    assert load_config(path).competitions[0].fallback_provider == "thesportsdb"
+
+    error = check_fails(capsys, "--config-file", str(path))
+
+    assert "competition '3-liga' uses fallback_provider 'thesportsdb'" in error
+    assert "uses provider 'openligadb'" not in error
+
+
+@pytest.mark.usefixtures("demo_mode")
+def test_demo_mode_rejects_admin_keys_without_printing_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(config_module.settings, "api_keys", "env-secret-key")
+    keys = tmp_path / "keys.yaml"
+    admin_hash = access.hash_key("admin-secret-key")
+    keys.write_text(
+        "keys:\n"
+        f"  - {{name: partner, hash: '{access.hash_key('client')}'}}\n"
+        f"  - {{name: ops, hash: '{admin_hash}', role: admin}}\n"
+        "  - {name: sso-admin, subject: user-123, role: admin}\n"
+    )
+
+    error = check_fails(capsys, "--config-file", str(DEMO_CONFIG), "--api-keys-file", str(keys))
+
+    assert "FOOTBALL_RESULTS_API_KEYS is set" in error
+    assert "API keys file entry 'ops' has role admin" in error
+    assert "API keys file entry 'sso-admin' has role admin" in error
+    assert "'partner'" not in error
+    for secret in ("env-secret-key", "admin-secret-key", admin_hash, "user-123"):
+        assert secret not in error
+
+
+def test_demo_compose_override_runs_the_demo_without_admin_keys() -> None:
+    compose = yaml.safe_load(DEMO_COMPOSE.read_text())
+    target = "/app/config/demo-competitions.yaml"
+    for name in ("api", "scheduler"):
+        service = compose["services"][name]
+        environment = service["environment"]
+        assert environment["FOOTBALL_RESULTS_DEMO_MODE"] == "true"
+        assert environment["FOOTBALL_RESULTS_CONFIG_FILE"] == target
+        assert environment["FOOTBALL_RESULTS_LOG_FORMAT"] == "json"
+        assert environment["FOOTBALL_RESULTS_API_KEYS"] == ""
+        assert f"./config/demo-competitions.yaml:{target}:ro" in service["volumes"]
+    api = compose["services"]["api"]["environment"]
+    assert api["FOOTBALL_RESULTS_RATE_LIMIT_READ_PER_MINUTE"] == "${DEMO_READ_PER_MINUTE:-30}"
+    assert (DEMO_COMPOSE.parent / "config/demo-competitions.yaml").is_file()

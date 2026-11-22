@@ -1,7 +1,9 @@
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
+import app.scheduler as scheduler_module
 from app.config import load_config
 from app.models import Competition, ScrapedMatch, SeasonSource
 from app.repository import RefreshTarget, ScheduledRefresh, SeasonCheckResult
@@ -249,3 +251,17 @@ async def test_season_check_discovers_fallback_sources() -> None:
 
     assert repository.fallbacks == [[NEXT_FALLBACK]]
     assert football_data.calls == ["premier-league"]
+
+
+def test_scheduler_enforces_demo_mode_before_seeding(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(scheduler_module.settings, "demo_mode", True)
+    monkeypatch.setattr(scheduler_module.settings, "api_keys", "")
+    monkeypatch.setattr(scheduler_module.settings, "api_keys_file", None)
+    root = Path(__file__).parents[1]
+
+    scheduler_module.check_demo(load_config(root / "config/demo-competitions.yaml"))
+    with pytest.raises(ValueError, match="'premier-league' uses provider 'espn'"):
+        scheduler_module.check_demo(load_config(root / "config/competitions.yaml"))
+    monkeypatch.setattr(scheduler_module.settings, "api_keys", "env-admin-key")
+    with pytest.raises(ValueError, match="FOOTBALL_RESULTS_API_KEYS is set"):
+        scheduler_module.check_demo(load_config(root / "config/demo-competitions.yaml"))

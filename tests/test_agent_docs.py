@@ -248,3 +248,22 @@ def test_cli_task_examples_send_the_same_request_as_curl(monkeypatch: pytest.Mon
         assert result.exit_code == 0, (task.cli(), result.stderr)
         assert str(sent[-1].url.copy_with(query=None)) == f"{BASE_URL}{task.operation.path}"
         assert dict(sent[-1].url.params) == dict(task.query)
+
+
+def test_demo_notice_keeps_the_llms_txt_format_and_lists_each_attribution_once() -> None:
+    providers = {"openligadb": ["3-liga"]}
+    demo = guide(demo=True, provider_competitions=providers)
+    text = agent_docs.llms_txt(demo)
+    lines = [line for line in outside_code(text) if line.strip()]
+
+    assert lines[2].startswith("**Demo instance:** This is a public, read-only demo instance")
+    assert "120 reads per minute per IP" in text
+    assert text.count("Open Database License") == 1
+    assert "Data attribution:" not in text
+    first_section = next(index for index, line in enumerate(lines) if line.startswith("## "))
+    assert not any(line.startswith("#") for line in lines[2:first_section])
+    assert "## Demo instance" in agent_docs.agent_guide_markdown(demo)
+
+    disabled = guide(demo=True, rate_limits=agent_docs.RateLimits(False, 120, 10))
+    assert "Rate limiting is disabled on this instance." in agent_docs.llms_txt(disabled)
+    assert "Data attribution:" in agent_docs.llms_txt(guide(provider_competitions=providers))

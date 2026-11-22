@@ -5,7 +5,8 @@ import socket
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from app.config import CompetitionFile, ConfigFileWatcher, settings
+from app import access
+from app.config import CompetitionFile, ConfigFileWatcher, check_demo_mode, settings
 from app.database import session_factory
 from app.logs import configure_logging
 from app.models import Competition, SeasonSource
@@ -229,6 +230,12 @@ def log_fallback_warnings(config: CompetitionFile) -> None:
         logger.warning(warning)
 
 
+def check_demo(config: CompetitionFile) -> None:
+    """Enforce demo mode (ADR 0007) before a configuration is seeded."""
+    if settings.demo_mode:
+        check_demo_mode(config, access.load_keys(settings.api_keys_file))
+
+
 def worker_name() -> str:
     # Containers restarted in place keep their hostname and PID 1, so add a per-process suffix:
     # a restarted worker must not look alive to recovery of the jobs its predecessor abandoned.
@@ -277,6 +284,7 @@ async def run() -> None:
     repository = PostgresResultRepository(session_factory)
     config_watcher = ConfigFileWatcher(settings.config_file)
     config, _ = config_watcher.load_if_changed()
+    check_demo(config)
     await repository.seed_competitions(config.to_competitions(), config.auto_rollover_slugs())
     config_watcher.mark_applied()
     log_fallback_warnings(config)
@@ -303,6 +311,8 @@ async def run() -> None:
         try:
             config, changed = config_watcher.load_if_changed()
             if changed:
+                # A rejected file is not applied; the scheduler keeps the previous one and retries.
+                check_demo(config)
                 await repository.seed_competitions(
                     config.to_competitions(), config.auto_rollover_slugs()
                 )

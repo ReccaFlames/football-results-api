@@ -25,7 +25,7 @@ from app.caching import (
     max_age_seconds,
 )
 from app.competitions import competition_summary, provider_competition_code, source_from_url
-from app.config import load_config, parse_networks, settings
+from app.config import check_demo_mode, load_config, parse_networks, settings
 from app.contract import (
     DEFAULT_LIMIT,
     ContractError,
@@ -100,6 +100,10 @@ ADMIN_KEY_HINT = (
     "The operator must configure an admin API key (FOOTBALL_RESULTS_API_KEYS or "
     "FOOTBALL_RESULTS_API_KEYS_FILE)."
 )
+DEMO_HINT = (
+    "This is a read-only demo instance (ADR 0007): writes, jobs, admin operations, and metrics "
+    "are unavailable. Self-host the API to use them."
+)
 
 
 def _identity(supplied: str | None) -> access.Identity | None:
@@ -114,7 +118,9 @@ def _require_admin(
     identity: access.Identity | None, *, scheme: str, disabled: str, hint: str
 ) -> None:
     if not access.has_admin_key(access.env_keys(settings.api_keys), file_keys):
-        raise ProblemError("writes-disabled", disabled, hint=ADMIN_KEY_HINT)
+        raise ProblemError(
+            "writes-disabled", disabled, hint=DEMO_HINT if settings.demo_mode else ADMIN_KEY_HINT
+        )
     if identity is None:
         raise ProblemError(
             "unauthorized",
@@ -211,13 +217,15 @@ def _freshness_cache_control(freshness: list[Freshness]) -> dict[str, str]:
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     configure_logging(settings.log_format)
     config = load_config()
+    global file_keys
+    file_keys = access.load_keys(settings.api_keys_file)
+    # Before seeding, so a demo never stores competitions it may not serve.
+    check_demo_mode(config, file_keys)
     for warning in config.fallback_warnings(
         settings.football_data_api_token, settings.thesportsdb_api_key.get_secret_value()
     ):
         logger.warning(warning)
     await store.seed_competitions(config.to_competitions(), config.auto_rollover_slugs())
-    global file_keys
-    file_keys = access.load_keys(settings.api_keys_file)
     async with mcp_endpoint.lifespan():
         yield
 
@@ -1191,6 +1199,7 @@ async def _agent_guide(
         ),
         provider_competitions=_configured_provider_competitions(),
         oauth=_oauth_info(),
+        demo=settings.demo_mode,
     )
     return guide, base_url, request_derived
 

@@ -573,6 +573,8 @@ class AgentGuide:
     tools: tuple[ToolLink, ...] = ()
     attributions: tuple[str, ...] = ()
     oauth: OAuthInfo | None = None
+    # Public read-only demo instance (ADR 0007): adds the demo notice.
+    demo: bool = False
 
     def url(self, path: str) -> str:
         return f"{self.base_url}{path}"
@@ -595,6 +597,7 @@ def build_guide(
     tools: Sequence[ToolLink] = (),
     provider_competitions: Mapping[str, Sequence[str]] | None = None,
     oauth: OAuthInfo | None = None,
+    demo: bool = False,
 ) -> AgentGuide:
     info = spec.get("info", {})
     description = info.get("description", "").strip()
@@ -615,6 +618,7 @@ def build_guide(
         tools=tuple(tools),
         attributions=data_attributions(provider_competitions or {}),
         oauth=oauth,
+        demo=demo,
     )
 
 
@@ -640,9 +644,36 @@ def data_attributions(provider_competitions: Mapping[str, Sequence[str]]) -> tup
 
 
 def _attribution_blocks(guide: AgentGuide) -> list[Block]:
-    if not guide.attributions:
+    # The demo notice already lists the attributions.
+    if not guide.attributions or guide.demo:
         return []
     return [Paragraph("Data attribution:"), Bullets(guide.attributions)]
+
+
+def _demo_blocks(guide: AgentGuide, *, heading: bool) -> list[Block]:
+    """The demo notice: read-only, no SLA, anonymous quotas, and data licences (ADR 0007)."""
+    if not guide.demo:
+        return []
+    limits = guide.rate_limits
+    quota = (
+        f"Anonymous clients may make {limits.read_per_minute} reads per minute per IP; on `429` "
+        "wait `Retry-After` seconds."
+        if limits.enabled
+        else "Rate limiting is disabled on this instance."
+    )
+    text = (
+        "This is a public, read-only demo instance with no SLA: no guarantee of uptime, "
+        "support, or data completeness, and it may change or go away without notice. Writes, "
+        "jobs, admin operations, and `/metrics` return `503` (`writes-disabled`). "
+        f"{quota} It serves only competitions whose sources permit public redistribution; "
+        "self-host the API for other competitions or higher limits."
+    )
+    licences = guide.attributions or ("No source on this instance requires attribution.",)
+    if heading:
+        blocks: list[Block] = [Heading(2, "Demo instance"), Paragraph(text)]
+    else:
+        blocks = [Paragraph(f"**Demo instance:** {text}")]
+    return [*blocks, Paragraph("Data licences and attribution:"), Bullets(licences)]
 
 
 def top_tasks(
@@ -764,6 +795,7 @@ def llms_txt(guide: AgentGuide) -> str:
     blocks: list[Block] = [
         Heading(1, guide.title),
         Quote(guide.summary),
+        *_demo_blocks(guide, heading=False),
         Paragraph(
             f"Base URL: `{guide.base_url}` (API version {guide.version}). JSON over HTTP; "
             f"the contract is the [OpenAPI spec]({guide.url('/openapi.json')}), and "
@@ -830,6 +862,7 @@ def agent_guide_blocks(guide: AgentGuide) -> list[Block]:
             f"[OpenAPI spec]({guide.url('/openapi.json')}) · [llms.txt]({guide.url('/llms.txt')})"
             f" · [Full reference]({guide.url('/llms-full.txt')})"
         ),
+        *_demo_blocks(guide, heading=True),
         Heading(2, "Quick start"),
         Paragraph(_tasks_intro(guide)),
     ]

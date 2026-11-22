@@ -311,7 +311,7 @@ How to use this list:
       - [x] Docs (README supported competitions, statistics coverage, configuration;
             `PROVIDERS.md` capability and URL tables; ADR 0004); version 0.20.0
             (`pyproject.toml`, `cli/pyproject.toml`, `server.json`, `uv lock`)
-- [ ] **18. Optional hosted access**
+- [x] **18. Optional hosted access**
       ([research](research/2026-11-hosted-access.md); everything stays optional and free to
       self-host)
   - [x] 18a. Named API keys, roles, and per-key quotas
@@ -372,20 +372,20 @@ How to use this list:
           audience, wrong issuer, unknown `kid`, `required` mode, mapped admin refresh
     - [x] Docs (README MCP and configuration; ADR 0006); version 0.22.0 (`pyproject.toml`,
           `cli/pyproject.toml`, `server.json`, `uv lock`)
-  - [ ] 18c. Public demo instance
+  - [x] 18c. Public demo instance
         ([ADR 0007](adr/0007-read-only-demo-instance-serves-only-redistributable-sources.md))
-    - [ ] `FOOTBALL_RESULTS_DEMO_MODE`: startup and `config check` reject admin keys and
+    - [x] `FOOTBALL_RESULTS_DEMO_MODE`: startup and `config check` reject admin keys and
           competitions whose primary or fallback provider is not publicly redistributable (allow
           list: `openligadb`)
-    - [ ] `config/demo-competitions.yaml`: the 3. Liga only
-    - [ ] Demo notice in `/llms.txt` and `/agents`: read-only, no SLA, data licences and
+    - [x] `config/demo-competitions.yaml`: the 3. Liga only
+    - [x] Demo notice in `/llms.txt` and `/agents`: read-only, no SLA, data licences and
           attribution, quotas
-    - [ ] `compose.demo.yaml` override: demo competitions, demo mode, low anonymous quotas (for
+    - [x] `compose.demo.yaml` override: demo competitions, demo mode, low anonymous quotas (for
           example 30 reads per minute), JSON logs
-    - [ ] `docs/DEMO.md`: Oracle Cloud Always Free VM, Caddy, Cloudflare free in front (cache rule
+    - [x] `docs/DEMO.md`: Oracle Cloud Always Free VM, Caddy, Cloudflare free in front (cache rule
           for public GETs, IP rate-limit rule, Cloudflare ranges in
           `FOOTBALL_RESULTS_TRUSTED_PROXIES`), and how to add a provider after written
           permission (90minut.pl)
-    - [ ] Tests: demo-mode validation, notice rendering
-    - [ ] Docs (README, ADR 0007, glossary); version 0.23.0 (`pyproject.toml`,
+    - [x] Tests: demo-mode validation, notice rendering
+    - [x] Docs (README, ADR 0007, glossary); version 0.23.0 (`pyproject.toml`,
           `cli/pyproject.toml`, `server.json`, `uv lock`)

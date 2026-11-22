@@ -388,6 +388,10 @@ competitions in the database. They are not operations, so they are absent from `
   [Agent Skill](#agent-skill) and the [MCP server](#mcp-server) (a `Tools` section in llms.txt;
   "Command-line client", "Agent Skill", and "MCP server" sections at `/agents#cli`,
   `/agents#skill`, and `/agents#mcp`) and show each top task as curl and as a CLI command.
+- With `FOOTBALL_RESULTS_DEMO_MODE=true` (a [public demo instance](#public-demo-instance)) the pages
+  add a demo notice: read-only, no SLA, the anonymous read quota from
+  `FOOTBALL_RESULTS_RATE_LIMIT_READ_PER_MINUTE`, and the data licences and attribution (OpenLigaDB,
+  ODbL share-alike). Without demo mode there is no notice.
 
 ~~~bash
 curl -s http://localhost:8000/llms.txt
@@ -952,6 +956,36 @@ gateway, for example `172.16.0.0/12`), and make the proxy set `X-Forwarded-For`.
 client shares one rate-limit quota. Set `FOOTBALL_RESULTS_PUBLIC_BASE_URL` to the public HTTPS URL
 so that `/llms.txt` and `/agents` show the right base URL and `/mcp` accepts its host.
 
+### Public demo instance
+
+A demo instance is a public, read-only deployment that serves only providers whose data may be
+redistributed publicly ([ADR 0007](docs/adr/0007-read-only-demo-instance-serves-only-redistributable-sources.md)).
+[docs/DEMO.md](docs/DEMO.md) is the deployment guide: an Oracle Cloud Always Free VM, Caddy for
+TLS, and Cloudflare's free plan for caching and an IP rate limit.
+
+~~~bash
+docker compose -f compose.yaml -f compose.demo.yaml up -d --build
+~~~
+
+`compose.demo.yaml` sets `FOOTBALL_RESULTS_DEMO_MODE=true`, serves
+`config/demo-competitions.yaml` (the 3. Liga from OpenLigaDB), allows 30 anonymous reads per
+minute (`DEMO_READ_PER_MINUTE`), writes JSON logs, and empties `FOOTBALL_RESULTS_API_KEYS`. In
+demo mode:
+
+- The API, the scheduler, and `python -m app.config check` refuse admin keys
+  (`FOOTBALL_RESULTS_API_KEYS`, or `admin` entries in the keys file; `client` keys are allowed)
+  and any competition whose provider or fallback provider is not publicly redistributable. The
+  allow list is code (`REDISTRIBUTABLE_PROVIDERS` in `app/config.py`, today only `openligadb`);
+  adding a provider needs written permission and a code change (see the guide).
+- Without an admin key, writes, jobs, admin operations, and `/metrics` return `503`
+  `writes-disabled`. `/mcp` stays anonymous; the observability profile cannot scrape `/metrics`.
+- `/llms.txt` and `/agents` show the demo notice (see [Agent documentation](#agent-documentation)).
+
+~~~bash
+FOOTBALL_RESULTS_DEMO_MODE=true uv run python -m app.config check \
+  --config-file config/demo-competitions.yaml
+~~~
+
 ### Observability
 
 Everything here is self-hosted and free: Prometheus (Apache-2.0) and Grafana OSS (AGPL-3.0) run in
@@ -1192,6 +1226,7 @@ Application variables:
 | FOOTBALL_RESULTS_SCHEDULER_WORKER_TIMEOUT_SECONDS | `300` | A scheduler worker without a heartbeat for this long is treated as dead: its `running` scrape jobs are marked `failed` so their seasons are claimed again |
 | FOOTBALL_RESULTS_API_KEYS | empty | Comma-separated admin API keys (named `env`); an admin key is required for write endpoints, job status, admin endpoints, and `/metrics` |
 | FOOTBALL_RESULTS_API_KEYS_FILE | empty | YAML file of named, hashed keys with roles and per-minute quotas; read at startup (see [Named API keys](#named-api-keys-roles-and-quotas)) |
+| FOOTBALL_RESULTS_DEMO_MODE | `false` | Public demo instance: startup and `config check` reject admin keys and providers that are not publicly redistributable; agent docs show a demo notice (see [Public demo instance](#public-demo-instance)) |
 | FOOTBALL_RESULTS_LOG_FORMAT | `text` | `text` or `json` (one JSON object per line on stderr, including uvicorn access logs); Docker Compose sets `json` |
 | FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN | empty | football-data.org token (needed only for football-data competitions) |
 | FOOTBALL_RESULTS_FOOTBALL_DATA_MIN_REQUEST_INTERVAL_SECONDS | `6` (from YAML) | Optional environment override for the football-data.org throttle (free tier: 10 req/min) |

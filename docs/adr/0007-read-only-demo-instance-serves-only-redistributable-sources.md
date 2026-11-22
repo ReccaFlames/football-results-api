@@ -28,3 +28,6 @@ decision outside the roadmap.
 - Under the ODbL, the demo must keep the OpenLigaDB attribution. A database derived from it is
   subject to share-alike.
 - The demo shows a small part of the API (one competition with no cards, corners, or fouls).
+- Without admin keys, `/metrics` and the admin operations are unavailable on the demo, and past
+  seasons cannot be fetched through the API; operators import them in a short window without demo
+  mode ([docs/DEMO.md](../DEMO.md)). The scheduler keeps the current season fresh.

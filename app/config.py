@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 import sys
+from collections.abc import Sequence
 from datetime import timedelta
 from importlib.metadata import version
 from ipaddress import IPv4Network, IPv6Network, ip_network
@@ -88,6 +89,8 @@ class Settings(BaseSettings):
     # JWKS location when the issuer's discovery URL is unreachable from the API (Compose).
     oauth_jwks_url: str | None = None
     log_format: Literal["text", "json"] = "text"
+    # Public read-only demo instance (ADR 0007): no admin keys, redistributable providers only.
+    demo_mode: bool = False
 
     @field_validator("oauth_issuer", "oauth_jwks_url")
     @classmethod
@@ -570,6 +573,55 @@ def load_config(path: Path | None = None) -> CompetitionFile:
     return _validate_config(config_path, contents)
 
 
+# Providers whose terms permit public redistribution of their data (ADR 0007). Adding one needs a
+# documented written permission or licence and a code change, never configuration.
+REDISTRIBUTABLE_PROVIDERS = frozenset({"openligadb"})
+
+
+def demo_mode_errors(
+    config: CompetitionFile,
+    environment_keys: Sequence[str],
+    file_keys: Sequence[access.FileKey],
+) -> list[str]:
+    """Why this setup cannot run as a demo instance; empty when it can.
+
+    Messages name competitions, providers, and key names, never a key or hash.
+    """
+    allowed = ", ".join(sorted(REDISTRIBUTABLE_PROVIDERS))
+    errors: list[str] = []
+    if environment_keys:
+        errors.append(
+            "FOOTBALL_RESULTS_API_KEYS is set; a demo instance has no admin keys, so leave it empty"
+        )
+    errors.extend(
+        f"API keys file entry {item.name!r} has role admin; a demo instance allows only client keys"
+        for item in file_keys
+        if item.role == "admin"
+    )
+    for competition in config.competitions:
+        for label, provider in (
+            ("provider", competition.provider),
+            ("fallback_provider", competition.fallback_provider),
+        ):
+            if provider is not None and provider not in REDISTRIBUTABLE_PROVIDERS:
+                errors.append(
+                    f"competition {competition.slug!r} uses {label} {provider!r}, which is not "
+                    f"publicly redistributable (allowed: {allowed})"
+                )
+    return errors
+
+
+def check_demo_mode(config: CompetitionFile, file_keys: Sequence[access.FileKey]) -> None:
+    """Raise when ``FOOTBALL_RESULTS_DEMO_MODE`` is on and the setup breaks ADR 0007."""
+    if not settings.demo_mode:
+        return
+    errors = demo_mode_errors(config, access.env_keys(settings.api_keys), file_keys)
+    if errors:
+        raise ValueError(
+            "FOOTBALL_RESULTS_DEMO_MODE is on, but:\n" + "\n".join(f"  - {item}" for item in errors)
+        )
+
+
 class ConfigFileWatcher:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -623,16 +675,22 @@ def cli(argv: list[str] | None = None) -> int:
         config = load_config(args.config_file)
     except (TypeError, ValueError) as error:
         parser.error(str(error))
+    keys: tuple[access.FileKey, ...] = ()
+    if args.api_keys_file is not None:
+        try:
+            keys = access.load_keys(args.api_keys_file)
+        except ValueError as error:
+            parser.error(str(error))
+    try:
+        check_demo_mode(config, keys)
+    except ValueError as error:
+        parser.error(str(error))
     for warning in config.fallback_warnings(
         settings.football_data_api_token, settings.thesportsdb_api_key.get_secret_value()
     ):
         print(f"warning: {warning}", file=sys.stderr)
     print(f"Configuration valid: {args.config_file} ({len(config.competitions)} competitions)")
     if args.api_keys_file is not None:
-        try:
-            keys = access.load_keys(args.api_keys_file)
-        except ValueError as error:
-            parser.error(str(error))
         admins = sum(1 for key in keys if key.role == "admin")
         subjects = sum(1 for key in keys if key.subject is not None)
         counts = f"{len(keys) - subjects} keys, {admins} admin"
@@ -643,6 +701,11 @@ def cli(argv: list[str] | None = None) -> int:
         print(
             f"OAuth for /mcp: issuer {settings.oauth_issuer}, audience "
             f"{settings.oauth_token_audience}, mode {settings.oauth_mode}"
+        )
+    if settings.demo_mode:
+        print(
+            "Demo mode: read-only (no admin keys), providers limited to "
+            + ", ".join(sorted(REDISTRIBUTABLE_PROVIDERS))
         )
     return 0
 

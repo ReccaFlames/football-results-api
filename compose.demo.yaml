@@ -1,0 +1,29 @@
+# Public, read-only demo instance (ADR 0007). Deployment guide: docs/DEMO.md.
+#   docker compose -f compose.yaml -f compose.demo.yaml up -d --build
+# Serves only config/demo-competitions.yaml (redistributable providers), has no admin keys (so
+# writes, jobs, admin operations, and /metrics return writes-disabled), and gives anonymous
+# clients a low read quota. Do not use the observability profile here: Prometheus needs an admin
+# key. Client keys in FOOTBALL_RESULTS_API_KEYS_FILE stay allowed.
+x-demo-environment: &demo-environment
+  FOOTBALL_RESULTS_DEMO_MODE: "true"
+  FOOTBALL_RESULTS_CONFIG_FILE: /app/config/demo-competitions.yaml
+  FOOTBALL_RESULTS_LOG_FORMAT: json
+
+services:
+  api:
+    environment:
+      <<: *demo-environment
+      # Overrides any admin keys from .env; demo mode would refuse to start with them.
+      FOOTBALL_RESULTS_API_KEYS: ""
+      FOOTBALL_RESULTS_RATE_LIMIT_ENABLED: "true"
+      FOOTBALL_RESULTS_RATE_LIMIT_READ_PER_MINUTE: ${DEMO_READ_PER_MINUTE:-30}
+      FOOTBALL_RESULTS_RATE_LIMIT_WRITE_PER_MINUTE: "5"
+    volumes:
+      - ./config/demo-competitions.yaml:/app/config/demo-competitions.yaml:ro
+
+  scheduler:
+    environment:
+      <<: *demo-environment
+      FOOTBALL_RESULTS_API_KEYS: ""
+    volumes:
+      - ./config/demo-competitions.yaml:/app/config/demo-competitions.yaml:ro
