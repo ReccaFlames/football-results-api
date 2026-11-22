@@ -210,7 +210,9 @@ async def refresh_target(
 
 
 def log_fallback_warnings(config: CompetitionFile) -> None:
-    for warning in config.fallback_warnings(settings.football_data_api_token):
+    for warning in config.fallback_warnings(
+        settings.football_data_api_token, settings.thesportsdb_api_key.get_secret_value()
+    ):
         logger.warning(warning)
 
 

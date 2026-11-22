@@ -20,7 +20,7 @@ class CompetitionScraper(Protocol):
 
 ### `name`
 
-A short, stable, lowercase identifier (`90minut`, `football-data`, `espn`). It is persisted in
+A short, stable, lowercase identifier (`90minut`, `football-data`, `espn`, `thesportsdb`). It is persisted in
 `competition_season.provider`, so renaming it requires a data migration.
 
 ### `capabilities`
@@ -33,14 +33,16 @@ A short, stable, lowercase identifier (`90minut`, `football-data`, `espn`). It i
 | `season_discovery` | `True` when `discover_seasons` can list seasons; `False` when sources are configured by hand. |
 | `scheduled_fixtures` | `True` when unplayed fixtures with kickoff times are returned (the adaptive scheduler relies on them). |
 | `requires_api_token` | `True` when the provider cannot work without a configured token. |
+| `windowed` | `True` when `scrape` returns only the matches around today, not a whole season. A windowed provider may only be a `fallback_provider`; `config check` rejects it as `provider` (ADR 0003). |
 
 Current providers:
 
-| Provider | Statistics | Season discovery | Token |
-| --- | --- | --- | --- |
-| `90minut` | goals, half-time split, cards, first scorer and minute | no | no |
-| `football-data` | goals, half-time split, cards, first scorer and minute | yes | yes |
-| `espn` | goals, half-time split, cards, first scorer and minute, corners, fouls | yes | no |
+| Provider | Statistics | Season discovery | Token | Windowed |
+| --- | --- | --- | --- | --- |
+| `90minut` | goals, half-time split, cards, first scorer and minute | no | no | no |
+| `football-data` | goals, half-time split, cards, first scorer and minute | yes | yes | no |
+| `espn` | goals, half-time split, cards, first scorer and minute, corners, fouls | yes | no | no |
+| `thesportsdb` | goals | yes (fallback URLs only) | no (free key `123` by default) | yes |
 
 football-data.org declares cards and first scorer, but its free plan omits goal and booking events,
 so those fields stay `null` without a paid plan. Corners and fouls come only from `espn`.
@@ -51,6 +53,20 @@ start year; a full page is treated as truncated and fails the scrape. ESPN has n
 `round` is `None` and `stage` is the competition name. Requests are throttled by
 `providers.espn.min_request_interval_seconds` (default 2 s). ESPN answers `403` to User-Agents
 containing an email address, so the adapter sends the contact address in the `From` header instead.
+
+`thesportsdb` reads TheSportsDB's documented v1 API
+(`https://www.thesportsdb.com/api/v1/json/<key>/...`) with one `eventsday.php?d=<date>&l=<league>`
+request per day, from `providers.thesportsdb.window_days_back` (default 7) days before today to
+`window_days_ahead` (default 14) days after. Status `FT`/`AET`/`PEN`/`AWD`/`WO` is `finished`;
+postponed, cancelled, abandoned, and suspended matches are `inactive`; live and not-started
+matches are `scheduled`. Requests are throttled by `providers.thesportsdb.min_request_interval_seconds`
+(default 3 s, within the free plan's 30 requests per minute). `discover_seasons` uses
+`search_all_seasons.php?id=<league>`. The free key `123` is the default; with it `eventsday.php`
+returns **at most 3 events per day** and `search_all_seasons.php` **at most 5 seasons**, so a busy
+matchday can miss matches. A paid key in `FOOTBALL_RESULTS_THESPORTSDB_API_KEY` removes these
+limits, and `config check` and the services warn about each `thesportsdb` fallback on the free key.
+The key is part of every request path, so it is never stored in a source URL, logged, or included
+in error messages.
 
 Statistic rules shared by providers: a card count is yellow plus red cards, so a second yellow
 counts as 2; an own goal belongs to the team whose score it raised; a goalless match has no first
@@ -118,6 +134,7 @@ endpoint against SSRF, so never accept arbitrary hosts or paths. Accepted today:
 | `90minut` | `http(s)://(www.)90minut.pl/liga/1/liga<ID>.html` |
 | `football-data` | `https://api.football-data.org/v4/competitions/<CODE>/matches?season=<start year>` (`<CODE>` is 2–10 uppercase letters or digits, e.g. `PL`, `BL1`, `CL`, `BSA`) |
 | `espn` | `https://site.api.espn.com/apis/site/v2/sports/soccer/<league>/scoreboard?season=<start year>` (`<league>` such as `eng.1`, `ger.1`, `uefa.champions`) |
+| `thesportsdb` | `https://www.thesportsdb.com/league/<id>?season=<YYYY-YYYY>` (key-free; `<id>` such as `4422` for Ekstraklasa, `4661` for I liga) |
 
 All football-data.org sources (or ESPN sources) of one competition must use the same `<CODE>` (or `<league>`); the configuration
 check and the historical fetch endpoint reject mixed codes.
@@ -128,8 +145,16 @@ A competition may name a `fallback_provider` with a `fallback_url` per season (A
 provider can be a fallback; nothing in the contract changes. The scheduler calls the same
 `scrape(competition, source)` with the fallback source after `fallback_after_failures` primary
 failures, and the season check calls the fallback's `discover_seasons` to fill missing fallback
-URLs. A fallback import only updates status, kickoff, and scores and adds missing matches. A
-provider that needs credentials should expose `available` (false without them, as
+URLs. A fallback import only updates status, kickoff, and scores and adds missing matches.
+
+A fallback refresh skips a match whose home or away team, after `team_aliases`, is not already a
+team of that season (ADR 0002 amendment). It logs a warning per skipped match and counts it in
+`scrape_run.matches_skipped`, which the admin endpoints and the CLI `scrape-runs` table show. Give
+every fallback team name that differs from the primary's a `team_aliases` entry, or its matches
+are skipped. A windowed fallback that returns no matches (for example in a winter break) is a
+success with no changes, and the next check is calculated from the season's stored matches.
+
+A provider that needs credentials should expose `available` (false without them, as
 `FootballDataScraper` does) so the scheduler skips it instead of failing.
 
 ## Adding a provider

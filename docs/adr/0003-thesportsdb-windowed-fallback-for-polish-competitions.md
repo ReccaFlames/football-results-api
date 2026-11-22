@@ -32,5 +32,14 @@ never deletes them.
   window, so the scheduler does not idle when the window ends before the next round.
 - Matches that finish outside the window during an outage stay unchanged until the primary
   recovers or a later window covers them.
-- TheSportsDB uses English team names (`Polonia Warsaw`); every team needs a `team_aliases` entry,
-  and matches with unmapped teams are skipped (ADR 0002).
+- With the free key, `eventsday.php` returns at most 3 events per day and `search_all_seasons.php`
+  at most 5 seasons. We accept these limits for the default: a busy matchday can miss matches, and
+  those matches stay unchanged until the primary recovers or a later window covers them. We add no
+  workarounds (other endpoints, extra requests, or undocumented access). `config check` and the
+  services warn about every `thesportsdb` fallback on the free key, without printing the key.
+- Operators who need complete matchdays should set a paid key in
+  `FOOTBALL_RESULTS_THESPORTSDB_API_KEY`, which removes both limits.
+- TheSportsDB uses English team names (`Polonia Warsaw`); every team whose name differs from
+  90minut's needs a `team_aliases` entry (an alias that maps a name to itself is rejected), and
+  matches with unmapped teams are skipped (ADR 0002). For 2026-27 only `Legia Warsaw` and
+  `Polonia Warsaw` differ.

@@ -16,7 +16,7 @@ league-data API**. This README describes both:
 | Capability | Current state | Target state |
 | --- | --- | --- |
 | Competitions | 4 declared in `config/competitions.yaml`: Ekstraklasa, I liga, Europa League, Premier League | Any league/cup, declared in a config file or through an admin API |
-| Data providers | `90minut` (HTML scraping), `football-data` (JSON API, any competition code), and `espn` (public scoreboard JSON, Premier League; Europa League fallback) behind a [documented provider contract](docs/PROVIDERS.md) | More sources and fallback providers |
+| Data providers | `90minut` (HTML scraping), `football-data` (JSON API, any competition code), `espn` (public scoreboard JSON, Premier League; Europa League fallback), and `thesportsdb` (documented JSON API, windowed fallback for Ekstraklasa and I liga) behind a [documented provider contract](docs/PROVIDERS.md) | More sources and fallback providers |
 | Adding a competition/season | Edit `config/competitions.yaml`; the scheduler applies changes | Edit configuration (no code), hot-reloaded |
 | Seasons | Split (`2026-2027`) or calendar-year (`2026`) per competition, with a configurable start month | Same |
 | Season rollover | Automatic: providers with discovery (football-data, espn) add new seasons; the scheduler switches `current_season` once the new season has started and the old one is finished. 90minut sources are added to YAML by hand | Same, with more discovering providers |
@@ -68,15 +68,15 @@ scheduler_heartbeat, and alembic_version.
 
 | Slug | Name | Provider | Seeded seasons | Current season |
 | --- | --- | --- | --- | --- |
-| `ekstraklasa` | PKO BP Ekstraklasa | 90minut | 2025-2026, 2026-2027 | 2026-2027 |
-| `pierwsza-liga` | Betclic I liga | 90minut | 2025-2026, 2026-2027 | 2026-2027 |
+| `ekstraklasa` | PKO BP Ekstraklasa | 90minut (fallback: thesportsdb) | 2025-2026, 2026-2027 | 2026-2027 |
+| `pierwsza-liga` | Betclic I liga | 90minut (fallback: thesportsdb) | 2025-2026, 2026-2027 | 2026-2027 |
 | `europa-league` | UEFA Europa League (cup) | 90minut (fallback: espn) | 2025-2026, 2026-2027 | 2026-2027 |
 | `premier-league` | Premier League | espn (fallback: football-data) | 2024-2025 – 2026-2027 | 2026-2027 |
 
 ### Known limitations
 
-- Source URLs are validated against the currently supported 90minut, football-data.org, and ESPN
-  endpoints.
+- Source URLs are validated against the currently supported 90minut, football-data.org, ESPN,
+  and TheSportsDB endpoints.
 - football-data.org sources must use `/v4/competitions/<CODE>/matches?season=<start year>`, and
   all sources of one competition must share the same `<CODE>`.
 - ESPN sources must use
@@ -84,8 +84,12 @@ scheduler_heartbeat, and alembic_version.
   ESPN publishes no matchweek, so ESPN matches have `round: null` unless a round was already stored
   for the same match by an earlier provider. The ESPN endpoint is public but undocumented and
   unofficial; it can change without notice, and its terms of use apply to how you use the data.
-- Season discovery is implemented for football-data.org and ESPN only; new 90minut seasons must be added to
-  the YAML by hand (rollover to them is then automatic).
+- TheSportsDB is a windowed source: it serves only as a fallback and fetches only the days around
+  today. With the free key `123` it returns at most 3 events per day and 5 seasons, so a busy
+  matchday can miss matches; see [Fallback sources](#fallback-sources).
+- Season discovery is implemented for football-data.org and ESPN only (TheSportsDB discovery only
+  fills missing fallback URLs); new 90minut seasons must be added to the YAML by hand (rollover to
+  them is then automatic).
 - 90minut source URLs must match `http(s)://(www.)90minut.pl/liga/1/ligaNNNNN.html`.
 - Standings use points (3/1/0), then goal difference, goals for, wins, and team name. Head-to-head
   records and point deductions are not applied, so leagues that rank on head-to-head first (such
@@ -205,7 +209,9 @@ A competition can name a `fallback_provider` and give seasons a `fallback_url` (
 [ADR 0002](docs/adr/0002-fallback-source-refreshes.md)). The Premier League uses ESPN as its
 primary source and football-data.org as its fallback; the Europa League uses 90minut.pl as its
 primary and ESPN as its fallback for 2026-2027, with `team_aliases` mapping ESPN's team names to
-90minut's. A **primary failure** is an error from the
+90minut's. Ekstraklasa and I liga use 90minut.pl as their primary and TheSportsDB as their
+fallback for 2026-2027 ([ADR 0003](docs/adr/0003-thesportsdb-windowed-fallback-for-polish-competitions.md)),
+with `team_aliases` for the TheSportsDB names that differ from 90minut's. A **primary failure** is an error from the
 primary source, or an empty result for a season that already has matches (an empty result never
 deletes stored matches). After `fallback_after_failures` primary failures in a row (default 3),
 each scheduled check tries the primary first and, if it fails again, refreshes from the fallback in
@@ -213,12 +219,27 @@ the same run. The primary is always tried first, so the first primary success sw
 
 A fallback refresh only updates fixture fields (status, kickoff, full-time and half-time scores) and
 adds missing matches. It never deletes matches and never overwrites provider match IDs, rounds, or
-statistics (cards, fouls, corners, first goal) stored from the primary. Fallbacks apply only to
+statistics (cards, fouls, corners, first goal) stored from the primary. It skips a match whose home
+or away team, after `team_aliases`, is not yet a team of the season (for example a newly promoted
+team without an alias): it logs a warning and counts the match in the import job's
+`matches_skipped`, so a missing alias never creates a duplicate team. Fallbacks apply only to
 scheduled refreshes of current seasons; queued refreshes and historical fetches use the primary.
 `freshness.source` shows the provider and URL of the last successful import, so it names the
 fallback while one is in use. Without `FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN` a football-data
 fallback is unavailable: `config check` and the services log a warning, and only the primary is
 used.
+
+TheSportsDB is a **windowed source**: it fetches one documented `eventsday.php` request per day
+from `window_days_back` (default 7) days before today to `window_days_ahead` (default 14) days
+after, so it can only be a fallback. An empty window (for example in the winter break) is a
+successful refresh with no changes, and the next check is calculated from the season's stored
+matches. It works without configuration on TheSportsDB's free key `123`, which returns **at most 3
+events per day** and **at most 5 seasons** for discovery. A busy matchday can therefore miss
+matches; those matches stay unchanged until the primary source recovers or a later window covers
+them. `config check` and the services warn about every TheSportsDB fallback that uses the free
+key. A paid key in `FOOTBALL_RESULTS_THESPORTSDB_API_KEY` removes these limits; the key is never
+logged or stored, and source URLs stay key-free
+(`https://www.thesportsdb.com/league/<id>?season=<YYYY-YYYY>`).
 
 Manual current-season refreshes are queued and use the same scheduling calculation when completed.
 Historical seasons are never scheduled automatically; they remain available through the queued
@@ -278,7 +299,7 @@ go through Alembic.
 | POST | `/api/v1/results/refresh` | `request_refresh` | Queue a current-season refresh (`202 Accepted`; requires `X-API-Key`) |
 | POST | `/api/v1/results/history/fetch` | `fetch_historical_season` | Queue a non-current-season fetch (`202 Accepted`; requires `X-API-Key`); cached results return immediately |
 | GET | `/api/v1/jobs/{job_id}` | `get_job` | Get queued, running, completed, or failed scrape-job status (`X-API-Key` required) |
-| GET | `/api/v1/admin/scrape-runs` | `list_scrape_runs` | Import jobs, newest first, with source URL, worker, and error; filters: `competition`, `season`, `status`; cursor pagination (`X-API-Key` required) |
+| GET | `/api/v1/admin/scrape-runs` | `list_scrape_runs` | Import jobs, newest first, with source URL, worker, error, and `matches_skipped` (fallback matches skipped for unknown teams); filters: `competition`, `season`, `status`; cursor pagination (`X-API-Key` required) |
 | GET | `/api/v1/admin/scheduler` | `get_scheduler_status` | Scheduler workers and heartbeats plus every scheduled season's next update, overdue time, staleness, and failure count (`X-API-Key` required) |
 
 Interactive documentation is available at `/docs`; the OpenAPI document is at `/openapi.json`.
@@ -821,8 +842,9 @@ about 200 MB of RAM. Terms such as *stale season* and *stalled scheduler* are de
     with IDs do not create new series), `football_results_build_info{version}`, and `process_*`
 - Admin endpoints (`X-API-Key`): `list_scrape_runs` and `get_scheduler_status`, also available as
   `football-results scrape-runs` and `football-results scheduler`. They are not MCP tools. Import
-  jobs include their `provider` and a `fallback` flag; a fallback refresh records the failed
-  primary run and the fallback run separately. Scheduler seasons include
+  jobs include their `provider`, a `fallback` flag, and `matches_skipped` (matches a fallback
+  refresh skipped because a team is not yet a team of the season; the `scrape-runs` table shows
+  it); a fallback refresh records the failed primary run and the fallback run separately. Scheduler seasons include
   `primary_consecutive_failures` and `fallback_active`.
 - `FOOTBALL_RESULTS_LOG_FORMAT=json` (the Compose default) writes one JSON object per line. Compose
   rotates container logs (`json-file`, 3 × 10 MB per container); read them with
@@ -971,6 +993,10 @@ must be a valid source of that provider (with one competition code):
         fallback_url: https://api.football-data.org/v4/competitions/PL/matches?season=2026
 ~~~
 
+TheSportsDB fallback URLs use the key-free form
+`https://www.thesportsdb.com/league/<league id>?season=<YYYY-YYYY>` (4422 is Ekstraklasa, 4661 is
+I liga). `thesportsdb` is windowed, so `config check` rejects it as a `provider`.
+
 #### Schedule settings
 
 `defaults.schedule` sets the scheduler thresholds for every competition. A competition may add a
@@ -1016,6 +1042,8 @@ Application variables:
 | FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN | empty | football-data.org token (needed only for football-data competitions) |
 | FOOTBALL_RESULTS_FOOTBALL_DATA_MIN_REQUEST_INTERVAL_SECONDS | `6` (from YAML) | Optional environment override for the football-data.org throttle (free tier: 10 req/min) |
 | FOOTBALL_RESULTS_ESPN_MIN_REQUEST_INTERVAL_SECONDS | `2` (from YAML) | Optional environment override for the minimum delay between ESPN requests |
+| FOOTBALL_RESULTS_THESPORTSDB_API_KEY | `123` (free key) | TheSportsDB API key. The free key returns at most 3 events per day and 5 seasons; a paid key removes these limits. Never logged or stored |
+| FOOTBALL_RESULTS_THESPORTSDB_MIN_REQUEST_INTERVAL_SECONDS | `3` (from YAML) | Optional environment override for the minimum delay between TheSportsDB requests (free plan: 30 req/min) |
 | FOOTBALL_RESULTS_NINETY_MINUT_MIN_REQUEST_INTERVAL_SECONDS | `2` (from YAML) | Optional environment override for the minimum delay between requests to each 90minut host; set to `0` to disable |
 | FOOTBALL_RESULTS_NINETY_MINUT_DETAIL_CACHE_MAX_ENTRIES | `512` | Maximum successful 90minut detail responses kept in the process-local LRU cache; set to `0` to disable |
 | FOOTBALL_RESULTS_RATE_LIMIT_ENABLED | `true` | Per-client API rate limiting; set to `false` to disable |

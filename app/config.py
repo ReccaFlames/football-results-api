@@ -450,16 +450,35 @@ class CompetitionFile(BaseModel):
             if competition.fallback_provider is not None
         }
 
-    def fallback_warnings(self, football_data_api_token: str | None) -> list[str]:
-        """Fallback sources that cannot be used with the current settings."""
-        if football_data_api_token and football_data_api_token.strip():
-            return []
-        return [
-            f"competition {slug!r} has fallback provider 'football-data', but "
-            "FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN is not set; its fallback source is unavailable"
-            for slug, provider in self.fallback_providers().items()
-            if provider == "football-data"
-        ]
+    def fallback_warnings(
+        self, football_data_api_token: str | None, thesportsdb_api_key: str | None
+    ) -> list[str]:
+        """Fallback sources that are unavailable or limited with the current settings.
+
+        The messages never contain the token or key values.
+        """
+        has_football_data_token = bool(football_data_api_token and football_data_api_token.strip())
+        free_thesportsdb_key = not thesportsdb_api_key or thesportsdb_api_key.strip() in (
+            "",
+            THESPORTSDB_FREE_API_KEY,
+        )
+        warnings: list[str] = []
+        for slug, provider in self.fallback_providers().items():
+            if provider == "football-data" and not has_football_data_token:
+                warnings.append(
+                    f"competition {slug!r} has fallback provider 'football-data', but "
+                    "FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN is not set; its fallback source "
+                    "is unavailable"
+                )
+            elif provider == "thesportsdb" and free_thesportsdb_key:
+                warnings.append(
+                    f"competition {slug!r} has fallback provider 'thesportsdb' with the free "
+                    "TheSportsDB API key, which returns at most 3 events per day and 5 seasons; "
+                    "a busy matchday can miss matches, and those matches stay unchanged until "
+                    "the primary source recovers or a later window covers them. Set "
+                    "FOOTBALL_RESULTS_THESPORTSDB_API_KEY to a paid key to remove these limits"
+                )
+        return warnings
 
     def auto_rollover_slugs(self) -> frozenset[str]:
         """Competitions whose configured ``current_season`` is a floor, not an exact value."""
@@ -531,7 +550,9 @@ def cli(argv: list[str] | None = None) -> int:
         config = load_config(args.config_file)
     except (TypeError, ValueError) as error:
         parser.error(str(error))
-    for warning in config.fallback_warnings(settings.football_data_api_token):
+    for warning in config.fallback_warnings(
+        settings.football_data_api_token, settings.thesportsdb_api_key.get_secret_value()
+    ):
         print(f"warning: {warning}", file=sys.stderr)
     print(f"Configuration valid: {args.config_file} ({len(config.competitions)} competitions)")
     return 0

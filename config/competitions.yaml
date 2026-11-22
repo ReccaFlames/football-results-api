@@ -39,24 +39,40 @@ competitions:
     country: Poland
     format: league
     provider: 90minut
+    # TheSportsDB fills in fixtures, status, kickoff times, and scores around today while 90minut
+    # fails. See docs/adr/0003-thesportsdb-windowed-fallback-for-polish-competitions.md.
+    fallback_provider: thesportsdb
     current_season: 2026-2027
     seasons:
       "2025-2026":
         source_url: http://www.90minut.pl/liga/1/liga14072.html
       "2026-2027":
         source_url: http://www.90minut.pl/liga/1/liga14675.html
+        fallback_url: https://www.thesportsdb.com/league/4422?season=2026-2027
+    # TheSportsDB team name -> the 90minut team name, for the 2026-27 teams. The other teams'
+    # names are equal and need no alias.
+    team_aliases:
+      Legia Warsaw: Legia Warszawa
 
   - slug: pierwsza-liga
     name: Betclic I liga
     country: Poland
     format: league
     provider: 90minut
+    # TheSportsDB fills in fixtures, status, kickoff times, and scores around today while 90minut
+    # fails. See docs/adr/0003-thesportsdb-windowed-fallback-for-polish-competitions.md.
+    fallback_provider: thesportsdb
     current_season: 2026-2027
     seasons:
       "2025-2026":
         source_url: http://www.90minut.pl/liga/1/liga14073.html
       "2026-2027":
         source_url: http://www.90minut.pl/liga/1/liga14676.html
+        fallback_url: https://www.thesportsdb.com/league/4661?season=2026-2027
+    # TheSportsDB team name -> the 90minut team name, for the 2026-27 teams. The other teams'
+    # names are equal and need no alias.
+    team_aliases:
+      Polonia Warsaw: Polonia Warszawa
 
   - slug: europa-league
     name: UEFA Europa League

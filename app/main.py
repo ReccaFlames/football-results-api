@@ -195,7 +195,9 @@ def _freshness_cache_control(freshness: list[Freshness]) -> dict[str, str]:
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     configure_logging(settings.log_format)
     config = load_config()
-    for warning in config.fallback_warnings(settings.football_data_api_token):
+    for warning in config.fallback_warnings(
+        settings.football_data_api_token, settings.thesportsdb_api_key.get_secret_value()
+    ):
         logger.warning(warning)
     await store.seed_competitions(config.to_competitions(), config.auto_rollover_slugs())
     async with mcp_endpoint.lifespan():

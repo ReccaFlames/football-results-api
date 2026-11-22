@@ -3,7 +3,10 @@ from pathlib import Path
 
 import pytest
 import yaml
+from pydantic import SecretStr
 
+from app import config as config_module
+from app.competitions import source_from_url
 from app.config import ConfigFileWatcher, cli, load_config
 from app.scheduling import SchedulePolicy
 
@@ -290,6 +293,46 @@ def test_config_rejects_invalid_fallback_sources(
 def test_fallback_without_an_api_token_is_only_a_warning() -> None:
     config = load_config(DEFAULT_CONFIG)
 
-    assert config.fallback_warnings("token") == []
-    [warning] = config.fallback_warnings(None)
+    assert config.fallback_warnings("token", "paid-key") == []
+    [warning] = config.fallback_warnings(None, "paid-key")
     assert "premier-league" in warning and "FOOTBALL_DATA_API_TOKEN" in warning
+
+
+def test_free_thesportsdb_key_warns_about_missed_matches() -> None:
+    config = load_config(DEFAULT_CONFIG)
+
+    warnings = config.fallback_warnings("token", "123")
+
+    assert [warning.split("'")[1] for warning in warnings] == ["ekstraklasa", "pierwsza-liga"]
+    for warning in warnings:
+        assert "busy matchday can miss matches" in warning
+        assert "until the primary source recovers or a later window covers them" in warning
+        assert "FOOTBALL_RESULTS_THESPORTSDB_API_KEY" in warning
+        assert "123" not in warning
+    assert config.fallback_warnings("token", "paid-secret-key") == []
+
+
+@pytest.mark.parametrize("key", ["123", "paid-secret-key"])
+def test_config_check_never_prints_the_thesportsdb_key(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], key: str
+) -> None:
+    monkeypatch.setattr(config_module.settings, "football_data_api_token", "token")
+    monkeypatch.setattr(config_module.settings, "thesportsdb_api_key", SecretStr(key))
+
+    assert cli(["check", "--config-file", str(DEFAULT_CONFIG)]) == 0
+
+    output = capsys.readouterr()
+    assert key not in output.out + output.err
+    assert ("busy matchday" in output.err) == (key == "123")
+
+
+@pytest.mark.parametrize(("slug", "league"), [("ekstraklasa", 4422), ("pierwsza-liga", 4661)])
+def test_shipped_polish_competitions_fall_back_to_thesportsdb(slug: str, league: int) -> None:
+    competition = load_config(DEFAULT_CONFIG).to_competitions()[slug]
+
+    fallback = competition.seasons["2026-2027"].fallback()
+
+    assert fallback is not None
+    assert fallback.provider == "thesportsdb"
+    assert fallback.source_url == f"https://www.thesportsdb.com/league/{league}?season=2026-2027"
+    assert source_from_url("2026-2027", fallback.source_url).provider == "thesportsdb"
