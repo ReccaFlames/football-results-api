@@ -1,6 +1,7 @@
 """HTTP access to the Football Results API: configuration, retries, and error mapping."""
 
 import math
+import sys
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -20,6 +21,8 @@ USER_AGENT = f"football-results-cli/{__version__}"
 MAX_RETRIES = 2
 MAX_RETRY_AFTER_SECONDS = 30.0
 RETRY_STATUSES = (429, 503)
+KEY_EXPIRES_HEADER = "API-Key-Expires"
+KEY_EXPIRY_WARNING_DAYS = 14
 
 
 @dataclass(frozen=True)
@@ -80,6 +83,7 @@ class ApiClient:
         self.config = config
         self.http = http
         self.sleep = sleep
+        self._expiry_warned = False
 
     def get(self, path: str, params: Mapping[str, Any] | None = None) -> ApiResponse:
         query = {key: value for key, value in (params or {}).items() if value is not None}
@@ -114,7 +118,18 @@ class ApiClient:
                 hint="Check that the API is running and FOOTBALL_RESULTS_URL / --url is right.",
             ) from error
 
+    def _warn_if_key_expires(self, response: httpx.Response) -> None:
+        """One stderr warning per run when the API key expires soon (ADR 0008)."""
+        value = response.headers.get(KEY_EXPIRES_HEADER)
+        if self._expiry_warned or not value:
+            return
+        message = key_expiry_warning(value, datetime.now(UTC))
+        if message:
+            self._expiry_warned = True
+            print(message, file=sys.stderr)
+
     def _result(self, response: httpx.Response) -> ApiResponse:
+        self._warn_if_key_expires(response)
         status = response.status_code
         if 300 <= status < 400:
             raise cli_problem(
@@ -168,3 +183,20 @@ def retry_delay(response: httpx.Response, now: datetime | None = None) -> float 
     if not math.isfinite(delay) or delay > MAX_RETRY_AFTER_SECONDS:
         return None
     return max(delay, 0.0)
+
+
+def key_expiry_warning(value: str, now: datetime) -> str | None:
+    """A warning when the `API-Key-Expires` time is within `KEY_EXPIRY_WARNING_DAYS`."""
+    try:
+        expires_at = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    remaining = expires_at - now
+    if remaining.days >= KEY_EXPIRY_WARNING_DAYS:
+        return None
+    return (
+        f"warning: your API key expires at {value} (in {max(remaining.days, 0)} days); ask the "
+        "operator to extend it"
+    )

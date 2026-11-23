@@ -176,10 +176,17 @@ def record_request(operation: str, method: str, status: int, seconds: float) -> 
 
 
 class _SnapshotCollector(Collector):
-    def __init__(self, snapshot: Snapshot, now: datetime, window: timedelta) -> None:
+    def __init__(
+        self,
+        snapshot: Snapshot,
+        now: datetime,
+        window: timedelta,
+        key_expiries: Sequence[tuple[str, datetime]],
+    ) -> None:
         self.snapshot = snapshot
         self.now = now
         self.window = window
+        self.key_expiries = key_expiries
 
     def collect(self) -> Iterator[Metric]:
         snapshot, now = self.snapshot, self.now
@@ -263,9 +270,24 @@ class _SnapshotCollector(Collector):
             runs.add_metric((item.competition, item.status), item.count)
         yield runs
 
+        expiry = GaugeMetricFamily(
+            f"{PREFIX}_api_key_expires_in_seconds",
+            "Seconds until a keys-file API key expires (negative once expired), by key name",
+            labels=("key",),
+        )
+        for name, expires_at in self.key_expiries:
+            expiry.add_metric((name,), (expires_at - self.now).total_seconds())
+        yield expiry
 
-def render_metrics(snapshot: Snapshot, now: datetime, window: timedelta) -> bytes:
-    """Prometheus text exposition of the database snapshot and this process's HTTP metrics."""
+
+def render_metrics(
+    snapshot: Snapshot,
+    now: datetime,
+    window: timedelta,
+    key_expiries: Sequence[tuple[str, datetime]] = (),
+) -> bytes:
+    """Prometheus text exposition of the database snapshot, API key expiry (by key name), and
+    this process's HTTP metrics."""
     registry = CollectorRegistry(auto_describe=False)
-    registry.register(_SnapshotCollector(snapshot, now, window))
+    registry.register(_SnapshotCollector(snapshot, now, window, key_expiries))
     return generate_latest(registry) + generate_latest(HTTP_REGISTRY)

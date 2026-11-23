@@ -531,3 +531,24 @@ def test_commands_cover_every_operation_with_its_parameter_names() -> None:
 def test_client_side_fields_match_the_api_models() -> None:
     assert cli.COMPETITION_FIELDS == tuple(CompetitionSummary.model_fields)
     assert cli.TEAM_FIELDS == tuple(Team.model_fields)
+
+
+def test_a_key_that_expires_soon_prints_one_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    soon = (datetime.now(UTC) + timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    later = (datetime.now(UTC) + timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    expires = iter([soon, soon, later])
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        page = {"data": [], "pagination": {"limit": 1, "next_cursor": "x"}, "freshness": []}
+        if request.url.params.get("cursor"):
+            page["pagination"]["next_cursor"] = None
+        return httpx.Response(200, json=page, headers={"API-Key-Expires": next(expires)})
+
+    mock_api(monkeypatch, respond)
+    env = {"FOOTBALL_RESULTS_API_KEY": "k"}
+    result = invoke("matches", "--all", env=env)
+    assert result.exit_code == 0, result.stderr
+    assert result.stderr.count("your API key expires") == 1
+    assert "warning" not in result.stdout
+
+    assert "expires" not in invoke("matches", env=env).stderr

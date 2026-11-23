@@ -155,14 +155,20 @@ With no admin key configured, the write endpoints are disabled and return `503`.
 
 For more than one caller, list named keys in a YAML keys file (ADR 0005) and point
 `FOOTBALL_RESULTS_API_KEYS_FILE` at it. The file stores only SHA-256 hashes; plain keys are
-rejected. Create a key and its entry with:
+rejected. Every key expires (ADR 0008). Manage the file with the `keys` commands:
 
 ~~~bash
-uv run python -m app.config hash-key --name partner-app            # role client (default)
-uv run python -m app.config hash-key --name ops --role admin
+uv run python -m app.config keys --file secrets/api-keys.yaml issue --name partner-app  # client, 30 days
+uv run python -m app.config keys --file secrets/api-keys.yaml issue --name ops --role admin --days 90
+uv run python -m app.config keys --file secrets/api-keys.yaml extend --name partner-app --days 60
+uv run python -m app.config keys --file secrets/api-keys.yaml revoke --name partner-app
+uv run python -m app.config keys --file secrets/api-keys.yaml list
 ~~~
 
-The key goes to stderr (hand it to the caller; it is stored nowhere), the entry to stdout:
+`issue` writes the entry and prints the new `frk_...` key once on stdout (hand it to the caller
+over a private channel; it is stored nowhere). `--file` defaults to
+`FOOTBALL_RESULTS_API_KEYS_FILE`. `hash-key --name <name> [--role admin] [--days N]` still prints
+a key and an entry to paste by hand. An entry:
 
 ~~~yaml
 keys:
@@ -170,10 +176,14 @@ keys:
     hash: sha256:3b5c...         # 64 hex digits
     role: client                 # client (reads) or admin (jobs, admin endpoints, /metrics)
     read_per_minute: 600         # optional; default FOOTBALL_RESULTS_RATE_LIMIT_READ_PER_MINUTE
+    issued_at: '2026-11-01T09:00:00Z'
+    expires_at: '2026-12-01T09:00:00Z'  # required; at most 365 days after issued_at
   - name: ops
     hash: sha256:9f2a...
     role: admin
     write_per_minute: 30         # optional, admin keys only
+    issued_at: '2026-11-01T09:00:00Z'
+    expires_at: '2027-02-01T09:00:00Z'
   - name: alice                  # OAuth on /mcp only: a token subject instead of a hash
     subject: f5195edd-3660-457a-934a-dd3dd7d0d802
     role: admin
@@ -184,12 +194,21 @@ keys:
 - Keys in `FOOTBALL_RESULTS_API_KEYS` stay valid: they are admin keys named `env` with the default
   quotas. Both sources can be combined; `503 writes-disabled` applies only when neither has an
   admin key.
-- The file is read at startup: restart the API after editing it. `python -m app.config check`
-  validates it too (`--api-keys-file`, default the setting) without printing any hash.
+- Expiry: `issue --days` defaults to 30; `extend` sets the expiry to `--days` from now but never
+  more than 365 days after `issued_at` (then issue a new key, for example `partner-app-2027`).
+  An expired key gets `401 unauthorized`. Keyed responses carry `API-Key-Expires` (UTC); the
+  CLI warns when it is within 14 days. An entry without `issued_at`/`expires_at` stops startup;
+  fix it with `keys extend --name <name>`.
+- The API reloads the file within a few seconds of a change, without a restart. An invalid file
+  is logged and ignored (the last valid keys stay in use). `python -m app.config check`
+  validates it too (`--api-keys-file`, default the setting) without printing any hash, and
+  `check` and `keys list` flag keys that expire within 14 days.
 - Quotas are per minute and kept in memory (see [rate limits](#errors-rate-limits-and-caching)).
 - An entry has either `hash` or `subject`, never both. A `subject` entry maps the `sub` claim of an
   OAuth access token on `/mcp` to a name, role, and quotas (see
-  [OAuth for the MCP server](#oauth-for-the-mcp-server)); subjects are unique and not secret.
+  [OAuth for the MCP server](#oauth-for-the-mcp-server)); subjects are unique and not secret,
+  and have no `issued_at`/`expires_at` (the token issuer controls expiry).
+- To require a key for reads too, run a [private instance](#private-instance).
 
 ### Run PostgreSQL in Docker and FastAPI locally
 
@@ -448,7 +467,7 @@ the API key when a valid `X-API-Key` is sent, otherwise the IP address. A named 
 file can carry its own `read_per_minute` (and, for admin keys, `write_per_minute`); `q` in
 `RateLimit-Policy` shows the caller's own quota, and exceeding it returns `429 rate-limited` as
 usual. Any valid key may be sent on reads; an unknown key counts against the IP address. `/health`, `/docs`,
-`/redoc`, `/openapi.json`, and `/metrics` are exempt. Responses carry the
+`/redoc`, `/openapi.json`, and `/metrics` (with a valid key) are exempt. Responses carry the
 [draft-ietf-httpapi-ratelimit-headers-11](https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/)
 fields; a `429` adds `Retry-After`:
 
@@ -465,7 +484,8 @@ its own quota. Behind a reverse proxy, set `FOOTBALL_RESULTS_TRUSTED_PROXIES` so
 return a weak `ETag` (a hash of the body) and `Cache-Control: public, max-age=N`. `N` is the time
 until the earliest `freshness.next_update_at`, capped at `FOOTBALL_RESULTS_CACHE_MAX_AGE_SECONDS`
 (60), or `no-cache` when an update is due. Send the ETag back in `If-None-Match` to get
-`304 Not Modified` without a body. Health, job status, admin, `/metrics`, and write responses use
+`304 Not Modified` without a body. On a [private instance](#private-instance) these reads send
+`Cache-Control: private, ...` instead of `public`. Health, job status, admin, `/metrics`, and write responses use
 `no-store`.
 
 ~~~bash
@@ -683,7 +703,7 @@ Use `./cli`, not `.`: `uvx --from .` would install the whole API with its depend
 | Variable | Option | Default | Purpose |
 | --- | --- | --- | --- |
 | `FOOTBALL_RESULTS_URL` | `--url` | `http://localhost:8000` | API base URL, optionally with a path prefix |
-| `FOOTBALL_RESULTS_API_KEY` | `--api-key` | none | Sent as `X-API-Key` on every request (it selects the key's quota); `refresh`, `fetch-season`, `status`, `scrape-runs`, and `scheduler` need an admin key |
+| `FOOTBALL_RESULTS_API_KEY` | `--api-key` | none | Sent as `X-API-Key` on every request (it selects the key's quota; a private instance needs it for every command); `refresh`, `fetch-season`, `status`, `scrape-runs`, and `scheduler` need an admin key. The CLI warns on stderr when the API's `API-Key-Expires` header is within 14 days |
 | `FOOTBALL_RESULTS_TIMEOUT` | `--timeout` | `30` | HTTP timeout in seconds |
 
 Global options go before the command (`football-results --url URL matches`). The API key is never
@@ -935,8 +955,8 @@ chmod 600 .env
 
 4. Set a long random POSTGRES_PASSWORD, a contact USER_AGENT, and the desired API_BIND_ADDRESS.
    For named API keys, create `secrets/api-keys.yaml` (git-ignored; mounted read-only at
-   `/app/secrets`), make it readable by the container user (UID 10001, for example `chmod 644`;
-   it holds only hashes), and set
+   `/app/secrets`; the `keys` commands create it with mode `0644`, readable by the container
+   user, UID 10001, since it holds only hashes), and set
    `FOOTBALL_RESULTS_API_KEYS_FILE=/app/secrets/api-keys.yaml`.
 5. Start the services:
 
@@ -955,6 +975,20 @@ proxy connects from as seen by the API container (for a proxy on the host, the D
 gateway, for example `172.16.0.0/12`), and make the proxy set `X-Forwarded-For`. Otherwise every
 client shares one rate-limit quota. Set `FOOTBALL_RESULTS_PUBLIC_BASE_URL` to the public HTTPS URL
 so that `/llms.txt` and `/agents` show the right base URL and `/mcp` accepts its host.
+
+### Private instance
+
+A private instance serves only invited people
+([ADR 0008](docs/adr/0008-private-instances-require-expiring-named-keys.md)); the guide is
+[docs/PRIVATE.md](docs/PRIVATE.md). Set `FOOTBALL_RESULTS_ANONYMOUS_ACCESS=false`, and then:
+
+- Every API operation except `get_health` needs a valid, unexpired key (`401 unauthorized` with
+  `WWW-Authenticate: ApiKey`), and so does `/mcp`. Agent docs, `/problems/*`, the skill,
+  `/openapi.json`, `/docs`, and OAuth metadata stay public, and the agent docs say a key is needed.
+- Every `401` counts against the IP read quota. Cacheable reads send `Cache-Control: private`.
+- The API and `config check` refuse to start with `FOOTBALL_RESULTS_API_KEYS`, without
+  `FOOTBALL_RESULTS_API_KEYS_FILE`, without an `https` `FOOTBALL_RESULTS_PUBLIC_BASE_URL`
+  (localhost excepted), or in demo mode.
 
 ### Public demo instance
 
@@ -995,7 +1029,7 @@ about 200 MB of RAM. Terms such as *stale season* and *stalled scheduler* are de
 
 **Signals**
 
-- `GET /metrics` (Prometheus text format, not in OpenAPI, not rate-limited) needs an admin key
+- `GET /metrics` (Prometheus text format, not in OpenAPI, not rate-limited with a valid key) needs an admin key
   (from `FOOTBALL_RESULTS_API_KEYS` or the keys file), sent as `Authorization: Bearer <key>` or
   `X-API-Key`; a `client` key gets `403 forbidden`. Without an admin key it returns
   `503 writes-disabled`. Scheduler and season values are read from
@@ -1013,6 +1047,8 @@ about 200 MB of RAM. Terms such as *stale season* and *stalled scheduler* are de
   - `football_results_keyed_requests_total{key, policy}` and
     `football_results_rate_limited_total{key, policy}`: rate-limited requests and `429`s per key
     name (`env` for `FOOTBALL_RESULTS_API_KEYS`, `anonymous` without a valid key) and policy
+  - `football_results_api_key_expires_in_seconds{key}`: time until each keys-file key expires
+    (negative once expired)
 - Admin endpoints (admin `X-API-Key`): `list_scrape_runs` and `get_scheduler_status`, also available as
   `football-results scrape-runs` and `football-results scheduler`. They are not MCP tools. Import
   jobs include their `provider`, a `fallback` flag, and `matches_skipped` (matches a fallback
@@ -1034,7 +1070,8 @@ stalled scheduler as `stale` for backward compatibility; the admin endpoint and 
 1. Create a Telegram bot with [@BotFather](https://t.me/BotFather) and note its token. Send the bot
    a message, then read your chat ID from
    `https://api.telegram.org/bot<token>/getUpdates` (`message.chat.id`).
-2. In `.env`, add a dedicated admin key to `FOOTBALL_RESULTS_API_KEYS` (or the keys file) and set
+2. In `.env`, add a dedicated admin key to `FOOTBALL_RESULTS_API_KEYS` (or the keys file; on a
+   [private instance](#private-instance) only the keys file, so rotate it yearly) and set
    the same value as `PROMETHEUS_API_KEY`. Set `GRAFANA_ADMIN_PASSWORD`, `TELEGRAM_BOT_TOKEN`, and
    `TELEGRAM_CHAT_ID`.
 3. Start the stack:
@@ -1060,6 +1097,7 @@ contact point that `compose.yaml` renders from `TELEGRAM_BOT_TOKEN` and `TELEGRA
 | Failing season | `football_results_season_consecutive_failures` is 3 or more (retries back off, so the season is not yet overdue) |
 | Season on fallback source | `football_results_season_fallback_active` is 1 for 24 hours (warning; the primary source keeps failing) |
 | API down | Prometheus cannot scrape `/metrics` for 2 minutes (API down or the Prometheus key rejected) |
+| API key expiring | `football_results_api_key_expires_in_seconds` is under 7 days for a key (keeps firing until the key is extended or revoked) |
 
 Without Telegram settings the stack still starts and alerts show in Grafana, but notifications fail.
 Prometheus keeps 15 days of data (`PROMETHEUS_RETENTION`). Provisioned rules and the dashboard are
@@ -1225,7 +1263,8 @@ Application variables:
 | FOOTBALL_RESULTS_SCHEDULER_CLAIM_LIMIT | `5` | Max queued jobs and due seasons claimed per cycle (each limit applies separately) |
 | FOOTBALL_RESULTS_SCHEDULER_WORKER_TIMEOUT_SECONDS | `300` | A scheduler worker without a heartbeat for this long is treated as dead: its `running` scrape jobs are marked `failed` so their seasons are claimed again |
 | FOOTBALL_RESULTS_API_KEYS | empty | Comma-separated admin API keys (named `env`); an admin key is required for write endpoints, job status, admin endpoints, and `/metrics` |
-| FOOTBALL_RESULTS_API_KEYS_FILE | empty | YAML file of named, hashed keys with roles and per-minute quotas; read at startup (see [Named API keys](#named-api-keys-roles-and-quotas)) |
+| FOOTBALL_RESULTS_API_KEYS_FILE | empty | YAML file of named, hashed, expiring keys with roles and per-minute quotas; reloaded on change (see [Named API keys](#named-api-keys-roles-and-quotas)) |
+| FOOTBALL_RESULTS_ANONYMOUS_ACCESS | `true` | `false` makes a [private instance](#private-instance): every API operation except `get_health`, and `/mcp`, need a key from the keys file |
 | FOOTBALL_RESULTS_DEMO_MODE | `false` | Public demo instance: startup and `config check` reject admin keys and providers that are not publicly redistributable; agent docs show a demo notice (see [Public demo instance](#public-demo-instance)) |
 | FOOTBALL_RESULTS_LOG_FORMAT | `text` | `text` or `json` (one JSON object per line on stderr, including uvicorn access logs); Docker Compose sets `json` |
 | FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN | empty | football-data.org token (needed only for football-data competitions) |

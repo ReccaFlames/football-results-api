@@ -36,12 +36,13 @@ PROBLEM_GUIDANCE: dict[str, tuple[str, str]] = {
     ),
     "unauthorized": (
         (
-            "The operation needs an API key, and `X-API-Key` is missing or wrong; or, on `/mcp`, "
-            "the OAuth access token is invalid or expired, or sign-in is required."
+            "The operation needs an API key, and `X-API-Key` is missing, wrong, or expired; or, "
+            "on `/mcp`, the OAuth access token is invalid or expired, or sign-in is required."
         ),
         (
-            "Send a key issued by the operator in the `X-API-Key` header. Read operations need no "
-            "key. On `/mcp`, sign in again through the MCP client (the `WWW-Authenticate` "
+            "Send a key issued by the operator in the `X-API-Key` header; ask the operator for a "
+            "new one if yours expired. Read operations need no key, except on a private "
+            "instance. On `/mcp`, sign in again through the MCP client (the `WWW-Authenticate` "
             "header's `resource_metadata` names the authorization server)."
         ),
     ),
@@ -479,8 +480,9 @@ class Task:
         query = "&".join(f"{name}={value}" for name, value in self.query)
         return f"{base_url}{self.operation.path}" + (f"?{query}" if query else "")
 
-    def curl(self, base_url: str) -> str:
-        return f'curl -s "{self.url(base_url)}"'
+    def curl(self, base_url: str, *, key_required: bool = False) -> str:
+        header = ' -H "X-API-Key: $FOOTBALL_RESULTS_API_KEY"' if key_required else ""
+        return f'curl -s{header} "{self.url(base_url)}"'
 
     def cli(self) -> str:
         """The same request as a `football-results` command (options are the parameter names)."""
@@ -575,6 +577,8 @@ class AgentGuide:
     oauth: OAuthInfo | None = None
     # Public read-only demo instance (ADR 0007): adds the demo notice.
     demo: bool = False
+    # Private instance (ADR 0008): every operation except the health check needs a key.
+    key_required: bool = False
 
     def url(self, path: str) -> str:
         return f"{self.base_url}{path}"
@@ -598,6 +602,7 @@ def build_guide(
     provider_competitions: Mapping[str, Sequence[str]] | None = None,
     oauth: OAuthInfo | None = None,
     demo: bool = False,
+    key_required: bool = False,
 ) -> AgentGuide:
     info = spec.get("info", {})
     description = info.get("description", "").strip()
@@ -619,6 +624,7 @@ def build_guide(
         attributions=data_attributions(provider_competitions or {}),
         oauth=oauth,
         demo=demo,
+        key_required=key_required,
     )
 
 
@@ -1052,6 +1058,19 @@ def _parameter_description(parameter: Parameter) -> str:
 
 def _auth_text(guide: AgentGuide) -> str:
     protected = [item.operation_id for item in guide.operations if item.requires_api_key]
+    if guide.key_required:
+        return (
+            "**Auth:** this is a private instance: every operation except `get_health` needs an "
+            "`X-API-Key` header with a key issued by the operator, and so does the MCP server. "
+            "Without a valid key a request returns `401` (`unauthorized`); ask the operator for "
+            "a key. Keys expire: each keyed response has an `API-Key-Expires` header (UTC), "
+            "and an expired key returns `401` like a wrong one, so ask the operator to extend "
+            "it in time. "
+            + ", ".join(f"`{item}`" for item in protected)
+            + " also need an admin key; a `client` key gets `403` (`forbidden`). Request "
+            "imports only when data is missing or stale: the scheduler refreshes current seasons "
+            "automatically." + _oauth_auth_text(guide)
+        )
     return (
         "**Auth:** other operations need no authentication. "
         + ", ".join(f"`{item}`" for item in protected)
@@ -1162,7 +1181,7 @@ def _tasks_intro(guide: AgentGuide) -> str:
 
 
 def _task_examples(guide: AgentGuide, task: Task) -> list[Block]:
-    blocks: list[Block] = [Code(task.curl(guide.base_url))]
+    blocks: list[Block] = [Code(task.curl(guide.base_url, key_required=guide.key_required))]
     if guide.has_tool("cli"):
         blocks.append(Code(task.cli()))
     return blocks
@@ -1311,7 +1330,12 @@ def _mcp_blocks(guide: AgentGuide) -> list[Block]:
             "Each MCP request counts once against the read rate limit (of the `X-API-Key` of the "
             "connection, if any, otherwise of the client IP); `request_refresh` also counts "
             "against the write limit and needs an admin key in that header (a `client` key gets "
-            "`forbidden`). Leave the header out for anonymous read-only use."
+            "`forbidden`). "
+            + (
+                "This private instance needs the header (or sign-in) on every MCP request."
+                if guide.key_required
+                else "Leave the header out for anonymous read-only use."
+            )
         ),
         *_mcp_oauth_blocks(guide),
         Code(

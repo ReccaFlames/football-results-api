@@ -23,9 +23,16 @@ from app.caching import (
     etag_for,
     if_none_match,
     max_age_seconds,
+    private_cache_control,
 )
 from app.competitions import competition_summary, provider_competition_code, source_from_url
-from app.config import check_demo_mode, load_config, parse_networks, settings
+from app.config import (
+    check_demo_mode,
+    check_private_instance,
+    load_config,
+    parse_networks,
+    settings,
+)
 from app.contract import (
     DEFAULT_LIMIT,
     ContractError,
@@ -92,10 +99,19 @@ SCHEDULER_WORKERS_SHOWN = 10
 store = PostgresResultRepository(session_factory)
 rate_limiter = FixedWindowRateLimiter()
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+METRICS_PATH = "/metrics"
 
 
-# Keys from FOOTBALL_RESULTS_API_KEYS_FILE, loaded at startup (ADR 0005).
+# Keys from FOOTBALL_RESULTS_API_KEYS_FILE (ADR 0005), reloaded when the file changes (ADR 0008).
 file_keys: tuple[access.FileKey, ...] = ()
+keys_watcher: access.KeysFileWatcher | None = None
+# Every operation except these needs a key on a private instance (ADR 0008).
+PUBLIC_OPERATIONS = frozenset({"get_health"})
+KEY_EXPIRES_HEADER = "API-Key-Expires"
+PRIVATE_HINT = (
+    "This is a private instance: send a key issued by the operator in the X-API-Key header. "
+    "Ask the operator for a key, or for a new one if yours expired."
+)
 ADMIN_KEY_HINT = (
     "The operator must configure an admin API key (FOOTBALL_RESULTS_API_KEYS or "
     "FOOTBALL_RESULTS_API_KEYS_FILE)."
@@ -106,18 +122,32 @@ DEMO_HINT = (
 )
 
 
+def _current_keys() -> tuple[access.FileKey, ...]:
+    global file_keys
+    if keys_watcher is not None:
+        file_keys = keys_watcher.poll(time.monotonic())
+    return file_keys
+
+
 def _identity(supplied: str | None) -> access.Identity | None:
-    return access.resolve(supplied or "", access.env_keys(settings.api_keys), file_keys)
+    return access.resolve(supplied or "", access.env_keys(settings.api_keys), _current_keys())
 
 
 def _subject_identity(subject: str) -> access.Identity:
-    return access.resolve_subject(subject, file_keys)
+    return access.resolve_subject(subject, _current_keys())
+
+
+def _metrics_credential(request: Request) -> str:
+    """`Authorization: Bearer` (Prometheus' native auth), else `X-API-Key`."""
+    scheme, _, credentials = request.headers.get("Authorization", "").partition(" ")
+    supplied = credentials.strip() if scheme.lower() == "bearer" else ""
+    return supplied or request.headers.get("X-API-Key", "")
 
 
 def _require_admin(
     identity: access.Identity | None, *, scheme: str, disabled: str, hint: str
 ) -> None:
-    if not access.has_admin_key(access.env_keys(settings.api_keys), file_keys):
+    if not access.has_admin_key(access.env_keys(settings.api_keys), _current_keys()):
         raise ProblemError(
             "writes-disabled", disabled, hint=DEMO_HINT if settings.demo_mode else ADMIN_KEY_HINT
         )
@@ -134,7 +164,7 @@ def _require_admin(
             f"The caller {identity.name!r} has role {identity.role}, which does not allow "
             "this operation",
             hint="Use an admin key, or leave this operation to the operator. Read operations "
-            "work with any key or none.",
+            "work with any key" + ("." if not settings.anonymous_access else " or none."),
         )
 
 
@@ -154,10 +184,8 @@ async def require_api_key(request: Request, api_key: str | None = Depends(api_ke
 
 def require_metrics_key(request: Request) -> None:
     """Like `require_api_key`, but also accepts `Authorization: Bearer` (Prometheus' native auth)."""
-    scheme, _, credentials = request.headers.get("Authorization", "").partition(" ")
-    supplied = credentials.strip() if scheme.lower() == "bearer" else ""
     _require_admin(
-        _identity(supplied or request.headers.get("X-API-Key", "")),
+        _identity(_metrics_credential(request)),
         scheme="Bearer",
         disabled="Metrics are disabled",
         hint="Send an admin API key as Authorization: Bearer <key> or in X-API-Key.",
@@ -217,8 +245,14 @@ def _freshness_cache_control(freshness: list[Freshness]) -> dict[str, str]:
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     configure_logging(settings.log_format)
     config = load_config()
-    global file_keys
-    file_keys = access.load_keys(settings.api_keys_file)
+    global file_keys, keys_watcher
+    check_private_instance()
+    if settings.api_keys_file is None:
+        keys_watcher, file_keys = None, ()
+    else:
+        watcher = access.KeysFileWatcher(settings.api_keys_file)
+        file_keys = watcher.load(time.monotonic())
+        keys_watcher = watcher
     # Before seeding, so a demo never stores competitions it may not serve.
     check_demo_mode(config, file_keys)
     for warning in config.fallback_warnings(
@@ -226,8 +260,11 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     ):
         logger.warning(warning)
     await store.seed_competitions(config.to_competitions(), config.auto_rollover_slugs())
-    async with mcp_endpoint.lifespan():
-        yield
+    try:
+        async with mcp_endpoint.lifespan():
+            yield
+    finally:
+        keys_watcher = None
 
 
 app = FastAPI(
@@ -247,12 +284,21 @@ app.router.routes.append(McpRoute(mcp_endpoint))
 _trusted_proxies = lru_cache(maxsize=8)(parse_networks)
 
 
-def _rate_limit_client(request: Request) -> Client:
-    """A keyed client for a valid `X-API-Key` or, on `/mcp`, OAuth subject (its own quotas),
-    otherwise the client IP."""
-    read, write = settings.rate_limit_read_per_minute, settings.rate_limit_write_per_minute
+def _request_identity(request: Request) -> access.Identity | None:
+    """The caller of an outer request: the `/mcp` caller (key or OAuth subject), the `/metrics`
+    credential, else `X-API-Key`."""
     auth = request.scope.get(AUTH_SCOPE_KEY)
-    identity = auth.identity if auth is not None else _identity(request.headers.get("X-API-Key"))
+    if auth is not None:
+        return auth.identity
+    if request.url.path == METRICS_PATH:
+        return _identity(_metrics_credential(request))
+    return _identity(request.headers.get("X-API-Key"))
+
+
+def _rate_limit_client(request: Request, identity: access.Identity | None) -> Client:
+    """A keyed client for a valid key or, on `/mcp`, OAuth subject (its own quotas), otherwise
+    the client IP."""
+    read, write = settings.rate_limit_read_per_minute, settings.rate_limit_write_per_minute
     if identity is not None:
         return Client(
             identity.bucket,
@@ -266,20 +312,27 @@ def _rate_limit_client(request: Request) -> Client:
     return Client("ip:" + address, access.ANONYMOUS, read, write)
 
 
-def _rate_limit_hit(request: Request) -> tuple[RateLimitPolicy, Client] | None:
+def _rate_limit_hit(
+    request: Request, identity: access.Identity | None
+) -> tuple[RateLimitPolicy, Client] | None:
     """The policy and client to count this request against, or None if it is not limited.
 
     A `/mcp` request counts once as a read. The tools' in-process API calls are not counted
-    again, except writes, which count against the write quota of the MCP caller.
+    again, except writes, which count against the write quota of the MCP caller. `/metrics`
+    is exempt only with a valid key, so failed attempts count against the client IP.
     """
-    if not settings.rate_limit_enabled or request.url.path in EXEMPT_PATHS:
+    if not settings.rate_limit_enabled:
+        return None
+    if request.url.path in EXEMPT_PATHS and not (
+        request.url.path == METRICS_PATH and identity is None
+    ):
         return None
     if INTERNAL_SCOPE_KEY in request.scope:
         outer: Client | None = request.scope[INTERNAL_SCOPE_KEY]
         if request.method in READ_METHODS or outer is None:
             return None
         return outer.policy(request.method), outer
-    client = _rate_limit_client(request)
+    client = _rate_limit_client(request, identity)
     if request.url.path == MCP_PATH:
         request.scope[CLIENT_SCOPE_KEY] = client
         return client.policy("GET"), client
@@ -291,9 +344,11 @@ async def rate_limit_and_cache(
     request: Request, call_next: Callable[[Request], Awaitable[Response]]
 ) -> Response:
     rate_headers: dict[str, str] = {}
-    if request.url.path == MCP_PATH and INTERNAL_SCOPE_KEY not in request.scope:
+    internal = INTERNAL_SCOPE_KEY in request.scope
+    if request.url.path == MCP_PATH and not internal:
         await mcp_endpoint.authenticate(request.scope)
-    if (hit := _rate_limit_hit(request)) is not None:
+    identity = None if internal else _request_identity(request)
+    if (hit := _rate_limit_hit(request, identity)) is not None:
         policy, client = hit
         decision = rate_limiter.hit(policy, client.bucket, time.monotonic())
         observability.record_quota_use(client.label, policy.name, decision.allowed)
@@ -308,9 +363,20 @@ async def rate_limit_and_cache(
                 headers={**rate_headers, "Retry-After": str(decision.reset_seconds)},
                 hint=f"Retry after {decision.reset_seconds} seconds.",
             )
+    # Counted above, so failed attempts use up the client IP's quota.
+    if identity is None and not internal and _needs_key(request):
+        return problem_response(
+            request,
+            "unauthorized",
+            "This instance requires an API key: X-API-Key is missing, wrong, or expired",
+            headers={**rate_headers, "WWW-Authenticate": "ApiKey"},
+            hint=PRIVATE_HINT,
+        )
 
     response = await call_next(request)
     response.headers.update(rate_headers)
+    if identity is not None and identity.expires_at is not None:
+        response.headers[KEY_EXPIRES_HEADER] = access.format_time(identity.expires_at)
     route = request.scope.get("route")
     operation_id = getattr(route, "operation_id", None)
     cacheable = (
@@ -328,10 +394,38 @@ async def rate_limit_and_cache(
     headers = {key: value for key, value in response.headers.items() if key != "content-length"}
     headers["ETag"] = etag
     headers.setdefault("cache-control", cache_control(settings.cache_max_age_seconds))
+    if operation_id in CACHEABLE_OPERATIONS and not settings.anonymous_access:
+        # Keyed data must not be stored by a shared cache that would skip the key check.
+        headers["cache-control"] = private_cache_control(headers["cache-control"])
     if if_none_match(request.headers.get("If-None-Match"), etag):
         headers.pop("content-type", None)
         return Response(status_code=304, headers=headers)
     return Response(content=body, status_code=200, headers=headers)
+
+
+def _route_for(request: Request) -> object | None:
+    route = request.scope.get("route")
+    if route is not None:
+        return route
+    return next(
+        (
+            candidate
+            for candidate in app.router.routes
+            if candidate.matches(request.scope)[0] == RouteMatch.FULL
+        ),
+        None,
+    )
+
+
+def _needs_key(request: Request) -> bool:
+    """On a private instance, every API operation except `PUBLIC_OPERATIONS` needs a key.
+
+    `/mcp` and `/metrics` check their own credentials; documentation pages stay public.
+    """
+    if settings.anonymous_access:
+        return False
+    operation_id = getattr(_route_for(request), "operation_id", None)
+    return operation_id is not None and operation_id not in PUBLIC_OPERATIONS
 
 
 METRIC_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"})
@@ -340,16 +434,7 @@ METRIC_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "D
 def _metric_operation(request: Request) -> str:
     """The operation ID, else the route template; requests rejected before routing are matched
     here so a `429` is counted against its operation."""
-    route = request.scope.get("route")
-    if route is None:
-        route = next(
-            (
-                candidate
-                for candidate in app.router.routes
-                if candidate.matches(request.scope)[0] == RouteMatch.FULL
-            ),
-            None,
-        )
+    route = _route_for(request)
     return getattr(route, "operation_id", None) or getattr(route, "path", None) or "unmatched"
 
 
@@ -1104,7 +1189,7 @@ async def get_scheduler_status() -> SchedulerStatus:
     )
 
 
-@app.get("/metrics", include_in_schema=False, dependencies=[Depends(require_metrics_key)])
+@app.get(METRICS_PATH, include_in_schema=False, dependencies=[Depends(require_metrics_key)])
 async def metrics() -> Response:
     snapshot = observability.Snapshot(
         latest_heartbeat_at=await store.latest_scheduler_heartbeat(),
@@ -1112,7 +1197,10 @@ async def metrics() -> Response:
         run_counts=await store.scrape_run_counts(),
     )
     body = observability.render_metrics(
-        snapshot, datetime.now(UTC), observability.stall_window(settings.scheduler_loop_seconds)
+        snapshot,
+        datetime.now(UTC),
+        observability.stall_window(settings.scheduler_loop_seconds),
+        [(item.name, item.expires_at) for item in _current_keys() if item.expires_at is not None],
     )
     return Response(body, media_type=CONTENT_TYPE_LATEST, headers={"Cache-Control": "no-store"})
 
@@ -1200,6 +1288,7 @@ async def _agent_guide(
         provider_competitions=_configured_provider_competitions(),
         oauth=_oauth_info(),
         demo=settings.demo_mode,
+        key_required=not settings.anonymous_access,
     )
     return guide, base_url, request_derived
 
@@ -1212,7 +1301,7 @@ def _oauth_info() -> agent_docs.OAuthInfo | None:
         config.issuer,
         config.audience,
         config.metadata_url,
-        config.mode == "required",
+        config.mode == "required" or not settings.anonymous_access,
         config.scopes,
     )
 

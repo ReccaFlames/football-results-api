@@ -184,8 +184,27 @@ def cached_read(path: str) -> dict[int | str, dict[str, Any]]:
             "description": "Not Modified: the `If-None-Match` ETag is current (empty body)",
             "headers": CACHE_HEADERS | RATE_LIMIT_HEADERS,
         },
+        401: private_unauthorized(path),
         429: rate_limited(path, "read"),
     }
+
+
+def private_unauthorized(path: str) -> dict[str, Any]:
+    """`401` of a read operation, returned only by a private instance (ADR 0008)."""
+    return error(
+        "Only on a private instance: `X-API-Key` is missing, wrong, or expired",
+        headers={"WWW-Authenticate": _header("Authentication scheme", "ApiKey")},
+        unauthorized=example(
+            "Private instance",
+            "unauthorized",
+            "This instance requires an API key: X-API-Key is missing, wrong, or expired",
+            path,
+            hint=(
+                "This is a private instance: send a key issued by the operator in the X-API-Key "
+                "header. Ask the operator for a key, or for a new one if yours expired."
+            ),
+        ),
+    )
 
 
 def rate_limited(path: str, policy: str) -> dict[str, Any]:

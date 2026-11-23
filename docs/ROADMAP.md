@@ -311,7 +311,7 @@ How to use this list:
       - [x] Docs (README supported competitions, statistics coverage, configuration;
             `PROVIDERS.md` capability and URL tables; ADR 0004); version 0.20.0
             (`pyproject.toml`, `cli/pyproject.toml`, `server.json`, `uv lock`)
-- [ ] **18. Optional hosted access**
+- [x] **18. Optional hosted access**
       ([research](research/2026-11-hosted-access.md); everything stays optional and free to
       self-host)
   - [x] 18a. Named API keys, roles, and per-key quotas
@@ -389,33 +389,33 @@ How to use this list:
     - [x] Tests: demo-mode validation, notice rendering
     - [x] Docs (README, ADR 0007, glossary); version 0.23.0 (`pyproject.toml`,
           `cli/pyproject.toml`, `server.json`, `uv lock`)
-  - [ ] 18d. Private instance with expiring named keys
+  - [x] 18d. Private instance with expiring named keys
         ([ADR 0008](adr/0008-private-instances-require-expiring-named-keys.md))
-    - [ ] `FOOTBALL_RESULTS_ANONYMOUS_ACCESS` (default `true`). When `false`, every data
+    - [x] `FOOTBALL_RESULTS_ANONYMOUS_ACCESS` (default `true`). When `false`, every data
           operation, `/mcp` (as OAuth `required`), and `/metrics` need a valid key or token.
           `/health`, agent docs, `/problems/*`, `/skills/...`, `/openapi.json`, `/docs`, and OAuth
           metadata stay public.
-    - [ ] Private-instance startup and `config check`: reject `FOOTBALL_RESULTS_API_KEYS` and a
+    - [x] Private-instance startup and `config check`: reject `FOOTBALL_RESULTS_API_KEYS` and a
           non-`https` `FOOTBALL_RESULTS_PUBLIC_BASE_URL` (localhost excepted)
-    - [ ] Keys file: required `issued_at` and `expires_at` on `hash` entries (not on `subject`);
+    - [x] Keys file: required `issued_at` and `expires_at` on `hash` entries (not on `subject`);
           `expires_at` at most 365 days after `issued_at`; expired keys get `unauthorized`;
           entries without expiry stop startup with the fix in the message
-    - [ ] Reload the keys file on change (mtime check every few seconds); keep the last valid keys
+    - [x] Reload the keys file on change (mtime check every few seconds); keep the last valid keys
           and log an error for an invalid file; log key names added, removed, or changed
-    - [ ] `python -m app.config keys issue|extend|revoke|list`: `issue --name --role --days`
+    - [x] `python -m app.config keys issue|extend|revoke|list`: `issue --name --role --days`
           (default 30) writes the entry and prints a `frk_` key once; `extend` refuses beyond the
           cap; `list` and `config check` flag keys expiring within 14 days. `hash-key` stays.
-    - [ ] Every `401` counts against the caller's IP read quota
-    - [ ] `Cache-Control: private` on cacheable reads when anonymous access is off (`ETag`/`304`
+    - [x] Every `401` counts against the caller's IP read quota
+    - [x] `Cache-Control: private` on cacheable reads when anonymous access is off (`ETag`/`304`
           kept)
-    - [ ] Expiry signals: metric `football_results_api_key_expires_in_seconds{key}`, a Grafana
+    - [x] Expiry signals: metric `football_results_api_key_expires_in_seconds{key}`, a Grafana
           alert 7 days before expiry, and an expiry response header for keyed clients (also in the
           CLI's stderr notes)
-    - [ ] Agent docs say a key is required and how to ask the operator when anonymous access is
+    - [x] Agent docs say a key is required and how to ask the operator when anonymous access is
           off
-    - [ ] `docs/PRIVATE.md`: one worker, Caddy HTTPS, no CDN cache rule, keys file permissions,
+    - [x] `docs/PRIVATE.md`: one worker, Caddy HTTPS, no CDN cache rule, keys file permissions,
           issuing and sending keys, rotation (`alice-2027`), revocation, provider permissions
-    - [ ] Tests: access switch, public pages, expiry and cap, reload, `keys` commands, `private`
+    - [x] Tests: access switch, public pages, expiry and cap, reload, `keys` commands, `private`
           caching, `401` counting
-    - [ ] Docs (README, ADR 0008, glossary, AGENTS.md); version 0.24.0 (`pyproject.toml`,
+    - [x] Docs (README, ADR 0008, glossary, AGENTS.md); version 0.24.0 (`pyproject.toml`,
           `cli/pyproject.toml`, `server.json`, `uv lock`)

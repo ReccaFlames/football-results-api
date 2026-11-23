@@ -211,3 +211,44 @@ groups:
             type: lt
             params:
             - 1
+  - uid: football-results-api-key-expiring
+    title: API key expiring
+    condition: C
+    for: 1m
+    noDataState: OK
+    execErrState: Alerting
+    labels:
+      service: football-results
+    annotations:
+      summary: 'API key {{ $labels.key }} expires within 7 days (or has expired); extend it with
+        `python -m app.config keys extend --name {{ $labels.key }}` or issue a new key.'
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: football-results-prometheus
+      model:
+        refId: A
+        expr: football_results_api_key_expires_in_seconds
+        instant: true
+        intervalMs: 30000
+        maxDataPoints: 43200
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: reduce
+        expression: A
+        reducer: last
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: lt
+            params:
+            - 604800

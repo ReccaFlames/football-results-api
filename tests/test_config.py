@@ -1,15 +1,22 @@
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 import yaml
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 from app import access
 from app import config as config_module
 from app.competitions import source_from_url
 from app.config import ConfigFileWatcher, cli, load_config
 from app.scheduling import SchedulePolicy
+
+NOW = datetime.now(UTC).replace(microsecond=0)
+EXPIRY = (
+    f"issued_at: '{access.format_time(NOW - timedelta(days=1))}', "
+    f"expires_at: '{access.format_time(NOW + timedelta(days=29))}'"
+)
+
 
 DEFAULT_CONFIG = Path(__file__).parents[1] / "config/competitions.yaml"
 
@@ -346,8 +353,8 @@ def test_api_keys_file_is_validated_by_check(
     keys = tmp_path / "keys.yaml"
     keys.write_text(
         "keys:\n"
-        f"  - {{name: ops, hash: '{access.hash_key('a')}', role: admin}}\n"
-        f"  - {{name: partner-app, hash: '{access.hash_key('b')}', read_per_minute: 600}}\n"
+        f"  - {{name: ops, hash: '{access.hash_key('a')}', {EXPIRY}, role: admin}}\n"
+        f"  - {{name: partner-app, hash: '{access.hash_key('b')}', {EXPIRY}, read_per_minute: 600}}\n"
         "  - {name: operator, subject: 3f6c-user, role: admin}\n"
     )
     args = ["check", "--config-file", str(DEFAULT_CONFIG), "--api-keys-file", str(keys)]
@@ -384,8 +391,8 @@ def test_duplicate_api_key_names_are_rejected(tmp_path: Path) -> None:
     keys = tmp_path / "keys.yaml"
     keys.write_text(
         "keys:\n"
-        f"  - {{name: app, hash: '{access.hash_key('a')}'}}\n"
-        f"  - {{name: app, hash: '{access.hash_key('b')}'}}\n"
+        f"  - {{name: app, hash: '{access.hash_key('a')}', {EXPIRY}}}\n"
+        f"  - {{name: app, hash: '{access.hash_key('b')}', {EXPIRY}}}\n"
     )
     with pytest.raises(ValueError, match="duplicate key names: app"):
         access.load_keys(keys)
@@ -396,7 +403,11 @@ def test_hash_key_prints_a_new_key_and_its_entry(capsys: pytest.CaptureFixture[s
     output = capsys.readouterr()
     key = output.err.split("it is not stored): ", 1)[1].split("\n", 1)[0]
     assert len(key) >= 43
+    assert key.startswith(access.KEY_PREFIX)
     entry = yaml.safe_load("keys:\n" + output.out)["keys"][0]
+    issued = access.as_utc(datetime.fromisoformat(str(entry.pop("issued_at"))))
+    expires = access.as_utc(datetime.fromisoformat(str(entry.pop("expires_at"))))
+    assert expires - issued == timedelta(days=access.DEFAULT_KEY_DAYS)
     assert entry == {"name": "ops", "hash": access.hash_key(key), "role": "admin"}
     assert key not in output.out
 
@@ -407,7 +418,7 @@ def test_hash_key_prints_a_new_key_and_its_entry(capsys: pytest.CaptureFixture[s
 def test_keys_resolve_by_hash_and_environment_keys_are_admin(tmp_path: Path) -> None:
     keys = tmp_path / "keys.yaml"
     keys.write_text(
-        f"keys:\n  - {{name: partner-app, hash: '{access.hash_key('k1')}', read_per_minute: 5}}\n"
+        f"keys:\n  - {{name: partner-app, hash: '{access.hash_key('k1')}', {EXPIRY}, read_per_minute: 5}}\n"
     )
     file_keys = access.load_keys(keys)
     partner = access.resolve("k1", ("env-key",), file_keys)
@@ -442,7 +453,9 @@ def test_demo_mode_accepts_the_demo_competitions_file(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     keys = tmp_path / "keys.yaml"
-    keys.write_text(f"keys:\n  - {{name: partner, hash: '{access.hash_key('client')}'}}\n")
+    keys.write_text(
+        f"keys:\n  - {{name: partner, hash: '{access.hash_key('client')}', {EXPIRY}}}\n"
+    )
 
     assert cli(["check", "--config-file", str(DEMO_CONFIG), "--api-keys-file", str(keys)]) == 0
     output = capsys.readouterr().out
@@ -494,8 +507,8 @@ def test_demo_mode_rejects_admin_keys_without_printing_them(
     admin_hash = access.hash_key("admin-secret-key")
     keys.write_text(
         "keys:\n"
-        f"  - {{name: partner, hash: '{access.hash_key('client')}'}}\n"
-        f"  - {{name: ops, hash: '{admin_hash}', role: admin}}\n"
+        f"  - {{name: partner, hash: '{access.hash_key('client')}', {EXPIRY}}}\n"
+        f"  - {{name: ops, hash: '{admin_hash}', {EXPIRY}, role: admin}}\n"
         "  - {name: sso-admin, subject: user-123, role: admin}\n"
     )
 
@@ -523,3 +536,150 @@ def test_demo_compose_override_runs_the_demo_without_admin_keys() -> None:
     api = compose["services"]["api"]["environment"]
     assert api["FOOTBALL_RESULTS_RATE_LIMIT_READ_PER_MINUTE"] == "${DEMO_READ_PER_MINUTE:-30}"
     assert (DEMO_COMPOSE.parent / "config/demo-competitions.yaml").is_file()
+
+
+@pytest.mark.parametrize(
+    ("dates", "message"),
+    [
+        ("", "set issued_at and expires_at"),
+        ("issued_at: '2026-01-01T00:00:00Z', expires_at: '2026-01-01T00:00:00Z'", "later than"),
+        ("issued_at: '2026-01-01T00:00:00Z', expires_at: '2027-01-02T00:00:00Z'", "365 days"),
+    ],
+)
+def test_key_entries_need_an_expiry_within_a_year(dates: str, message: str) -> None:
+    entry = f"{{name: app, hash: '{access.hash_key('k')}'{', ' + dates if dates else ''}}}"
+    with pytest.raises(ValidationError, match=message):
+        access.KeysFile.model_validate(yaml.safe_load(f"keys:\n  - {entry}\n"))
+
+
+def test_oauth_subject_entries_have_no_expiry() -> None:
+    entry = f"{{name: sso, subject: user-1, {EXPIRY}}}"
+    with pytest.raises(ValidationError, match="apply only to key hashes"):
+        access.KeysFile.model_validate(yaml.safe_load(f"keys:\n  - {entry}\n"))
+
+
+def test_expired_keys_do_not_resolve() -> None:
+    keys = access.file_keys_from(
+        access.KeysFile.model_validate(
+            yaml.safe_load(f"keys:\n  - {{name: app, hash: '{access.hash_key('k')}', {EXPIRY}}}\n")
+        )
+    )
+    assert access.resolve("k", (), keys, now=NOW).name == "app"
+    assert access.resolve("k", (), keys, now=NOW + timedelta(days=29)) is None
+
+
+def test_keys_commands_issue_extend_list_and_revoke(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    keys = tmp_path / "keys.yaml"
+    assert cli(["keys", "--file", str(keys), "issue", "--name", "alice"]) == 0
+    output = capsys.readouterr()
+    key = output.out.strip()
+    assert key.startswith(access.KEY_PREFIX)
+    assert "alice" in output.err and key not in output.err
+    assert keys.stat().st_mode & 0o777 == 0o644  # hashes only; the container user reads it
+    (entry,) = access.load_keys(keys)
+    assert access.resolve(key, (), (entry,)).name == "alice"
+    assert entry.expires_at - entry.issued_at == timedelta(days=access.DEFAULT_KEY_DAYS)
+
+    with pytest.raises(SystemExit):
+        cli(["keys", "--file", str(keys), "issue", "--name", "alice"])
+    assert "exists" in capsys.readouterr().err
+
+    assert cli(["keys", "--file", str(keys), "extend", "--name", "alice", "--days", "200"]) == 0
+    (extended,) = access.load_keys(keys)
+    assert extended.digest == entry.digest and extended.issued_at == entry.issued_at
+    assert extended.expires_at - extended.issued_at >= timedelta(days=200)
+    capsys.readouterr()
+    with pytest.raises(SystemExit):
+        cli(["keys", "--file", str(keys), "extend", "--name", "alice", "--days", "366"])
+    assert "between 1 and 365" in capsys.readouterr().err
+
+    assert cli(["keys", "--file", str(keys), "list"]) == 0
+    listing = capsys.readouterr().out.splitlines()
+    assert listing[0].split() == ["NAME", "ROLE", "KIND", "ISSUED", "EXPIRES", "STATUS"]
+    assert listing[1].split()[:3] == ["alice", "client", "key"]
+    assert listing[1].split()[-1] == "ok"
+
+    assert cli(["keys", "--file", str(keys), "revoke", "--name", "alice"]) == 0
+    assert access.load_keys(keys) == ()
+
+
+def test_extend_refuses_more_than_a_year_after_issue_and_fixes_legacy_entries(
+    tmp_path: Path,
+) -> None:
+    keys = tmp_path / "keys.yaml"
+    issued = NOW - timedelta(days=300)
+    keys.write_text(
+        "# Partner keys\n"
+        "keys:\n"
+        f"  - {{name: old, hash: '{access.hash_key('a')}', "
+        f"issued_at: '{access.format_time(issued)}', "
+        f"expires_at: '{access.format_time(issued + timedelta(days=30))}'}}\n"
+        f"  - {{name: legacy, hash: '{access.hash_key('b')}'}}\n"
+    )
+    with pytest.raises(ValueError, match="set issued_at and expires_at"):
+        access.load_keys(keys)
+    with pytest.raises(access.KeyCommandError, match="rotation"):
+        access.extend_key(keys, "old", 90, NOW)
+    access.extend_key(keys, "old", 65, NOW)
+
+    legacy = access.extend_key(keys, "legacy", 30, NOW)
+    assert legacy.issued_at == NOW and legacy.expires_at == NOW + timedelta(days=30)
+    assert keys.read_text().startswith("# Partner keys\n")
+    assert [key.name for key in access.load_keys(keys)] == ["old", "legacy"]
+
+
+def test_keys_file_watcher_reloads_changes_and_keeps_keys_on_errors(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    keys = tmp_path / "keys.yaml"
+    access.issue_key(keys, "alice", "client", 30, NOW)
+    watcher = access.KeysFileWatcher(keys, interval=5)
+    assert [key.name for key in watcher.load(0)] == ["alice"]
+
+    access.issue_key(keys, "bob", "client", 30, NOW)
+    assert [key.name for key in watcher.poll(1)] == ["alice"]
+    with caplog.at_level("INFO"):
+        assert [key.name for key in watcher.poll(6)] == ["alice", "bob"]
+    assert "bob" in caplog.text
+
+    keys.write_text("keys: [oops")
+    assert [key.name for key in watcher.poll(12)] == ["alice", "bob"]
+    assert "previous keys stay in use" in caplog.text
+
+
+def private_settings(**overrides: object) -> config_module.Settings:
+    values = {
+        "anonymous_access": False,
+        "api_keys": "",
+        "api_keys_file": Path("keys.yaml"),
+        "public_base_url": "https://football.example.com",
+        "demo_mode": False,
+    }
+    return config_module.Settings(**(values | overrides))
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"api_keys": "env-key"}, "FOOTBALL_RESULTS_API_KEYS is set"),
+        ({"api_keys_file": None}, "FOOTBALL_RESULTS_API_KEYS_FILE is not set"),
+        ({"public_base_url": None}, "PUBLIC_BASE_URL is not set"),
+        ({"public_base_url": "http://football.example.com"}, "is not https"),
+        ({"demo_mode": True}, "DEMO_MODE is on"),
+    ],
+)
+def test_private_instances_need_file_keys_and_https(
+    overrides: dict[str, object], message: str
+) -> None:
+    assert config_module.private_instance_errors(private_settings()) == []
+    assert (
+        config_module.private_instance_errors(
+            private_settings(public_base_url="http://localhost:8000")
+        )
+        == []
+    )
+    errors = config_module.private_instance_errors(private_settings(**overrides))
+    assert len(errors) == 1 and message in errors[0]
+    assert "env-key" not in errors[0]

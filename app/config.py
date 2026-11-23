@@ -2,7 +2,7 @@ import argparse
 import hashlib
 import sys
 from collections.abc import Sequence
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
 from ipaddress import IPv4Network, IPv6Network, ip_network
 from pathlib import Path
@@ -91,6 +91,8 @@ class Settings(BaseSettings):
     log_format: Literal["text", "json"] = "text"
     # Public read-only demo instance (ADR 0007): no admin keys, redistributable providers only.
     demo_mode: bool = False
+    # False makes a private instance (ADR 0008): every data operation needs a key.
+    anonymous_access: bool = True
 
     @field_validator("oauth_issuer", "oauth_jwks_url")
     @classmethod
@@ -622,6 +624,48 @@ def check_demo_mode(config: CompetitionFile, file_keys: Sequence[access.FileKey]
         )
 
 
+LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def private_instance_errors(current: Settings) -> list[str]:
+    """Why these settings cannot run as a private instance (ADR 0008); empty when they can."""
+    if current.anonymous_access:
+        return []
+    errors: list[str] = []
+    if current.demo_mode:
+        errors.append("FOOTBALL_RESULTS_DEMO_MODE is on; a demo instance is public by design")
+    if access.env_keys(current.api_keys):
+        errors.append(
+            "FOOTBALL_RESULTS_API_KEYS is set; a private instance accepts only hashed keys from "
+            "FOOTBALL_RESULTS_API_KEYS_FILE (`python -m app.config keys issue`)"
+        )
+    if current.api_keys_file is None:
+        errors.append(
+            "FOOTBALL_RESULTS_API_KEYS_FILE is not set; without it no caller can get a key"
+        )
+    base_url = current.public_base_url
+    if base_url is None:
+        errors.append("FOOTBALL_RESULTS_PUBLIC_BASE_URL is not set; set it to the https URL")
+    else:
+        parts = urlsplit(base_url)
+        if parts.scheme != "https" and parts.hostname not in LOCAL_HOSTS:
+            errors.append(
+                f"FOOTBALL_RESULTS_PUBLIC_BASE_URL {base_url} is not https; keys must not travel "
+                "in plain text"
+            )
+    return errors
+
+
+def check_private_instance() -> None:
+    """Raise when ``FOOTBALL_RESULTS_ANONYMOUS_ACCESS`` is off and the setup breaks ADR 0008."""
+    errors = private_instance_errors(settings)
+    if errors:
+        raise ValueError(
+            "FOOTBALL_RESULTS_ANONYMOUS_ACCESS is off (private instance), but:\n"
+            + "\n".join(f"  - {item}" for item in errors)
+        )
+
+
 class ConfigFileWatcher:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -655,7 +699,7 @@ class ConfigFileWatcher:
 
 def cli(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Validate the football competition config, or create an API key."
+        description="Validate the football competition config, or manage API keys."
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     check_parser = subparsers.add_parser(
@@ -668,9 +712,13 @@ def cli(argv: list[str] | None = None) -> int:
     )
     hash_parser.add_argument("--name", required=True, help="key name ([a-z0-9-])")
     hash_parser.add_argument("--role", choices=access.ROLES, default="client")
+    hash_parser.add_argument("--days", type=int, default=access.DEFAULT_KEY_DAYS)
+    _add_keys_parser(subparsers)
     args = parser.parse_args(argv)
     if args.command == "hash-key":
-        return _hash_key(parser, args.name, args.role)
+        return _hash_key(parser, args.name, args.role, args.days)
+    if args.command == "keys":
+        return _keys_command(parser, args)
     try:
         config = load_config(args.config_file)
     except (TypeError, ValueError) as error:
@@ -683,11 +731,16 @@ def cli(argv: list[str] | None = None) -> int:
             parser.error(str(error))
     try:
         check_demo_mode(config, keys)
+        check_private_instance()
     except ValueError as error:
         parser.error(str(error))
-    for warning in config.fallback_warnings(
-        settings.football_data_api_token, settings.thesportsdb_api_key.get_secret_value()
-    ):
+    warnings = [
+        *config.fallback_warnings(
+            settings.football_data_api_token, settings.thesportsdb_api_key.get_secret_value()
+        ),
+        *access.expiry_warnings(keys, datetime.now(UTC)),
+    ]
+    for warning in warnings:
         print(f"warning: {warning}", file=sys.stderr)
     print(f"Configuration valid: {args.config_file} ({len(config.competitions)} competitions)")
     if args.api_keys_file is not None:
@@ -707,12 +760,16 @@ def cli(argv: list[str] | None = None) -> int:
             "Demo mode: read-only (no admin keys), providers limited to "
             + ", ".join(sorted(REDISTRIBUTABLE_PROVIDERS))
         )
+    if not settings.anonymous_access:
+        print("Private instance: every data operation needs an API key")
     return 0
 
 
-def _hash_key(parser: argparse.ArgumentParser, name: str, role: str) -> int:
+def _hash_key(parser: argparse.ArgumentParser, name: str, role: str, days: int) -> int:
+    if not 1 <= days <= access.MAX_KEY_LIFETIME.days:
+        parser.error(f"--days must be between 1 and {access.MAX_KEY_LIFETIME.days}")
     key = access.generate_key()
-    entry = access.key_entry_yaml(name, role, key)  # type: ignore[arg-type]
+    entry = access.key_entry_yaml(name, role, key, datetime.now(UTC), days)  # type: ignore[arg-type]
     try:
         access.KeysFile.model_validate(yaml.safe_load("keys:\n" + entry))
     except ValidationError as error:
@@ -721,6 +778,101 @@ def _hash_key(parser: argparse.ArgumentParser, name: str, role: str) -> int:
     print("Add this entry under `keys:` in the API keys file:", file=sys.stderr)
     print(entry, end="")
     return 0
+
+
+def _add_keys_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    keys_parser = subparsers.add_parser(
+        "keys", help="issue, extend, revoke, or list the keys in the API keys file (ADR 0008)"
+    )
+    keys_parser.add_argument(
+        "--file",
+        type=Path,
+        default=settings.api_keys_file,
+        help="API keys file (default: FOOTBALL_RESULTS_API_KEYS_FILE)",
+    )
+    actions = keys_parser.add_subparsers(dest="action", required=True)
+    days_help = f"days until it expires (1-{access.MAX_KEY_LIFETIME.days})"
+    issue = actions.add_parser("issue", help="add a key and print it once")
+    issue.add_argument("--name", required=True, help="key name ([a-z0-9-])")
+    issue.add_argument("--role", choices=access.ROLES, default="client")
+    issue.add_argument("--days", type=int, default=access.DEFAULT_KEY_DAYS, help=days_help)
+    issue.add_argument("--read-per-minute", type=int)
+    issue.add_argument("--write-per-minute", type=int, help="admin keys only")
+    extend = actions.add_parser(
+        "extend",
+        help="set a key's expiry to --days from now, at most a year after it was issued",
+    )
+    extend.add_argument("--name", required=True)
+    extend.add_argument("--days", type=int, default=access.DEFAULT_KEY_DAYS, help=days_help)
+    revoke = actions.add_parser("revoke", help="remove an entry")
+    revoke.add_argument("--name", required=True)
+    actions.add_parser("list", help="names, roles, and expiry (never keys or hashes)")
+
+
+def _keys_command(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    path: Path | None = args.file
+    if path is None:
+        parser.error("set --file or FOOTBALL_RESULTS_API_KEYS_FILE")
+    now = datetime.now(UTC)
+    try:
+        if args.action == "issue":
+            key, entry = access.issue_key(
+                path,
+                args.name,
+                args.role,
+                args.days,
+                now,
+                read_per_minute=args.read_per_minute,
+                write_per_minute=args.write_per_minute,
+            )
+            assert entry.expires_at is not None
+            print(
+                f"Issued {entry.role} key {entry.name!r}, valid until "
+                f"{access.format_time(entry.expires_at)}. It is shown once and not stored; send "
+                "it over a private channel:",
+                file=sys.stderr,
+            )
+            print(key)
+        elif args.action == "extend":
+            entry = access.extend_key(path, args.name, args.days, now)
+            assert entry.expires_at is not None
+            print(f"Key {entry.name!r} now expires at {access.format_time(entry.expires_at)}")
+        elif args.action == "revoke":
+            access.revoke_key(path, args.name)
+            print(f"Removed {args.name!r}; the API stops accepting it within seconds")
+        else:
+            _print_key_list(access.list_entries(path), now)
+    except ValueError as error:
+        parser.error(str(error))
+    return 0
+
+
+def _print_key_list(entries: Sequence[access.KeyEntry], now: datetime) -> None:
+    rows = [("NAME", "ROLE", "KIND", "ISSUED", "EXPIRES", "STATUS")]
+    for item in entries:
+        if item.subject is not None:
+            status = "oauth subject"
+        elif item.expires_at is None or item.issued_at is None:
+            status = "no expiry: run keys extend"
+        elif now >= item.expires_at:
+            status = "expired"
+        elif item.expires_at - now <= access.EXPIRY_WARNING:
+            status = f"expires in {(item.expires_at - now).days} days"
+        else:
+            status = "ok"
+        rows.append(
+            (
+                item.name,
+                item.role,
+                "subject" if item.subject is not None else "key",
+                access.format_time(item.issued_at) if item.issued_at else "-",
+                access.format_time(item.expires_at) if item.expires_at else "-",
+                status,
+            )
+        )
+    widths = [max(len(row[column]) for row in rows) for column in range(len(rows[0]))]
+    for row in rows:
+        print("  ".join(value.ljust(width) for value, width in zip(row, widths)).rstrip())
 
 
 if __name__ == "__main__":

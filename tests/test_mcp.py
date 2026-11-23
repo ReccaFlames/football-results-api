@@ -331,3 +331,27 @@ def test_a_client_key_selects_the_quota_and_cannot_refresh(
     _, forbidden = call(client, "request_refresh", key, competition="ekstraklasa")
     assert forbidden["type"] == "/problems/forbidden"
     assert forbidden["status"] == 403
+
+
+def test_private_instances_need_a_key_for_mcp(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    digest = bytes.fromhex(access.hash_key("client-key").removeprefix(access.HASH_PREFIX))
+    now = datetime.now(UTC)
+    entry = access.FileKey(
+        "partner-app", digest, "client", None, None, issued_at=now, expires_at=now + timedelta(1)
+    )
+    monkeypatch.setattr(main_module, "file_keys", (entry,))
+    monkeypatch.setattr(main_module.settings, "anonymous_access", False)
+
+    missing = post(client, "tools/list")
+    assert missing.status_code == 401
+    assert "ApiKey" in missing.headers["www-authenticate"]
+    keyed = post(
+        client,
+        "tools/call",
+        {"name": "list_competitions", "arguments": {}},
+        {"X-API-Key": "client-key"},
+    )
+    assert keyed.status_code == 200
+    assert keyed.json()["result"]["isError"] is False

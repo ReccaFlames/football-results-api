@@ -27,6 +27,11 @@ from app.observability import ScrapeRunCount, SeasonState, WorkerHeartbeat
 from app.ratelimit import FixedWindowRateLimiter
 
 AUTH_HEADERS = {"X-API-Key": "test-api-key"}
+KEYS_NOW = datetime.now(UTC).replace(microsecond=0)
+EXPIRY = (
+    f"issued_at: '{access.format_time(KEYS_NOW - timedelta(days=1))}', "
+    f"expires_at: '{access.format_time(KEYS_NOW + timedelta(days=29))}'"
+)
 COMPETITIONS = load_config().to_competitions()
 
 
@@ -1457,7 +1462,7 @@ def test_startup_loads_the_api_keys_file(tmp_path: Path, monkeypatch: pytest.Mon
     client_with_empty_store(tmp_path)
     keys = tmp_path / "keys.yaml"
     keys.write_text(
-        f"keys:\n  - {{name: ops, hash: '{access.hash_key('file-admin')}', role: admin}}\n"
+        f"keys:\n  - {{name: ops, hash: '{access.hash_key('file-admin')}', {EXPIRY}, role: admin}}\n"
     )
     monkeypatch.setattr(main_module.settings, "api_keys", "")
     monkeypatch.setattr(main_module.settings, "api_keys_file", keys)
@@ -1469,6 +1474,18 @@ def test_startup_loads_the_api_keys_file(tmp_path: Path, monkeypatch: pytest.Mon
     keys.write_text("keys:\n  - {name: ops, hash: plain}\n")
     with pytest.raises(ValueError, match="invalid API keys file"), TestClient(app):
         pass
+
+
+def test_private_instance_startup_refuses_environment_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client_with_empty_store(tmp_path)
+    monkeypatch.setattr(main_module.settings, "anonymous_access", False)
+    monkeypatch.setattr(main_module.settings, "api_keys", "env-secret")
+    expected = pytest.raises(ValueError, match="FOOTBALL_RESULTS_API_KEYS is set")
+    with expected as error, TestClient(app):
+        pass
+    assert "env-secret" not in str(error.value)
 
 
 DEFAULT_CONFIG = Path(__file__).parents[1] / "config/competitions.yaml"
@@ -1496,14 +1513,16 @@ def test_demo_mode_startup_rejects_admin_keys_and_non_redistributable_providers(
     use_demo_mode(monkeypatch)
     keys = tmp_path / "keys.yaml"
     keys.write_text(
-        f"keys:\n  - {{name: partner, hash: '{access.hash_key('client-key')}'}}\n"
+        f"keys:\n  - {{name: partner, hash: '{access.hash_key('client-key')}', {EXPIRY}}}\n"
         "  - {name: sso-admin, subject: user-123, role: admin}\n"
     )
     monkeypatch.setattr(main_module.settings, "api_keys_file", keys)
     with pytest.raises(ValueError, match="entry 'sso-admin' has role admin"), TestClient(app):
         pass
 
-    keys.write_text(f"keys:\n  - {{name: partner, hash: '{access.hash_key('client-key')}'}}\n")
+    keys.write_text(
+        f"keys:\n  - {{name: partner, hash: '{access.hash_key('client-key')}', {EXPIRY}}}\n"
+    )
     monkeypatch.setattr(main_module.settings, "api_keys", "env-admin-key")
     with pytest.raises(ValueError, match="FOOTBALL_RESULTS_API_KEYS is set"), TestClient(app):
         pass
@@ -1555,3 +1574,91 @@ def test_demo_notice_is_served_only_in_demo_mode(
         assert "17 reads per minute per IP" in text, path
         assert "Open Database License (ODbL)" in text, path
         assert "share-alike" in text, path
+
+
+def expiring_key(key: str, name: str, role: access.Role = "client", days: int = 30):
+    return access.FileKey(
+        name,
+        bytes.fromhex(access.hash_key(key).removeprefix(access.HASH_PREFIX)),
+        role,
+        None,
+        None,
+        issued_at=KEYS_NOW - timedelta(days=1),
+        expires_at=KEYS_NOW + timedelta(days=days),
+    )
+
+
+@pytest.fixture
+def private_instance(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(main_module.settings, "anonymous_access", False)
+    monkeypatch.setattr(main_module.settings, "api_keys", "")
+    use_file_keys(
+        monkeypatch,
+        expiring_key("client-key", "partner-app"),
+        expiring_key("expired-key", "old", days=-1),
+        expiring_key("admin-file-key", "ops", "admin"),
+    )
+
+
+@pytest.mark.usefixtures("private_instance")
+def test_private_instances_need_a_key_for_api_operations(tmp_path: Path) -> None:
+    client, _ = client_with_matches(tmp_path)
+
+    for headers in ({}, {"X-API-Key": "wrong"}, {"X-API-Key": "expired-key"}):
+        response = client.get("/api/v1/matches", headers=headers)
+        assert_problem(response, 401, "unauthorized")
+        assert response.headers["www-authenticate"] == "ApiKey"
+        assert response.headers["cache-control"] == "no-store"
+    assert client.get("/api/v1/competitions").status_code == 401
+
+    keyed = client.get("/api/v1/matches", headers=CLIENT_HEADERS)
+    assert keyed.status_code == 200
+    assert keyed.headers["cache-control"].startswith("private")
+    assert keyed.headers[main_module.KEY_EXPIRES_HEADER] == access.format_time(
+        KEYS_NOW + timedelta(days=30)
+    )
+    expired_admin = client.get("/api/v1/admin/scheduler", headers={"X-API-Key": "expired-key"})
+    assert expired_admin.status_code == 401
+    assert client.get("/api/v1/admin/scheduler", headers=ADMIN_FILE_HEADERS).status_code == 200
+
+    for path in ("/health", "/llms.txt", "/openapi.json", "/problems/unauthorized"):
+        assert client.get(path).status_code == 200, path
+
+
+def test_public_instances_keep_anonymous_reads_and_public_caching(tmp_path: Path) -> None:
+    client, _ = client_with_matches(tmp_path)
+    response = client.get("/api/v1/matches")
+    assert response.status_code == 200
+    assert response.headers["cache-control"].startswith("public")
+    assert main_module.KEY_EXPIRES_HEADER not in response.headers
+
+
+@pytest.mark.usefixtures("private_instance")
+def test_failed_key_attempts_use_up_the_ip_quota(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _ = client_with_matches(tmp_path)
+    monkeypatch.setattr(main_module.settings, "rate_limit_read_per_minute", 2)
+    for _ in range(2):
+        assert client.get("/api/v1/matches", headers={"X-API-Key": "guess"}).status_code == 401
+    assert_problem(client.get("/api/v1/matches"), 429, "rate-limited")
+    assert client.get("/api/v1/matches", headers=CLIENT_HEADERS).status_code == 200
+
+    monkeypatch.setattr(main_module, "rate_limiter", FixedWindowRateLimiter())
+    for _ in range(2):
+        assert client.get("/metrics", headers={"Authorization": "Bearer guess"}).status_code == 401
+    assert client.get("/metrics").status_code == 429
+
+
+@pytest.mark.usefixtures("private_instance")
+def test_metrics_report_key_expiry(tmp_path: Path) -> None:
+    client, _ = client_with_empty_store(tmp_path)
+    metrics = client.get("/metrics", headers=ADMIN_FILE_HEADERS).text
+    match = re.search(
+        r'^football_results_api_key_expires_in_seconds\{key="partner-app"\} (\S+)$',
+        metrics,
+        re.MULTILINE,
+    )
+    assert match is not None
+    assert 29 * 86400 < float(match.group(1)) <= 30 * 86400
+    assert re.search(r'expires_in_seconds\{key="old"\} -', metrics)

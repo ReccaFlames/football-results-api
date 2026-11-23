@@ -37,6 +37,7 @@ services:
       FOOTBALL_RESULTS_CONFIG_FILE: ${FOOTBALL_RESULTS_CONFIG_FILE:-/app/config/competitions.yaml}
       FOOTBALL_RESULTS_USER_AGENT: ${FOOTBALL_RESULTS_USER_AGENT:-}
       FOOTBALL_RESULTS_API_KEYS: ${FOOTBALL_RESULTS_API_KEYS:-}
+      FOOTBALL_RESULTS_ANONYMOUS_ACCESS: ${FOOTBALL_RESULTS_ANONYMOUS_ACCESS:-true}
       FOOTBALL_RESULTS_API_KEYS_FILE: ${FOOTBALL_RESULTS_API_KEYS_FILE:-}
       FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN: ${FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN:-}
       FOOTBALL_RESULTS_FOOTBALL_DATA_MIN_REQUEST_INTERVAL_SECONDS: ${FOOTBALL_RESULTS_FOOTBALL_DATA_MIN_REQUEST_INTERVAL_SECONDS:-}
@@ -59,7 +60,8 @@ services:
       FOOTBALL_RESULTS_OAUTH_JWKS_URL: ${FOOTBALL_RESULTS_OAUTH_JWKS_URL:-}
     volumes:
       - ./config/competitions.yaml:/app/config/competitions.yaml:ro
-      # Optional keys file: FOOTBALL_RESULTS_API_KEYS_FILE=/app/secrets/api-keys.yaml
+      # Optional keys file: FOOTBALL_RESULTS_API_KEYS_FILE=/app/secrets/api-keys.yaml. Mount the
+      # directory, not the file: `keys` commands replace the file, and the API reloads it.
       - ./secrets:/app/secrets:ro
     ports:
       - "${API_BIND_ADDRESS:-0.0.0.0}:${API_PORT:-8000}:8000"

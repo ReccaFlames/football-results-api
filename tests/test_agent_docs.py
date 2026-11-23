@@ -267,3 +267,11 @@ def test_demo_notice_keeps_the_llms_txt_format_and_lists_each_attribution_once()
     disabled = guide(demo=True, rate_limits=agent_docs.RateLimits(False, 120, 10))
     assert "Rate limiting is disabled on this instance." in agent_docs.llms_txt(disabled)
     assert "Data attribution:" in agent_docs.llms_txt(guide(provider_competitions=providers))
+
+
+def test_private_instance_guides_send_the_api_key() -> None:
+    public, private = agent_docs.llms_txt(guide()), agent_docs.llms_txt(guide(key_required=True))
+    header = '-H "X-API-Key: $FOOTBALL_RESULTS_API_KEY"'
+    assert header not in public
+    assert header in private and "private instance" in private
+    assert "API-Key-Expires" in private

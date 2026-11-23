@@ -553,7 +553,15 @@ class McpEndpoint:
     async def authenticate(self, scope: Scope) -> McpAuth:
         """The caller of a `/mcp` request; computed once and kept in the scope."""
         if AUTH_SCOPE_KEY not in scope:
-            scope[AUTH_SCOPE_KEY] = await self._authenticate(Headers(scope=scope))
+            auth = await self._authenticate(Headers(scope=scope))
+            # A private instance (ADR 0008) has no anonymous MCP use, with or without OAuth.
+            if (
+                not self.settings.anonymous_access
+                and auth.rejection is None
+                and auth.identity is None
+            ):
+                auth = McpAuth(None, "missing", "This MCP server requires an API key or sign-in")
+            scope[AUTH_SCOPE_KEY] = auth
         return scope[AUTH_SCOPE_KEY]
 
     async def _authenticate(self, headers: Headers) -> McpAuth:
@@ -580,9 +588,16 @@ class McpEndpoint:
 
     async def _reject(self, auth: McpAuth, scope: Scope, receive: Receive, send: Send) -> None:
         config = OAuthConfig.from_settings(self.settings)
-        assert config is not None
         request = Request(scope, receive)
-        if auth.rejection == "unavailable":
+        if config is None:
+            response = problem_response(
+                request,
+                "unauthorized",
+                auth.detail,
+                headers={"WWW-Authenticate": "ApiKey"},
+                hint="Send a key issued by the operator in the X-API-Key header.",
+            )
+        elif auth.rejection == "unavailable":
             response = problem_response(
                 request,
                 "service-unavailable",

@@ -52,3 +52,8 @@ def max_age_seconds(next_updates: Iterable[datetime | None], now: datetime, cap:
 
 def cache_control(max_age: int) -> str:
     return f"public, max-age={max_age}" if max_age > 0 else "public, no-cache"
+
+
+def private_cache_control(value: str) -> str:
+    """The same rule for the caller's own cache only (private instance, ADR 0008)."""
+    return value.replace("public", "private", 1)

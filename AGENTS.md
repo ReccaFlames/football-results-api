@@ -21,7 +21,7 @@ API.
 | `app/contract.py` | API v1.1 request rules: opaque cursors, `fields=`, status and date parsing, limits |
 | `app/problems.py` | RFC 9457 problem details: `ProblemError`, exception handlers for every error |
 | `app/ratelimit.py` | In-process fixed-window rate limiter, `RateLimit` headers, trusted-proxy client IP |
-| `app/access.py` | Named API keys (ADR 0005): keys-file models, SHA-256 hashing, constant-time key resolution to an `Identity` (name, role, quotas) |
+| `app/access.py` | Named API keys (ADR 0005, 0008): keys-file models with required expiry, SHA-256 hashing, constant-time key resolution to an `Identity` (name, role, quotas, expiry), `KeysFileWatcher` (reload on change), `issue_key`/`extend_key`/`revoke_key` |
 | `app/agent_docs.py` | Pure generator of `/llms.txt`, `/agents`, `/agents.md`, `/llms-full.txt`, `/problems/<slug>` from the OpenAPI spec and competitions; `SKILL_PATH`/`SKILL_FILE` for the served skill; `MCP_TOOLS` (tool → operation) |
 | `app/oauth.py` | Optional OAuth for `/mcp` (ADR 0006): `OAuthConfig` (RFC 9728 metadata, `WWW-Authenticate` challenge), `JwksCache`, `JwtVerifier`; `create_http_client` is the test seam |
 | `app/mcp_server.py` | Curated MCP server (`mcp` SDK `MCPServer`) at `/mcp`: 5 tools calling the API in-process, output models, Host/Origin checks, `McpRoute` |
@@ -38,6 +38,7 @@ API.
 | `config/competitions.yaml` | Competition, provider, and schedule defaults |
 | `config/demo-competitions.yaml` | Demo instance competitions: only redistributable providers (the 3. Liga) |
 | `compose.demo.yaml` | Compose override for the public read-only demo (ADR 0007); guide in `docs/DEMO.md` |
+| `docs/PRIVATE.md` | Private instance guide (ADR 0008): invited users, expiring keys, `keys` commands |
 | `app/repository.py` | `PostgresResultRepository`: seeding, queries, atomic season replace, scheduler claims |
 | `app/models.py` | Pydantic API/domain models (`Competition`, `SeasonSource`, `ScrapedMatch`, `MatchResult`, ...) |
 | `app/db_models.py` | SQLAlchemy ORM tables |
@@ -198,6 +199,16 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
   keys file holds only `sha256:` hashes with a name, a role (`client` or `admin`), and per-minute
   quotas. Protected operations and `/metrics` need an admin key (`403 forbidden` for a client
   key). Key names are metric labels; never log keys or hashes.
+- Private instance (`FOOTBALL_RESULTS_ANONYMOUS_ACCESS=false`, ADR 0008): every operation with an
+  operation ID except `PUBLIC_OPERATIONS` (`get_health`) needs a key, checked in the middleware
+  *after* rate-limit counting so every `401` uses the IP quota; doc pages (no operation ID) stay
+  public. `check_private_instance` (startup and `config check`) rejects env keys, a missing keys
+  file, a non-https public base URL, and demo mode. Hash entries need `issued_at`/`expires_at`
+  (at most 365 days apart; `subject` entries have none); expired keys resolve to `None` (plain
+  `401`, no new slug). The keys file reloads via `KeysFileWatcher.poll` in `_current_keys()`;
+  tests patch `main.file_keys` (the watcher is `None` outside the lifespan). Keyed responses get
+  `API-Key-Expires`; cacheable reads get `Cache-Control: private`. Edit the file only through
+  `python -m app.config keys ...` helpers (atomic replace, validated).
 - Demo mode (`FOOTBALL_RESULTS_DEMO_MODE`, ADR 0007): `check_demo_mode` in `app/config.py` runs
   at API startup (before seeding), in the scheduler before every (re)seed, and in `config check`.
   It rejects admin keys and providers not in `REDISTRIBUTABLE_PROVIDERS` (code, not config;
