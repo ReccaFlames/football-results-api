@@ -101,6 +101,23 @@ services:
     volumes:
       - ./config/competitions.yaml:/app/config/competitions.yaml:ro
 
+  # The Whistleprint landing page (web/, ADR 0010): a reverse proxy on the host routes /,
+  # /request-access, /static/*, and /favicon.ico here and everything else to the API. It calls
+  # the API over the Compose network and forwards the visitor's address in X-Forwarded-For.
+  web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+    restart: unless-stopped
+    logging: *logging
+    depends_on:
+      api:
+        condition: service_started
+    environment:
+      FOOTBALL_RESULTS_WEB_API_URL: http://api:8000
+    ports:
+      - "${WEB_BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-8001}:8001"
+
   # Monitoring: docker compose --profile observability up -d (see README, Observability).
   prometheus:
     image: prom/prometheus:v3.16.0

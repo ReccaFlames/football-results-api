@@ -1,0 +1,12 @@
+# Build context for the API (Dockerfile) and landing (web/Dockerfile) images: keep secrets and
+# local build artefacts out.
+.env
+.env.*
+secrets/
+backups/
+.git/
+.venv/
+**/__pycache__/
+**/*.egg-info/
+.pytest_cache/
+.ruff_cache/

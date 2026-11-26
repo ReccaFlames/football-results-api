@@ -571,6 +571,7 @@ def test_demo_compose_override_hardens_the_public_origin() -> None:
     text = DEMO_COMPOSE.read_text()
     compose = yaml.load(text, Loader=ComposeLoader)
     assert compose["services"]["api"]["ports"] == ["127.0.0.1:${API_PORT:-8000}:8000"]
+    assert compose["services"]["web"]["ports"] == ["127.0.0.1:${WEB_PORT:-8001}:8001"]
     required = "${POSTGRES_PASSWORD:?"
     assert compose["services"]["db"]["environment"]["POSTGRES_PASSWORD"].startswith(required)
     for name in ("api", "scheduler"):
@@ -593,6 +594,26 @@ def test_demo_compose_override_runs_the_demo_without_admin_keys() -> None:
     api = compose["services"]["api"]["environment"]
     assert api["FOOTBALL_RESULTS_RATE_LIMIT_READ_PER_MINUTE"] == "${DEMO_READ_PER_MINUTE:-30}"
     assert (DEMO_COMPOSE.parent / "config/demo-competitions.yaml").is_file()
+
+
+def test_compose_runs_the_landing_app_next_to_the_api_on_loopback() -> None:
+    root = DEMO_COMPOSE.parent
+    web = yaml.load((root / "compose.yaml").read_text(), Loader=ComposeLoader)["services"]["web"]
+    assert "profiles" not in web
+    assert web["build"] == {"context": ".", "dockerfile": "web/Dockerfile"}
+    assert web["environment"]["FOOTBALL_RESULTS_WEB_API_URL"] == "http://api:8000"
+    assert web["ports"] == ["${WEB_BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-8001}:8001"]
+
+
+def test_docker_images_install_only_their_own_package() -> None:
+    root = DEMO_COMPOSE.parent
+    api_image = (root / "Dockerfile").read_text()
+    assert "uv sync --frozen --no-dev\n" in api_image.replace(" \\\n", "\n")
+    assert not re.search(r"^COPY (web|cli)\b", api_image, re.MULTILINE)
+    web_image = (root / "web/Dockerfile").read_text()
+    assert "uv sync --frozen --no-dev --package football-results-web --no-editable" in web_image
+    assert not re.search(r"^COPY (app|cli)\b", web_image, re.MULTILINE)
+    assert "USER 10001" in web_image and '"--port", "8001"' in web_image
 
 
 @pytest.mark.parametrize(

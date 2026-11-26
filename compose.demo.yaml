@@ -6,8 +6,9 @@
 # key. Client keys in FOOTBALL_RESULTS_API_KEYS_FILE stay allowed.
 # Container logs go to journald, which deletes them by age (docs/DEMO.md, section 2); keep its
 # MaxRetentionSec equal to FOOTBALL_RESULTS_LOG_RETENTION_DAYS, which /privacy states.
-# The API port is bound to 127.0.0.1 whatever API_BIND_ADDRESS says: only Caddy on the host may
-# reach it, because Docker-published ports bypass the host firewall. POSTGRES_PASSWORD has no
+# The API and landing ports are bound to 127.0.0.1 whatever API_BIND_ADDRESS and
+# WEB_BIND_ADDRESS say: only Caddy on the host may reach them, because Docker-published ports
+# bypass the host firewall. POSTGRES_PASSWORD has no
 # default here, and demo mode refuses a shipped default or short password (use hex: the password
 # is part of the database URL).
 x-demo-logging: &demo-logging
@@ -50,3 +51,9 @@ services:
     logging: *demo-logging
     volumes:
       - ./config/demo-competitions.yaml:/app/config/demo-competitions.yaml:ro
+
+  # Reads demo mode from the API's /llms.txt and shows "no key needed" instead of the form.
+  web:
+    ports: !override
+      - "127.0.0.1:${WEB_PORT:-8001}:8001"
+    logging: *demo-logging

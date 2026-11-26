@@ -292,7 +292,8 @@ uv run uvicorn football_results_web.main:app --reload --port 8001
 
 `FOOTBALL_RESULTS_WEB_API_URL` sets the API base URL it calls (default `http://localhost:8000`).
 The page uses relative links because it is meant to be served on the same origin as the API, so
-its documentation links work only behind that shared origin (planned in roadmap item 21f), not on
+its documentation links work only behind that shared origin (a reverse proxy that routes `/`,
+`/request-access`, `/static/*`, and `/favicon.ico` to it; planned in roadmap item 21f-2), not on
 port 8001.
 
 The form posts to the landing app's `/request-access`, which calls `create_access_request` and
@@ -309,11 +310,15 @@ counts visitors only when the landing app (and any proxy in front of it) is list
 docker compose up -d --build
 docker compose ps
 curl http://localhost:8000/health
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8001/   # landing page
 ~~~
 
 The API container waits for PostgreSQL, runs Alembic migrations, then starts Uvicorn. The separate
 scheduler container continuously claims due current seasons. Initial competitions and sources are
-seeded during application startup.
+seeded during application startup. The `web` service runs the landing page from its own image
+(`web/Dockerfile`, which installs only `football-results-web` from `uv.lock`; the API image
+installs neither `web/` nor `cli/`). It calls the API at `http://api:8000` over the Compose network
+and is published on `WEB_BIND_ADDRESS:WEB_PORT` (default `127.0.0.1:8001`), like the API.
 
 ## Adaptive refresh policy
 
@@ -1049,13 +1054,14 @@ chmod 600 .env
 ~~~bash
 docker compose up -d --build
 docker compose ps
-docker compose logs --tail=100 api scheduler
+docker compose logs --tail=100 api scheduler web
 ~~~
 
-Both containers use restart: unless-stopped. PostgreSQL data is stored in the postgres_data named
+All containers use restart: unless-stopped. PostgreSQL data is stored in the postgres_data named
 volume. Port 5432 remains bound to localhost.
 
-API_BIND_ADDRESS defaults to 127.0.0.1: Docker-published ports bypass the Ubuntu firewall, so set
+API_BIND_ADDRESS and WEB_BIND_ADDRESS (the landing page) default to 127.0.0.1: Docker-published
+ports bypass the Ubuntu firewall, so set
 `0.0.0.0` only on a trusted network. Put Caddy or nginx in front, and expose only the reverse proxy's
 HTTP/HTTPS ports through the Ubuntu firewall. Also set `FOOTBALL_RESULTS_TRUSTED_PROXIES` to the address the
 proxy connects from as seen by the API container (for a proxy on the host, the Docker network
@@ -1109,8 +1115,9 @@ demo mode:
   are shortened (`/24` for IPv4, `/48` for IPv6), and container logs go to journald, which deletes
   them after `FOOTBALL_RESULTS_LOG_RETENTION_DAYS` (set its `MaxRetentionSec` to match; see the
   guide). `/robots.txt` lets crawlers and AI agents in; the guide's Cloudflare settings keep it so.
-- The origin is hardened: `compose.demo.yaml` publishes the API on `127.0.0.1` only, whatever
-  `API_BIND_ADDRESS` says, and has no default `POSTGRES_PASSWORD`; demo mode also refuses a
+- The origin is hardened: `compose.demo.yaml` publishes the API and the landing page on
+  `127.0.0.1` only, whatever `API_BIND_ADDRESS` and `WEB_BIND_ADDRESS` say, and has no default
+  `POSTGRES_PASSWORD`; demo mode also refuses a
   database password that is a shipped default or shorter than 16 characters (use
   `openssl rand -hex 32`: the password is part of the database URL).
 
@@ -1410,6 +1417,7 @@ Deployment variables (Docker Compose):
 - POSTGRES_PORT
 - API_BIND_ADDRESS (`127.0.0.1`)
 - API_PORT
+- WEB_BIND_ADDRESS (`127.0.0.1`), WEB_PORT (`8001`): the landing page (`web` service)
 - Observability profile: PROMETHEUS_API_KEY, PROMETHEUS_RETENTION (`15d`), GRAFANA_ADMIN_USER,
   GRAFANA_ADMIN_PASSWORD, GRAFANA_BIND_ADDRESS (`127.0.0.1`), GRAFANA_PORT (`3000`),
   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID (see [Observability](#observability); also the default

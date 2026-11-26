@@ -532,7 +532,21 @@ the maintainer runs `scripts/publish-wizard.sh`.
   - [ ] 21f. Deployment: own Docker image and Compose service; Caddy routes `/`,
         `/request-access`, `/static/*`, `/favicon.ico` to the landing app and everything else to
         the API (the API keeps no `/` route); `docs/DEPLOYMENT.md`, `docs/PRIVATE.md`,
-        `docs/DEMO.md`
+        `docs/DEMO.md`. Decided 2026-11-26: Caddy stays on the host; `172.16.0.0/12` stays the
+        trusted-proxy value (it covers Caddy, which reaches published ports from the Compose
+        network gateway, and the landing container); the landing app runs by default on demo
+        and private instances (no profile); no healthcheck (the API service has none either)
+    - [x] 21f-1. Image and Compose service: `web/Dockerfile` (build context: repository root;
+          `uv sync --frozen --no-dev --package football-results-web --no-editable`, UID 10001,
+          Uvicorn on 8001 with `--no-proxy-headers`); `.dockerignore`; Compose service `web`
+          (`FOOTBALL_RESULTS_WEB_API_URL=http://api:8000`, `WEB_BIND_ADDRESS`/`WEB_PORT`,
+          default `127.0.0.1:8001`; the demo override pins `127.0.0.1` and journald); tests
+          with `ComposeLoader`; README, AGENTS.md, `.env.example`
+    - [ ] 21f-2. Caddy and guides: Caddyfile path routes to `127.0.0.1:8001` and
+          `127.0.0.1:8000`; `FOOTBALL_RESULTS_TRUSTED_PROXIES` explained for Caddy → landing →
+          API; `docs/DEPLOYMENT.md` (new service, checklist), `docs/PRIVATE.md` (landing page
+          stays public, access request flow for invited users), `docs/DEMO.md` ("no key
+          needed")
   - [ ] 21g. `/privacy`: access request data (name, email, use, message), Telegram as a
         processor, 30-day / claim-window retention (`privacy_blocks` in `app/agent_docs.py`)
   - [ ] 21h. Tests (API, CLI, landing app with a fake API; no network), docs (README, AGENTS.md

@@ -55,6 +55,8 @@ API.
 | `web/football_results_web/main.py` | `create_app`: `/` (competitions, developer and agent links, access request form or "no key needed" on a demo), `POST /request-access` (`AccessForm`, honeypot, `form_errors` maps problem slugs to field messages, `no-store`), `/static/*`, `/favicon.ico`, security headers; footer with `footer_attributions` (each source once) and the `privacy` link (operator contact) |
 | `web/football_results_web/api.py` | `create_http_client` (test seam), `TimedCache` (5-minute cache, last good value kept): `CompetitionCache` (with `data_attributions`, http(s) URLs only), `DemoModeCache` (demo notice in `/llms.txt`); `create_access_request` (problem parsing), `forwarded_for`; `FOOTBALL_RESULTS_WEB_API_URL` |
 | `web/football_results_web/templates/`, `static/` | Jinja2 templates; stylesheet, logo, mark, and favicon (package data) |
+| `web/Dockerfile` | Landing image (build context: repository root): only `football-results-web` from `uv.lock`, UID 10001, port 8001; Compose service `web` |
+| `.dockerignore` | Keeps `.env`, `secrets/`, `.venv`, and build artefacts out of both image build contexts |
 | `skills/football-results/SKILL.md` | Consumer Agent Skill for API users (teaches the CLI), served unchanged at `/skills/football-results/SKILL.md` |
 | `server.json` | MCP Registry metadata (`io.github.ReccaFlames/football-results`; demo remote first, `{host}` template second), validated against `tests/schemas/server.schema.json` |
 | `scripts/set_demo_host.py` | Replaces the `FOOTBALL_DEMO_HOST` placeholder (server.json) and `DEMO_URL` (CLI) once; `--check` fails while one remains (ADR 0009) |
@@ -199,7 +201,12 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
   `/privacy` states what the instance processes; when you add logging or storage of personal
   data (IPs, key names), update `privacy_blocks` in `app/agent_docs.py`.
 - Evals (`evals/`) are run by hand before a release, never in pytest or CI; a new top task or
-  MCP tool deserves an eval task. The Docker image installs only the API (`uv sync --frozen --no-dev`), not `cli/` or `web/`.
+  MCP tool deserves an eval task. The Docker image installs only the API (`uv sync --frozen --no-dev`), not `cli/` or `web/`;
+  the landing image (`web/Dockerfile`) installs only `web/` (`--package football-results-web
+  --no-editable`) and runs Uvicorn with `--no-proxy-headers`, so it appends the real peer (the
+  reverse proxy) to `X-Forwarded-For`. The Compose `web` service is bound like the API
+  (`WEB_BIND_ADDRESS`, `127.0.0.1`; `ports: !override` in `compose.demo.yaml`); tests read both
+  Compose files with `ComposeLoader`.
 - Observability: `/metrics` (not an OpenAPI operation, rate-limit exempt) and the `Admin`
   operations need an API key; `/metrics` also accepts `Authorization: Bearer`. Scheduler and
   season metrics are computed from PostgreSQL at scrape time with the rules in
