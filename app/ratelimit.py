@@ -52,34 +52,49 @@ class RateLimitDecision:
 class FixedWindowRateLimiter:
     """Counts requests per (policy, client) in windows that start at the client's first request.
 
-    At most ``max_keys`` windows are kept: expired windows are pruned first, then the oldest.
+    Every hit first drops the windows that have ended, so a client address stays in memory only
+    while its window lasts (`/privacy` says so). At most ``max_keys`` windows are kept; beyond
+    that the oldest are dropped.
     """
 
     def __init__(self, max_keys: int = 10_000) -> None:
         self.max_keys = max_keys
-        self._windows: dict[tuple[str, str], tuple[float, int]] = {}  # (expires, count)
+        # Grouped by window length; each group is in window-start order, so ended windows lead.
+        self._windows: dict[int, dict[tuple[str, str], tuple[float, int]]] = {}
+
+    def __len__(self) -> int:
+        return sum(len(group) for group in self._windows.values())
 
     def hit(self, policy: RateLimitPolicy, client: str, now: float) -> RateLimitDecision:
+        self._expire(now)
+        group = self._windows.setdefault(policy.window_seconds, {})
         key = (policy.name, client)
-        expires, count = self._windows.pop(key, (0.0, 0))
-        if now >= expires:
-            expires, count = now + policy.window_seconds, 0
+        expires, count = group.get(key, (now + policy.window_seconds, 0))
         allowed = count < policy.quota
         if allowed:
             count += 1
-        self._windows[key] = (expires, count)
-        self._prune(now)
+        group[key] = (expires, count)  # an existing key keeps its place
+        self._cap()
         reset = max(1, math.ceil(expires - now))
         return RateLimitDecision(policy, allowed, policy.quota - count, reset)
 
-    def _prune(self, now: float) -> None:
-        if len(self._windows) <= self.max_keys:
-            return
-        for key, (expires, _) in list(self._windows.items()):
-            if now >= expires:
-                del self._windows[key]
-        while len(self._windows) > self.max_keys:
-            del self._windows[next(iter(self._windows))]
+    def _expire(self, now: float) -> None:
+        for group in self._windows.values():
+            while group:
+                key, (expires, _) = next(iter(group.items()))
+                if now < expires:
+                    break
+                del group[key]
+
+    def _cap(self) -> None:
+        while len(self) > self.max_keys:
+            starts = {
+                length: next(iter(group.values()))[0] - length
+                for length, group in self._windows.items()
+                if group
+            }
+            oldest = self._windows[min(starts, key=starts.__getitem__)]
+            del oldest[next(iter(oldest))]
 
 
 def client_ip(
@@ -116,6 +131,10 @@ def is_trusted_proxy(value: str, trusted_proxies: Sequence[IPv4Network | IPv6Net
     return address is not None and any(address in network for network in trusted_proxies)
 
 
+# The window of the per-minute read and write quotas.
+QUOTA_WINDOW_SECONDS = 60
+
+
 @dataclass(frozen=True)
 class Client:
     """A rate-limited caller: its counter bucket, metrics label, and per-minute quotas."""
@@ -127,8 +146,8 @@ class Client:
 
     def policy(self, method: str) -> RateLimitPolicy:
         if method in READ_METHODS:
-            return RateLimitPolicy("read", self.read_per_minute, 60)
-        return RateLimitPolicy("write", self.write_per_minute, 60)
+            return RateLimitPolicy("read", self.read_per_minute, QUOTA_WINDOW_SECONDS)
+        return RateLimitPolicy("write", self.write_per_minute, QUOTA_WINDOW_SECONDS)
 
 
 # Valid `create_access_request` calls per client IP (ADR 0010), counted by the handler so that

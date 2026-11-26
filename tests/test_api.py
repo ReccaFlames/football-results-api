@@ -31,7 +31,13 @@ from app.models import (
 )
 from app.observability import ScrapeRunCount, SeasonState, WorkerHeartbeat
 from app.ratelimit import FixedWindowRateLimiter
-from app.repository import AccessRequestPending, AccessRequestStateConflict, StoredAccessRequest
+from app.repository import (
+    CLAIM_WINDOW,
+    UNAPPROVED_RETENTION,
+    AccessRequestPending,
+    AccessRequestStateConflict,
+    StoredAccessRequest,
+)
 
 AUTH_HEADERS = {"X-API-Key": "test-api-key"}
 KEYS_NOW = datetime.now(UTC).replace(microsecond=0)
@@ -1723,6 +1729,7 @@ def test_robots_txt_closes_private_instances(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert "Disallow: /\n" in response.text
     assert client.get("/privacy").status_code == 200
+    assert "## Access requests" in client.get("/privacy.md").text
 
 
 def test_robots_txt_and_privacy_page_on_public_instances(
@@ -1739,6 +1746,10 @@ def test_robots_txt_and_privacy_page_on_public_instances(
     assert "has not published a contact" in privacy
     assert "client IP address in full" in privacy
     assert "at most 14 days" in privacy
+    assert "## Access requests" in privacy and "for access requests)" in privacy
+    assert f"deleted {UNAPPROVED_RETENTION.days} days after they were created" in privacy
+    assert f"or {CLAIM_WINDOW.days} days after approval" in privacy
+    assert "Telegram" not in privacy
     assert "/privacy" in client.get("/llms.txt").text
     assert "/privacy" in client.get("/agents.md").text
 
@@ -1749,6 +1760,21 @@ def test_robots_txt_and_privacy_page_on_public_instances(
     assert "demo@example.com" in page.text
     assert "shortened to its network" in page.text
     assert "at most 7 days" in page.text
+    # Access requests are writes, which the demo refuses.
+    assert "Access requests" not in page.text and "for access requests" not in page.text
+
+
+def test_privacy_page_names_telegram_only_when_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    use_telegram(monkeypatch, lambda _: httpx.Response(200, json={"ok": True}))
+    client, _ = client_with_empty_store(tmp_path)
+    privacy = client.get("/privacy.md").text
+    assert "**Telegram** is used as a processor" in privacy
+    assert "never your email or your message" in privacy
+
+    use_demo_mode(monkeypatch)
+    assert "Telegram" not in client.get("/privacy.md").text
 
 
 def test_public_instances_keep_anonymous_reads_and_public_caching(tmp_path: Path) -> None:

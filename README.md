@@ -239,7 +239,8 @@ uv run python -m app.config access-requests reject 8
 - Retention: the scheduler runs an hourly purge. It erases the key and personal data of approved
   requests not claimed within 14 days (a claim erases them at once) and deletes pending and
   rejected requests 30 days after they were created; it logs only counts. An unclaimed key stays
-  in the keys file until you revoke it.
+  in the keys file until you revoke it. `/privacy` states this retention (read from
+  `CLAIM_WINDOW`/`UNAPPROVED_RETENTION`), the stored fields, and, when configured, Telegram.
 
 ### Run PostgreSQL in Docker and FastAPI locally
 
@@ -458,7 +459,7 @@ competitions in the database. They are not operations, so they are absent from `
 | `/problems`, `/problems/<slug>` | `text/markdown; charset=utf-8` | Meaning and fix of each problem `type`, so `type` URIs resolve |
 | `/skills/football-results/SKILL.md` | `text/markdown; charset=utf-8` | The [Agent Skill](#agent-skill), served unchanged from the repository |
 | `/robots.txt` | `text/plain; charset=utf-8` | Allows every crawler and agent and points to `/llms.txt`; on a [private instance](#private-instance) it disallows everything. Not rate-limited |
-| `/privacy`, `/privacy.md` | HTML / Markdown | What the instance processes (client IPs for rate limits, access logs, API key names), why, for how long (`FOOTBALL_RESULTS_LOG_RETENTION_DAYS`), and the operator contact. Linked from `/llms.txt` and `/agents` |
+| `/privacy`, `/privacy.md` | HTML / Markdown | What the instance processes (client IPs for rate limits, access logs, API key names, the landing page), why, for how long (`FOOTBALL_RESULTS_LOG_RETENTION_DAYS`), and the operator contact. Except on a demo, also access requests: stored fields, purpose, retention, and Telegram notifications (only when configured). Linked from `/llms.txt` and `/agents` |
 
 - The top 5 tasks are: discover competitions, resolve a team slug, a team's latest results,
   upcoming fixtures, and the league table. Examples use the first configured league.
@@ -546,8 +547,8 @@ RateLimit-Policy: "read";q=120;w=60
 RateLimit: "read";r=87;t=42
 ~~~
 
-Counters are kept in memory by each API process; with several workers or replicas each enforces
-its own quota. Behind a reverse proxy, set `FOOTBALL_RESULTS_TRUSTED_PROXIES` so that the
+Counters are kept in memory by each API process, and a client's counter is dropped once its
+window ends; with several workers or replicas each enforces its own quota. Behind a reverse proxy, set `FOOTBALL_RESULTS_TRUSTED_PROXIES` so that the
 `X-Forwarded-For` client address is used; otherwise all clients share the proxy's quota.
 
 **Caching:** `list_competitions`, `list_matches`, `get_standings`, `list_teams`, and `list_results`

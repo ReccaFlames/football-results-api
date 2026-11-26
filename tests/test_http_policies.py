@@ -26,8 +26,20 @@ def test_limiter_keeps_at_most_max_keys() -> None:
     limiter = FixedWindowRateLimiter(max_keys=2)
     for client in ["a", "b", "c"]:
         limiter.hit(POLICY, client, 0)
-    assert len(limiter._windows) == 2
+    assert len(limiter) == 2
     assert limiter.hit(POLICY, "a", 1).remaining == 1
+
+
+def test_limiter_forgets_clients_once_their_window_ends() -> None:
+    limiter = FixedWindowRateLimiter()
+    hourly = RateLimitPolicy("access-request", 3, 3600)
+    limiter.hit(POLICY, "a", 0)
+    limiter.hit(hourly, "a", 0)
+    limiter.hit(POLICY, "b", 30)
+    limiter.hit(POLICY, "b", 70)
+    assert len(limiter) == 2  # "a" read ended at 60; "b" keeps the window it opened at 30
+    limiter.hit(POLICY, "c", 3600)
+    assert len(limiter) == 1
 
 
 def test_client_ip_trusts_forwarded_for_only_from_trusted_proxies() -> None:

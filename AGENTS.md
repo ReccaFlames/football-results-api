@@ -200,7 +200,11 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
   until `scripts/set_demo_host.py` replaces them; never send an API key to the CLI's demo default.
 - `/robots.txt` allows everyone (and points to `/llms.txt`) unless the instance is private.
   `/privacy` states what the instance processes; when you add logging or storage of personal
-  data (IPs, key names), update `privacy_blocks` in `app/agent_docs.py`.
+  data (IPs, key names), update `privacy_blocks` in `app/agent_docs.py`. Its durations come from
+  the code (`CLAIM_WINDOW`, `UNAPPROVED_RETENTION`, `QUOTA_WINDOW_SECONDS`,
+  `ACCESS_REQUEST_POLICY`), never typed in; `PrivacyInfo.access_requests` is `None` on a demo
+  (writes are refused), and Telegram is named only when configured. The rate limiter drops a
+  client's counter once its window ends, which the page promises.
 - Evals (`evals/`) are run by hand before a release, never in pytest or CI; a new top task or
   MCP tool deserves an eval task. The Docker image installs only the API (`uv sync --frozen --no-dev`), not `cli/` or `web/`;
   the landing image (`web/Dockerfile`) installs only `web/` (`--package football-results-web

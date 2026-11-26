@@ -549,8 +549,14 @@ the maintainer runs `scripts/publish-wizard.sh`.
           needed"). Both Caddyfiles pass `caddy validate` (Caddy 2.11, `caddy:2` image) and a
           routing check with stand-in upstreams; the landing page sends no `Cache-Control`, so
           the demo's Cloudflare cache rule passes it to the origin
-  - [ ] 21g. `/privacy`: access request data (name, email, use, message), Telegram as a
-        processor, 30-day / claim-window retention (`privacy_blocks` in `app/agent_docs.py`)
+  - [x] 21g. `/privacy`: access request data (name, email, use, message), Telegram as a
+        processor, 30-day / claim-window retention (`privacy_blocks` in `app/agent_docs.py`).
+        The section (stored fields, client IP for the per-IP limit, purpose, retention read from
+        `UNAPPROVED_RETENTION`/`CLAIM_WINDOW`, the `req-<id>-<name>` key name) is left out on
+        the demo; Telegram only when configured (`PrivacyInfo.access_requests`). The rate-limit
+        bullet now names both windows (one minute; one hour for access requests), and the
+        limiter drops ended windows so that holds. A landing page bullet: no cookies, no
+        storage, its access logs show the proxy's address, and it forwards the visitor's IP
   - [ ] 21h. Tests (API, CLI, landing app with a fake API; no network), docs (README, AGENTS.md
         layout table, ADR 0010), bump version in `pyproject.toml`, `cli/pyproject.toml`,
         `web/pyproject.toml`, `server.json`, `uv lock`

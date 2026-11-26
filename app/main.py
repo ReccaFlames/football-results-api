@@ -105,6 +105,8 @@ from app.ratelimit import (
     client_ip,
 )
 from app.repository import (
+    CLAIM_WINDOW,
+    UNAPPROVED_RETENTION,
     AccessRequestPending,
     AccessRequestStateConflict,
     ActiveScrapeJobConflict,
@@ -1795,6 +1797,14 @@ def _privacy_blocks(base_url: str) -> list[agent_docs.Block]:
             rate_limited=settings.rate_limit_enabled,
             keys_enabled=bool(settings.api_keys or settings.api_keys_file),
             oauth_enabled=settings.oauth_issuer is not None,
+            # Access requests are writes: the demo refuses them (`writes-disabled`).
+            access_requests=None
+            if settings.demo_mode
+            else agent_docs.AccessRequestPrivacy(
+                unapproved_retention=UNAPPROVED_RETENTION,
+                claim_window=CLAIM_WINDOW,
+                telegram_notifications=notify.TelegramConfig.from_settings(settings) is not None,
+            ),
         ),
         base_url,
     )

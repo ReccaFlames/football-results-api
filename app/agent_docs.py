@@ -11,6 +11,7 @@ import re
 import shlex
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import timedelta
 from html import escape
 from ipaddress import IPv4Network, IPv6Network
 from pathlib import Path
@@ -20,7 +21,7 @@ from app.access import PUBLIC_OPERATIONS
 from app.competitions import PROVIDER_ATTRIBUTIONS
 from app.models import PROBLEM_TYPES, CompetitionSummary, DataAttribution
 from app.problems import PROBLEM_MEDIA_TYPE
-from app.ratelimit import is_trusted_proxy
+from app.ratelimit import ACCESS_REQUEST_POLICY, QUOTA_WINDOW_SECONDS, is_trusted_proxy
 
 MARKDOWN_MEDIA_TYPE = "text/markdown; charset=utf-8"
 HTML_MEDIA_TYPE = "text/html; charset=utf-8"
@@ -1410,6 +1411,15 @@ def robots_txt(base_url: str, *, crawlable: bool) -> str:
 
 
 @dataclass(frozen=True)
+class AccessRequestPrivacy:
+    """Access request retention (ADR 0010) and whether the operator is notified via Telegram."""
+
+    unapproved_retention: timedelta
+    claim_window: timedelta
+    telegram_notifications: bool
+
+
+@dataclass(frozen=True)
 class PrivacyInfo:
     """What `/privacy` states about this instance (settings, not request data)."""
 
@@ -1419,6 +1429,70 @@ class PrivacyInfo:
     rate_limited: bool
     keys_enabled: bool
     oauth_enabled: bool
+    # None where access requests cannot be created (the read-only demo).
+    access_requests: AccessRequestPrivacy | None = None
+
+
+def _window(seconds: int) -> str:
+    """`60` → "one minute", `3600` → "one hour", `7200` → "2 hours"."""
+    for unit, length in (("hour", 3600), ("minute", 60), ("second", 1)):
+        if seconds % length == 0:
+            count = seconds // length
+            return f"one {unit}" if count == 1 else f"{count} {unit}s"
+    raise AssertionError(seconds)  # pragma: no cover - every whole number divides by 1
+
+
+def _days(value: timedelta) -> str:
+    return "1 day" if value.days == 1 else f"{value.days} days"
+
+
+def _access_request_blocks(info: AccessRequestPrivacy, rate_limited: bool) -> list[Block]:
+    ip_text = (
+        "Your IP address is counted in memory for the per-IP limit (see Rate limiting) and is "
+        "not stored with the request."
+        if rate_limited
+        else "Your IP address is not stored with the request."
+    )
+    blocks: list[Block] = [
+        Heading(2, "Access requests"),
+        Paragraph(
+            "If you request an API key (`create_access_request`, or the form on the landing "
+            "page), this instance stores the data you enter: your name, contact email, intended "
+            "use, client type, the competitions you selected, and your optional message. " + ip_text
+        ),
+        Bullets(
+            (
+                (
+                    "**Purpose**: the operator decides on your request with this data (and may "
+                    "use the email to ask about it), and the approved key is handed to you "
+                    "through the claim secret. Requests are never approved automatically, and "
+                    "keys are never sent by email."
+                ),
+                (
+                    "**Retention**: pending and rejected requests are deleted "
+                    f"{_days(info.unapproved_retention)} after they were created. For an approved "
+                    "request, the key and your personal data are erased when you claim the key, "
+                    f"or {_days(info.claim_window)} after approval if it is never claimed (an "
+                    "hourly job applies both limits). What remains is the request ID, status, "
+                    "client type, times, and key name."
+                ),
+                (
+                    "**Key name**: an approved key is named after the request ID and your name "
+                    "(for example `req-12-ada-lovelace`). The key name stays in the instance's "
+                    "key list and usage metrics while the key exists."
+                ),
+            )
+        ),
+    ]
+    if info.telegram_notifications:
+        blocks.append(
+            Paragraph(
+                "**Telegram** is used as a processor to notify the operator of each new request. "
+                "The notification holds the request ID, name, client type, intended use, and "
+                "competitions; never your email or your message."
+            )
+        )
+    return blocks
 
 
 def privacy_blocks(info: PrivacyInfo, base_url: str) -> list[Block]:
@@ -1442,15 +1516,29 @@ def privacy_blocks(info: PrivacyInfo, base_url: str) -> list[Block]:
         ),
     ]
     if info.rate_limited:
+        windows = _window(QUOTA_WINDOW_SECONDS)
+        if info.access_requests is not None:
+            windows += f"; {_window(ACCESS_REQUEST_POLICY.window_seconds)} for access requests"
         processed.append(
             "**Rate limiting**: the full client IP address (or API key name), held in memory "
-            "for the current one-minute window only and never written to disk."
+            f"only until its rate-limit window ends ({windows}) and never written to disk."
         )
     if info.keys_enabled or info.oauth_enabled:
         processed.append(
             "**Keyed clients**: the name of the API key or OAuth subject that made a request, "
             "for quotas and usage metrics. Keys are stored only as SHA-256 hashes."
         )
+    processed.append(
+        "**Landing page** (`/`, where the instance runs one): a separate front end that stores "
+        "nothing and sets no cookies. Its access logs record the time, method, path, status, "
+        "and the address of the operator's reverse proxy, not yours. It passes your IP address "
+        "on to this API (`X-Forwarded-For`), so its access logs and rate limits count you."
+    )
+    access_requests = (
+        _access_request_blocks(info.access_requests, info.rate_limited)
+        if info.access_requests is not None
+        else []
+    )
     return [
         Heading(1, "Privacy"),
         Paragraph(
@@ -1459,6 +1547,7 @@ def privacy_blocks(info: PrivacyInfo, base_url: str) -> list[Block]:
         ),
         Heading(2, "What is processed"),
         Bullets(tuple(processed)),
+        *access_requests,
         Heading(2, "Legal basis and your rights"),
         Paragraph(
             "Processing is limited to what is needed to operate and secure the service "
