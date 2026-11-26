@@ -217,8 +217,9 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
   operation ID except `PUBLIC_OPERATIONS` (`get_health`) needs a key, checked in the middleware
   *after* rate-limit counting so every `401` uses the IP quota; doc pages (no operation ID) stay
   public. `check_private_instance` (startup and `config check`) rejects env keys, a missing keys
-  file, a non-https public base URL, and demo mode. Hash entries need `issued_at`/`expires_at`
-  (at most 365 days apart; `subject` entries have none); expired keys resolve to `None` (plain
+  file, demo mode, and (unless the public base URL is localhost) a non-https base URL or a
+  `weak_database_password`. The base `compose.yaml` binds the API to `127.0.0.1` by default.
+  Hash entries need `issued_at`/`expires_at` (at most 365 days apart; `subject` entries have none); expired keys resolve to `None` (plain
   `401`, no new slug). The keys file reloads via `KeysFileWatcher.poll` in `_current_keys()`;
   tests patch `main.file_keys` (the watcher is `None` outside the lifespan). Keyed responses get
   `API-Key-Expires`; cacheable reads get `Cache-Control: private`. Edit the file only through

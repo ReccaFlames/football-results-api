@@ -959,6 +959,7 @@ feature is enabled, which is why the realm uses a scope mapper.
 ## Ubuntu deployment
 
 The Compose deployment runs PostgreSQL and the API on the same Ubuntu machine.
+Before the first deployment, work through the checklist in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 1. Install Docker Engine and the Docker Compose plugin.
 2. Copy the project to the server.
@@ -969,7 +970,8 @@ cp .env.example .env
 chmod 600 .env
 ~~~
 
-4. Set a long random POSTGRES_PASSWORD, a contact USER_AGENT, and the desired API_BIND_ADDRESS.
+4. Set a long random POSTGRES_PASSWORD (`openssl rand -hex 32`, before the first start), a
+   contact USER_AGENT, and API_BIND_ADDRESS (default `127.0.0.1`).
    For named API keys, create `secrets/api-keys.yaml` (git-ignored; mounted read-only at
    `/app/secrets`; the `keys` commands create it with mode `0644`, readable by the container
    user, UID 10001, since it holds only hashes), and set
@@ -985,7 +987,8 @@ docker compose logs --tail=100 api scheduler
 Both containers use restart: unless-stopped. PostgreSQL data is stored in the postgres_data named
 volume. Port 5432 remains bound to localhost.
 
-When using Caddy or nginx, set API_BIND_ADDRESS=127.0.0.1 and expose only the reverse proxy's
+API_BIND_ADDRESS defaults to 127.0.0.1: Docker-published ports bypass the Ubuntu firewall, so set
+`0.0.0.0` only on a trusted network. Put Caddy or nginx in front, and expose only the reverse proxy's
 HTTP/HTTPS ports through the Ubuntu firewall. Also set `FOOTBALL_RESULTS_TRUSTED_PROXIES` to the address the
 proxy connects from as seen by the API container (for a proxy on the host, the Docker network
 gateway, for example `172.16.0.0/12`), and make the proxy set `X-Forwarded-For`. Otherwise every
@@ -1003,8 +1006,9 @@ A private instance serves only invited people
   `/openapi.json`, `/docs`, and OAuth metadata stay public, and the agent docs say a key is needed.
 - Every `401` counts against the IP read quota. Cacheable reads send `Cache-Control: private`.
 - The API and `config check` refuse to start with `FOOTBALL_RESULTS_API_KEYS`, without
-  `FOOTBALL_RESULTS_API_KEYS_FILE`, without an `https` `FOOTBALL_RESULTS_PUBLIC_BASE_URL`
-  (localhost excepted), or in demo mode.
+  `FOOTBALL_RESULTS_API_KEYS_FILE`, without an `https` `FOOTBALL_RESULTS_PUBLIC_BASE_URL`, with
+  a database password that is a shipped default or shorter than 16 characters (both checks skip a
+  localhost base URL), or in demo mode.
 
 ### Public demo instance
 
@@ -1135,7 +1139,10 @@ chmod +x scripts/backup-postgres.sh
 ./scripts/backup-postgres.sh
 ~~~
 
-Backups go to ./backups and files older than seven days are removed. Example cron entry:
+Backups go to ./backups (mode `0600`). The script checks each dump with `pg_restore --list`; a
+failed or unreadable dump is deleted and the script exits non-zero, so a failure never leaves an
+empty file. Only after a good dump are files older than `BACKUP_RETENTION_DAYS` (default 7)
+removed. Example cron entry:
 
 ~~~cron
 15 3 * * * cd /opt/football-results-api && ./scripts/backup-postgres.sh >> /var/log/football-results-backup.log 2>&1
@@ -1323,7 +1330,7 @@ Deployment variables (Docker Compose):
 - POSTGRES_USER
 - POSTGRES_PASSWORD
 - POSTGRES_PORT
-- API_BIND_ADDRESS
+- API_BIND_ADDRESS (`127.0.0.1`)
 - API_PORT
 - Observability profile: PROMETHEUS_API_KEY, PROMETHEUS_RETENTION (`15d`), GRAFANA_ADMIN_USER,
   GRAFANA_ADMIN_PASSWORD, GRAFANA_BIND_ADDRESS (`127.0.0.1`), GRAFANA_PORT (`3000`),

@@ -236,9 +236,14 @@ PostgreSQL daily with [`pg_dump`](https://www.postgresql.org/docs/17/app-pgdump.
 dumps off the VM, because Oracle may reclaim an idle instance:
 
 ```bash
-# crontab -e (as the user that runs Docker)
-15 3 * * * cd ~/football-results && docker compose exec -T db pg_dump -U football -Fc football > ~/backups/football-$(date +\%F).dump && find ~/backups -name 'football-*.dump' -mtime +14 -delete
+# crontab -e (as the user that runs Docker); keeps 14 days of dumps
+15 3 * * * cd ~/football-results && BACKUP_RETENTION_DAYS=14 ./scripts/backup-postgres.sh ~/backups >> ~/backups/backup.log 2>&1
 ```
+
+`scripts/backup-postgres.sh` writes `football-<UTC timestamp>.dump` (mode `0600`), checks it with
+`pg_restore --list`, and exits non-zero without leaving a file when the dump fails; older dumps
+are pruned only after a good one. Copy `~/backups` off the VM (for example with `rclone` or
+`rsync` from another cron entry), and test a restore once before you rely on it.
 
 Restore into a fresh stack with `docker compose exec -T db pg_restore -U football -d football
 --clean --if-exists < football-<date>.dump`. Oracle also includes five free block volume backups
@@ -247,7 +252,23 @@ useful before upgrading the OS. A database derived from OpenLigaDB is subject to
 share-alike terms if you publish it
 ([ODbL 1.0](https://opendatacommons.org/licenses/odbl/1-0/)).
 
-## 6. Updates
+## 6. Monitoring
+
+The demo has no admin key, so the `observability` profile cannot scrape `/metrics`. Use a free
+external uptime monitor instead (for example UptimeRobot or Better Stack) on
+`https://demo.example.com/health`, every 5 minutes. `/health` answers `200` while the scheduler is
+stalled, so check the body, not only the status: alert unless it contains `"scheduler":"ok"`.
+
+```bash
+curl -s https://demo.example.com/health   # {"status":"ok","database":"ok","scheduler":"ok"}
+```
+
+A `503` `service-unavailable` means the database is down; `"scheduler":"stale"` or
+`"not_started"` means the scheduler container is not running or cannot reach the database
+(`docker compose logs scheduler`). Also put the Cloudflare origin certificate's expiry
+(section 3) in a calendar.
+
+## 7. Updates
 
 ```bash
 cd ~/football-results && git pull
@@ -296,5 +317,5 @@ provider, for example 90minut.pl for the Ekstraklasa:
    `providers` entry. Its fallback provider must be allowed too; for the Ekstraklasa that means
    leaving out the TheSportsDB fallback (`fallback_provider` and the `fallback_url`s) unless
    TheSportsDB grants permission as well.
-5. **Check and release**: the demo `config check` from section 6, the tests, a version bump,
-   then update the demo (section 6).
+5. **Check and release**: the demo `config check` from section 7, the tests, a version bump,
+   then update the demo (section 7).

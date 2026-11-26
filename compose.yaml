@@ -67,7 +67,7 @@ services:
       # directory, not the file: `keys` commands replace the file, and the API reloads it.
       - ./secrets:/app/secrets:ro
     ports:
-      - "${API_BIND_ADDRESS:-0.0.0.0}:${API_PORT:-8000}:8000"
+      - "${API_BIND_ADDRESS:-127.0.0.1}:${API_PORT:-8000}:8000"
 
   scheduler:
     build: .

@@ -638,6 +638,13 @@ def weak_database_password(database_url: str) -> bool:
     return password in DEFAULT_DATABASE_PASSWORDS or len(password) < MIN_DATABASE_PASSWORD_LENGTH
 
 
+WEAK_DATABASE_PASSWORD_ERROR = (
+    "the database password is missing, a shipped default, or shorter than "
+    f"{MIN_DATABASE_PASSWORD_LENGTH} characters; set POSTGRES_PASSWORD to "
+    "`openssl rand -hex 32` before the database is first created"
+)
+
+
 def check_demo_mode(config: CompetitionFile, file_keys: Sequence[access.FileKey]) -> None:
     """Raise when ``FOOTBALL_RESULTS_DEMO_MODE`` is on and the setup breaks ADR 0007."""
     if not settings.demo_mode:
@@ -649,11 +656,7 @@ def check_demo_mode(config: CompetitionFile, file_keys: Sequence[access.FileKey]
             "operator on /privacy"
         )
     if weak_database_password(settings.database_url):
-        errors.append(
-            "the database password is missing, a shipped default, or shorter than "
-            f"{MIN_DATABASE_PASSWORD_LENGTH} characters; set POSTGRES_PASSWORD to "
-            "`openssl rand -hex 32` before the database is first created"
-        )
+        errors.append(WEAK_DATABASE_PASSWORD_ERROR)
     if errors:
         raise ValueError(
             "FOOTBALL_RESULTS_DEMO_MODE is on, but:\n" + "\n".join(f"  - {item}" for item in errors)
@@ -682,13 +685,14 @@ def private_instance_errors(current: Settings) -> list[str]:
     base_url = current.public_base_url
     if base_url is None:
         errors.append("FOOTBALL_RESULTS_PUBLIC_BASE_URL is not set; set it to the https URL")
-    else:
-        parts = urlsplit(base_url)
-        if parts.scheme != "https" and parts.hostname not in LOCAL_HOSTS:
+    elif urlsplit(base_url).hostname not in LOCAL_HOSTS:
+        if urlsplit(base_url).scheme != "https":
             errors.append(
                 f"FOOTBALL_RESULTS_PUBLIC_BASE_URL {base_url} is not https; keys must not travel "
                 "in plain text"
             )
+        if weak_database_password(current.database_url):
+            errors.append(WEAK_DATABASE_PASSWORD_ERROR)
     return errors
 
 

@@ -703,6 +703,7 @@ def private_settings(**overrides: object) -> config_module.Settings:
         "api_keys_file": Path("keys.yaml"),
         "public_base_url": "https://football.example.com",
         "demo_mode": False,
+        "database_url": f"postgresql+psycopg_async://football:{'a' * 64}@db:5432/football",
     }
     return config_module.Settings(**(values | overrides))
 
@@ -715,6 +716,10 @@ def private_settings(**overrides: object) -> config_module.Settings:
         ({"public_base_url": None}, "PUBLIC_BASE_URL is not set"),
         ({"public_base_url": "http://football.example.com"}, "is not https"),
         ({"demo_mode": True}, "DEMO_MODE is on"),
+        (
+            {"database_url": "postgresql+psycopg_async://football:football@db:5432/football"},
+            "the database password is missing, a shipped default, or shorter than 16",
+        ),
     ],
 )
 def test_private_instances_need_file_keys_and_https(
@@ -723,10 +728,14 @@ def test_private_instances_need_file_keys_and_https(
     assert config_module.private_instance_errors(private_settings()) == []
     assert (
         config_module.private_instance_errors(
-            private_settings(public_base_url="http://localhost:8000")
+            private_settings(
+                public_base_url="http://localhost:8000",
+                database_url=config_module.Settings().database_url,
+            )
         )
         == []
     )
     errors = config_module.private_instance_errors(private_settings(**overrides))
     assert len(errors) == 1 and message in errors[0]
     assert "env-key" not in errors[0]
+    assert "football@" not in errors[0]

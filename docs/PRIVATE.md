@@ -32,6 +32,9 @@ The API and `python -m app.config check` refuse to start a private instance when
 - `FOOTBALL_RESULTS_API_KEYS_FILE` is not set.
 - `FOOTBALL_RESULTS_PUBLIC_BASE_URL` is missing or not `https` (localhost is allowed for
   testing).
+- The database password is a shipped default (`football`, `change-me`) or shorter than 16
+  characters (also skipped for a localhost base URL). Set `POSTGRES_PASSWORD` to
+  `openssl rand -hex 32` before the database is first created.
 - `FOOTBALL_RESULTS_DEMO_MODE` is on. A demo is public by design.
 
 ## 1. Settings
