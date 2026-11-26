@@ -10,7 +10,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from app.models import MATCH_STATUSES, SCRAPE_RUN_STATUSES
+from app.models import ACCESS_REQUEST_STATUSES, MATCH_STATUSES, SCRAPE_RUN_STATUSES
 
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
@@ -78,6 +78,10 @@ def parse_statuses(
 
 def parse_job_statuses(value: str | None) -> tuple[str, ...]:
     return parse_statuses(value, SCRAPE_RUN_STATUSES, "job")
+
+
+def parse_access_request_statuses(value: str | None) -> tuple[str, ...]:
+    return parse_statuses(value, ACCESS_REQUEST_STATUSES, "access request")
 
 
 def parse_date_bound(value: str | None, parameter: str, *, upper: bool) -> datetime | None:

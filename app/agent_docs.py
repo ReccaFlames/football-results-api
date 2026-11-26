@@ -93,6 +93,13 @@ PROBLEM_GUIDANCE: dict[str, tuple[str, str]] = {
             "new request only after it is decided."
         ),
     ),
+    "access-request-decided": (
+        "The operator already approved or rejected this access request, so it cannot be rejected.",
+        (
+            "Check its current status with `list_access_requests`; only `pending` requests can "
+            "be rejected."
+        ),
+    ),
     "invalid-parameter": (
         (
             "A parameter has an unsupported value: an unknown `fields` entry or `status`, a date "
@@ -161,6 +168,8 @@ CLI_COMMANDS: dict[str, str] = {
     "get_scheduler_status": "scheduler",
     "create_access_request": "create-access-request",
     "get_access_request": "get-access-request",
+    "list_access_requests": "list-access-requests",
+    "reject_access_request": "reject-access-request",
 }
 CLI_EXIT_CODES: tuple[tuple[int, str], ...] = (
     (0, "Success"),
@@ -169,9 +178,9 @@ CLI_EXIT_CODES: tuple[tuple[int, str], ...] = (
     (
         4,
         (
-            "Upstream or stale: server error, job conflict or pending access request (HTTP "
-            "409), rate limit after retries, network failure, timeout, failed job, or stale "
-            "data with `--fail-if-stale`"
+            "Upstream or stale: server error, job or access request conflict (HTTP 409), "
+            "rate limit after retries, network failure, timeout, failed job, or stale data "
+            "with `--fail-if-stale`"
         ),
     ),
     (5, "Auth: missing or invalid API key (HTTP 401/403), or writes disabled"),
@@ -1230,7 +1239,8 @@ def _cli_blocks(guide: AgentGuide) -> list[Block]:
         Paragraph(
             "Configure it with environment variables (or `--url`, `--api-key`, `--timeout`). A "
             "configured API key is sent on every request and selects your quota; `refresh`, "
-            "`fetch-season`, `status`, `scrape-runs`, and `scheduler` need an admin key."
+            "`fetch-season`, `status`, `scrape-runs`, `scheduler`, `list-access-requests`, and "
+            "`reject-access-request` need an admin key."
         ),
         Code(
             f"export FOOTBALL_RESULTS_URL={guide.base_url}\n"

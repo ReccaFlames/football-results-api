@@ -456,7 +456,7 @@ the maintainer runs `scripts/publish-wizard.sh`.
 - [ ] **21. Whistleprint landing page and access requests** (decided 2026-11-26, do before the
       server push; [ADR 0010](adr/0010-access-requests-are-owned-by-the-api-and-never-auto-approved.md),
       glossary: *Landing page*, *Access request*)
-  - [ ] 21a. API: `access_request` table (Alembic, `database-migration` skill); public operations
+  - [x] 21a. API: `access_request` table (Alembic, `database-migration` skill); public operations
         `create_access_request` (`POST /api/v1/access-requests`) and `get_access_request`
         (`GET /api/v1/access-requests/{id}`, needs the one-time claim secret, constant-time check;
         returns status and, once approved, the key exactly once); admin operations
@@ -476,7 +476,9 @@ the maintainer runs `scripts/publish-wizard.sh`.
           `Claim-Secret` header (never the query string, which access logs record); the path
           parameter is `access_request_id`. The honeypot moved to the landing app (21e): an
           API field would only confuse agents
-    - [ ] Admin operations `list_access_requests` and `reject_access_request` (+ CLI commands)
+    - [x] Admin operations `list_access_requests` (`GET /api/v1/admin/access-requests`) and
+          `reject_access_request` (`POST /api/v1/admin/access-requests/{access_request_id}/reject`,
+          `409 access-request-decided` unless pending) (+ CLI commands)
   - [ ] 21b. Telegram notification on each new request (ID, name, client type, intended use,
         competitions; never the email): optional `FOOTBALL_RESULTS_TELEGRAM_BOT_TOKEN` and
         `FOOTBALL_RESULTS_TELEGRAM_CHAT_ID`; without them only a log line and a metric

@@ -33,6 +33,8 @@ OPERATIONS: dict[str, str] = {
     "scheduler": "get_scheduler_status",
     "create-access-request": "create_access_request",
     "get-access-request": "get_access_request",
+    "list-access-requests": "list_access_requests",
+    "reject-access-request": "reject_access_request",
 }
 
 # Options that only steer the CLI and are never sent to the API, per command.
@@ -50,6 +52,8 @@ CLI_ONLY_OPTIONS: dict[str, frozenset[str]] = {
     "scheduler": frozenset({"json_output"}),
     "create-access-request": frozenset({"json_output"}),
     "get-access-request": frozenset({"json_output"}),
+    "list-access-requests": frozenset({"json_output", "all_pages", "max_items"}),
+    "reject-access-request": frozenset({"json_output"}),
 }
 
 # Item fields for commands whose `--fields` is applied by the CLI (the API has no `fields=`).
@@ -173,8 +177,9 @@ def root(
             show_envvar=True,
             help=(
                 "API key, sent on every request (it selects your quota); refresh, fetch-season, "
-                "status, scrape-runs, and scheduler need an admin key. Sent only to the API URL, "
-                "never printed. Prefer the environment variable over the option."
+                "status, scrape-runs, scheduler, list-access-requests, and reject-access-request "
+                "need an admin key. Sent only to the API URL, never printed. Prefer the "
+                "environment variable over the option."
             ),
             show_default=False,
         ),
@@ -942,6 +947,76 @@ def get_access_request(
         output.note(
             "Store the API key now: it is never shown again. Use it as FOOTBALL_RESULTS_API_KEY."
         )
+
+
+@app.command(
+    "list-access-requests",
+    epilog=(
+        "Examples:\n\n\b\n"
+        "  football-results list-access-requests --status pending\n"
+        "  football-results list-access-requests --all --max-items 500 --json"
+    ),
+)
+def list_access_requests(
+    ctx: typer.Context,
+    status: Annotated[
+        str | None,
+        typer.Option(
+            "--status",
+            help=(
+                "Comma-separated statuses: pending, approved, rejected, claimed, expired "
+                "[default: all]"
+            ),
+            show_default=False,
+        ),
+    ] = None,
+    limit: LimitOption = None,
+    cursor: CursorOption = None,
+    all_pages: AllOption = False,
+    max_items: MaxItemsOption = 1000,
+    json_output: JsonOption = False,
+) -> None:
+    """List access requests, newest first; needs an admin key (list_access_requests).
+
+    Shows contact details and intended use. Approve a request on the server with
+    'python -m app.config access-requests approve'.
+    """
+    params = {"status": status, "limit": limit, "cursor": cursor}
+    body = _fetch_list(
+        _api(ctx),
+        "/api/v1/admin/access-requests",
+        params,
+        all_pages=all_pages,
+        max_items=max_items,
+    )
+    if output.use_json(json_output):
+        output.print_json(body)
+        return
+    output.print_table(body["data"], output.ACCESS_REQUEST_COLUMNS, title="Access requests")
+    output.print_footer(body)
+
+
+@app.command(
+    "reject-access-request",
+    epilog=(
+        "Examples:\n\n\b\n"
+        "  football-results reject-access-request 7\n"
+        "  football-results reject-access-request 7 --json"
+    ),
+)
+def reject_access_request(
+    ctx: typer.Context,
+    access_request_id: Annotated[
+        int, typer.Argument(min=1, help="Access request ID from list-access-requests")
+    ],
+    json_output: JsonOption = False,
+) -> None:
+    """Reject a pending access request; needs an admin key (reject_access_request).
+
+    No key is issued. A request that is no longer pending fails with access-request-decided.
+    """
+    body = _api(ctx).post(f"/api/v1/admin/access-requests/{access_request_id}/reject", {}).body
+    _print_record(body, json_output=json_output, title="Access request")
 
 
 command = typer.main.get_command(app)

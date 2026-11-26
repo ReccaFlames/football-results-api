@@ -651,3 +651,43 @@ def test_a_key_that_expires_soon_prints_one_warning(monkeypatch: pytest.MonkeyPa
     assert "warning" not in result.stdout
 
     assert "expires" not in invoke("matches", env=env).stderr
+
+
+def test_admin_access_request_commands_list_and_reject(
+    requests, repository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for email in ("ada@example.com", "bob@example.com"):
+        assert (
+            invoke(
+                "create-access-request",
+                "--name",
+                "Ada",
+                "--contact-email",
+                email,
+                "--intended-use",
+                "Fan site",
+                "--client-type",
+                "human",
+            ).exit_code
+            == 0
+        )
+    assert invoke("list-access-requests").exit_code == 5
+
+    env = {"FOOTBALL_RESULTS_API_KEY": "test-api-key"}
+    rejected = invoke("reject-access-request", "1", env=env)
+    assert rejected.exit_code == 0, rejected.stderr
+    assert json.loads(rejected.stdout)["status"] == "rejected"
+    assert requests[-1].method == "POST"
+    decided = invoke("reject-access-request", "1", env=env)
+    assert decided.exit_code == 4
+    assert problem(decided)["type"].endswith("/problems/access-request-decided")
+
+    listed = invoke("list-access-requests", "--status", "pending", env=env)
+    assert listed.exit_code == 0, listed.stderr
+    assert [item["id"] for item in json.loads(listed.stdout)["data"]] == [2]
+    assert dict(requests[-1].url.params) == {"status": "pending"}
+
+    monkeypatch.setattr(output, "stdout_is_tty", lambda: True)
+    table = invoke("list-access-requests", env=env | {"COLUMNS": "200"})
+    assert table.exit_code == 0, table.stderr
+    assert "bob@example.com" in table.stdout and "rejected" in table.stdout

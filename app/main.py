@@ -41,6 +41,7 @@ from app.contract import (
     filter_hash,
     id_keyset,
     match_keyset,
+    parse_access_request_statuses,
     parse_date_bound,
     parse_fields,
     parse_job_statuses,
@@ -60,10 +61,13 @@ from app.mcp_server import (
     create_server,
 )
 from app.models import (
+    ACCESS_REQUEST_STATUSES,
     PROBLEM_TYPES,
     SCRAPE_RUN_STATUSES,
     AccessRequestCreate,
     AccessRequestCreated,
+    AccessRequestDetails,
+    AccessRequestsResponse,
     AccessRequestStatus,
     Competition,
     CompetitionSummary,
@@ -96,6 +100,7 @@ from app.ratelimit import (
 )
 from app.repository import (
     AccessRequestPending,
+    AccessRequestStateConflict,
     ActiveScrapeJobConflict,
     PostgresResultRepository,
     StoredAccessRequest,
@@ -1410,6 +1415,167 @@ async def get_scheduler_status() -> SchedulerStatus:
         workers=[observability.scheduler_worker(item, now, window) for item in workers],
         seasons=[observability.season_schedule(item, now) for item in seasons],
     )
+
+
+ADMIN_ACCESS_REQUEST_PATH = "/api/v1/admin/access-requests"
+
+
+def _access_request_details(request: StoredAccessRequest) -> AccessRequestDetails:
+    return AccessRequestDetails(
+        id=request.id,
+        status=request.status,
+        client_type=request.client_type,
+        name=request.name,
+        contact_email=request.contact_email,
+        intended_use=request.intended_use,
+        competitions=None if request.competitions is None else list(request.competitions),
+        message=request.message,
+        key_name=request.key_name,
+        created_at=request.created_at,
+        decided_at=request.decided_at,
+        claim_expires_at=request.claim_expires_at,
+        claimed_at=request.claimed_at,
+    )
+
+
+@app.get(
+    ADMIN_ACCESS_REQUEST_PATH,
+    operation_id="list_access_requests",
+    tags=[docs.TAG_ADMIN],
+    summary="List access requests",
+    description=(
+        "Use to review who asked for an API key: access requests, newest first, with their "
+        "contact details and intended use. Filter by `status` (for example `pending`). "
+        "Approve a request on the server with `python -m app.config access-requests approve`."
+    ),
+    response_model=AccessRequestsResponse,
+    dependencies=[Depends(require_api_key)],
+    responses={
+        200: {
+            "description": "Successful Response",
+            "headers": docs.NO_STORE_HEADER | docs.RATE_LIMIT_HEADERS,
+        },
+        400: docs.invalid_cursor(ADMIN_ACCESS_REQUEST_PATH),
+        **docs.auth_errors(ADMIN_ACCESS_REQUEST_PATH),
+        422: docs.error(
+            "Unknown `status` (`invalid-parameter` with `valid_values`), or request validation "
+            "failed (`validation-error`)",
+            unknown_status=docs.example(
+                "Unknown status",
+                "invalid-parameter",
+                "Unknown access request status",
+                ADMIN_ACCESS_REQUEST_PATH,
+                parameter="status",
+                invalid=["open"],
+                valid_values=list(ACCESS_REQUEST_STATUSES),
+            ),
+            validation=docs.limit_validation_example(ADMIN_ACCESS_REQUEST_PATH),
+        ),
+        429: docs.rate_limited(ADMIN_ACCESS_REQUEST_PATH, "read"),
+    },
+)
+async def list_access_requests(
+    status: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Comma-separated access request statuses: "
+                + ", ".join(ACCESS_REQUEST_STATUSES)
+                + " (default: all)"
+            ),
+            examples=["pending", "approved,claimed"],
+        ),
+    ] = None,
+    limit: docs.Limit = DEFAULT_LIMIT,
+    cursor: docs.Cursor = None,
+) -> AccessRequestsResponse:
+    statuses = _contract(lambda: parse_access_request_statuses(status))
+    digest = filter_hash({"status": statuses})
+    before_id = None
+    if cursor is not None:
+        before_id = _contract(lambda: id_keyset(cursor, digest))
+    requests = await store.list_access_requests(statuses, limit + 1, before_id)
+    page = requests[:limit]
+    next_cursor = encode_cursor([page[-1].id], digest) if len(requests) > limit else None
+    return AccessRequestsResponse(
+        data=[_access_request_details(item) for item in page],
+        pagination=Pagination(limit=limit, next_cursor=next_cursor),
+    )
+
+
+@app.post(
+    ADMIN_ACCESS_REQUEST_PATH + "/{access_request_id}/reject",
+    operation_id="reject_access_request",
+    tags=[docs.TAG_ADMIN],
+    summary="Reject a pending access request",
+    description=(
+        "Use to turn down a `pending` access request from `list_access_requests`; no key is "
+        "issued. The requester sees `rejected` with `get_access_request`. The request is "
+        "deleted with the other unapproved requests after 30 days."
+    ),
+    response_model=AccessRequestDetails,
+    dependencies=[Depends(require_api_key)],
+    responses={
+        200: {
+            "description": "The request is rejected",
+            "headers": docs.NO_STORE_HEADER | docs.RATE_LIMIT_HEADERS,
+        },
+        **docs.auth_errors(ADMIN_ACCESS_REQUEST_PATH + "/7/reject"),
+        404: docs.error(
+            "Unknown access request",
+            unknown=docs.example(
+                "Unknown access request",
+                "unknown-access-request",
+                "Unknown access request: 7",
+                ADMIN_ACCESS_REQUEST_PATH + "/7/reject",
+                parameter="access_request_id",
+                invalid=["7"],
+                hint="Find the ID with list_access_requests.",
+            ),
+        ),
+        409: docs.error(
+            "The request is no longer pending",
+            decided=docs.example(
+                "Already decided",
+                "access-request-decided",
+                "Access request 7 is approved, not pending",
+                ADMIN_ACCESS_REQUEST_PATH + "/7/reject",
+                parameter="access_request_id",
+                hint="Only pending requests can be rejected; check it with list_access_requests.",
+            ),
+        ),
+        422: docs.request_validation(
+            ADMIN_ACCESS_REQUEST_PATH + "/0/reject",
+            docs.minimum_validation_example(
+                ADMIN_ACCESS_REQUEST_PATH + "/0/reject", "path", "access_request_id"
+            ),
+        ),
+        429: docs.rate_limited(ADMIN_ACCESS_REQUEST_PATH + "/7/reject", "write"),
+    },
+)
+async def reject_access_request(
+    access_request_id: Annotated[
+        int, Path(ge=1, description="Access request ID from `list_access_requests`", examples=[7])
+    ],
+) -> AccessRequestDetails:
+    try:
+        rejected = await store.reject_access_request(access_request_id)
+    except AccessRequestStateConflict as error:
+        raise ProblemError(
+            "access-request-decided",
+            str(error),
+            parameter="access_request_id",
+            hint="Only pending requests can be rejected; check it with list_access_requests.",
+        ) from error
+    if rejected is None:
+        raise ProblemError(
+            "unknown-access-request",
+            f"Unknown access request: {access_request_id}",
+            parameter="access_request_id",
+            invalid=[str(access_request_id)],
+            hint="Find the ID with list_access_requests.",
+        )
+    return _access_request_details(rejected)
 
 
 @app.get(METRICS_PATH, include_in_schema=False, dependencies=[Depends(require_metrics_key)])

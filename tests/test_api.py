@@ -26,7 +26,7 @@ from app.models import (
 )
 from app.observability import ScrapeRunCount, SeasonState, WorkerHeartbeat
 from app.ratelimit import FixedWindowRateLimiter
-from app.repository import AccessRequestPending, StoredAccessRequest
+from app.repository import AccessRequestPending, AccessRequestStateConflict, StoredAccessRequest
 
 AUTH_HEADERS = {"X-API-Key": "test-api-key"}
 KEYS_NOW = datetime.now(UTC).replace(microsecond=0)
@@ -242,6 +242,26 @@ class FakeRepository:
 
     async def get_access_request(self, request_id):
         return self.access_requests.get(request_id)
+
+    async def list_access_requests(self, statuses=(), limit=None, before_id=None):
+        requests = [
+            item
+            for item in sorted(self.access_requests.values(), key=lambda item: -item.id)
+            if (not statuses or item.status in statuses)
+            and (before_id is None or item.id < before_id)
+        ]
+        return requests if limit is None else requests[:limit]
+
+    async def reject_access_request(self, request_id):
+        stored = self.access_requests.get(request_id)
+        if stored is None:
+            return None
+        if stored.status != "pending":
+            raise AccessRequestStateConflict(request_id, stored.status)
+        self.access_requests[request_id] = replace(
+            stored, status="rejected", decided_at=datetime.now(UTC)
+        )
+        return self.access_requests[request_id]
 
     def approve_access_request(self, request_id: int, key_name: str, api_key: str) -> None:
         self.access_requests[request_id] = replace(
@@ -1400,6 +1420,8 @@ def file_key(key: str, name: str, role: access.Role = "client", **quotas: int) -
         ("GET", "/api/v1/jobs/1"),
         ("GET", "/api/v1/admin/scrape-runs"),
         ("GET", "/api/v1/admin/scheduler"),
+        ("GET", "/api/v1/admin/access-requests"),
+        ("POST", "/api/v1/admin/access-requests/1/reject"),
         ("GET", "/metrics"),
     ],
 )
@@ -1423,7 +1445,9 @@ def test_client_keys_are_forbidden_on_admin_operations(
     assert client.request(method, path, json=body, headers=ADMIN_FILE_HEADERS).status_code != 403
     assert client.request(method, path, json=body, headers=AUTH_HEADERS).status_code != 403
     if path != "/metrics":
-        template = path.replace("/1", "/{job_id}")
+        template = path.replace("/jobs/1", "/jobs/{job_id}").replace(
+            "/access-requests/1", "/access-requests/{access_request_id}"
+        )
         responses = app.openapi()["paths"][template][method.lower()]["responses"]
         assert {"401", "403", "503"} <= set(responses)
 
@@ -1842,3 +1866,63 @@ def test_access_requests_are_limited_to_three_valid_requests_per_hour_per_ip(
     assert_problem(limited, 429, "rate-limited")
     assert limited.headers["ratelimit-policy"] == '"access-request";q=3;w=3600'
     assert 3500 < int(limited.headers["retry-after"]) <= 3600
+
+
+def test_admins_list_access_requests_newest_first_with_contact_details(tmp_path: Path) -> None:
+    client, repository = client_with_empty_store(tmp_path)
+    for number in range(3):
+        request = ACCESS_REQUEST | {"contact_email": f"user{number}@example.com"}
+        assert client.post("/api/v1/access-requests", json=request).status_code == 201
+    repository.approve_access_request(2, "req-2-ada", "frk_issued")
+    url = "/api/v1/admin/access-requests"
+
+    assert_problem(client.get(url), 401, "unauthorized")
+    first = client.get(url, params={"status": "pending", "limit": 1}, headers=AUTH_HEADERS)
+    assert first.headers["cache-control"] == "no-store"
+    [item] = first.json()["data"]
+    assert item["id"] == 3 and item["contact_email"] == "user2@example.com"
+    assert item["competitions"] == ["ekstraklasa"] and item["name"] == "Ada"
+    assert not {"claim_secret_hash", "api_key", "claim_secret"} & set(item)
+    cursor = first.json()["pagination"]["next_cursor"]
+    second = client.get(
+        url, params={"status": "pending", "limit": 1, "cursor": cursor}, headers=AUTH_HEADERS
+    ).json()
+    assert [item["id"] for item in second["data"]] == [1]
+    assert second["pagination"]["next_cursor"] is None
+    assert_problem(
+        client.get(url, params={"cursor": cursor}, headers=AUTH_HEADERS), 400, "invalid-cursor"
+    )
+
+    approved = client.get(url, params={"status": "approved"}, headers=AUTH_HEADERS).json()
+    [item] = approved["data"]
+    assert item["key_name"] == "req-2-ada" and item["claim_expires_at"] is not None
+    unknown = client.get(url, params={"status": "open"}, headers=AUTH_HEADERS)
+    assert assert_problem(unknown, 422, "invalid-parameter")["valid_values"] == [
+        "pending",
+        "approved",
+        "rejected",
+        "claimed",
+        "expired",
+    ]
+
+
+def test_admins_reject_only_pending_access_requests(tmp_path: Path) -> None:
+    client, repository = client_with_empty_store(tmp_path)
+    created = client.post("/api/v1/access-requests", json=ACCESS_REQUEST).json()
+    url = f"/api/v1/admin/access-requests/{created['id']}/reject"
+
+    assert_problem(client.post(url), 401, "unauthorized")
+    rejected = client.post(url, headers=AUTH_HEADERS)
+    assert rejected.status_code == 200
+    assert rejected.headers["cache-control"] == "no-store"
+    assert rejected.json()["status"] == "rejected" and rejected.json()["decided_at"]
+    status = client.get(created["status_url"], headers={"Claim-Secret": created["claim_secret"]})
+    assert status.json()["status"] == "rejected"
+
+    again = assert_problem(client.post(url, headers=AUTH_HEADERS), 409, "access-request-decided")
+    assert again["detail"] == f"Access request {created['id']} is rejected, not pending"
+    missing = client.post("/api/v1/admin/access-requests/99/reject", headers=AUTH_HEADERS)
+    assert assert_problem(missing, 404, "unknown-access-request")["invalid"] == ["99"]
+    # A rejected request frees the email for a new one.
+    assert client.post("/api/v1/access-requests", json=ACCESS_REQUEST).status_code == 201
+    assert repository.access_requests[created["id"]].status == "rejected"

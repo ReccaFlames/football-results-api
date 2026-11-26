@@ -461,6 +461,33 @@ class AccessRequestStatus(BaseModel):
     )
 
 
+class AccessRequestDetails(BaseModel):
+    """An access request as the operator sees it; never the claim secret or the key."""
+
+    id: int
+    status: AccessRequestState
+    client_type: ClientType
+    name: str | None = Field(description="Null once the key is claimed or the claim expired")
+    contact_email: str | None = Field(
+        description="Lower-cased; null once the key is claimed or the claim expired"
+    )
+    intended_use: str | None
+    competitions: list[str] | None
+    message: str | None
+    key_name: str | None = Field(description="Name of the issued key, once approved")
+    created_at: datetime
+    decided_at: datetime | None = Field(description="When the operator approved or rejected it")
+    claim_expires_at: datetime | None = Field(
+        description="While `approved`: the requester must claim the key before this time"
+    )
+    claimed_at: datetime | None
+
+
+class AccessRequestsResponse(BaseModel):
+    data: list[AccessRequestDetails]
+    pagination: Pagination
+
+
 class HealthStatus(BaseModel):
     status: Literal["ok"]
     database: Literal["ok"]
@@ -481,6 +508,7 @@ PROBLEM_TYPES: dict[str, tuple[int, str]] = {
     "method-not-allowed": (405, "Method not allowed"),
     "job-conflict": (409, "Job conflict"),
     "access-request-pending": (409, "Access request pending"),
+    "access-request-decided": (409, "Access request already decided"),
     "invalid-parameter": (422, "Invalid parameter"),
     "validation-error": (422, "Request validation failed"),
     "invalid-request": (422, "Invalid request"),

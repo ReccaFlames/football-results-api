@@ -375,6 +375,8 @@ go through Alembic.
 | GET | `/api/v1/admin/scheduler` | `get_scheduler_status` | Scheduler workers and heartbeats plus every scheduled season's next update, overdue time, staleness, and failure count (admin `X-API-Key` required) |
 | POST | `/api/v1/access-requests` | `create_access_request` | Ask the operator for an API key ([ADR 0010](docs/adr/0010-access-requests-are-owned-by-the-api-and-never-auto-approved.md)): `name`, `contact_email`, `intended_use`, `client_type` (`human`/`agent`), optional `competitions` and `message`. `201` with a one-time `claim_secret`; one pending request per email (`409 access-request-pending`); 3 valid requests per hour per client IP; `503 writes-disabled` on the demo. No key needed, even on a private instance |
 | GET | `/api/v1/access-requests/{access_request_id}` | `get_access_request` | Status of an access request; needs the `Claim-Secret` header (wrong secret or ID: `404 unknown-access-request`). Once approved, the first call returns the key in `api_key` and the status becomes `claimed`. No key needed |
+| GET | `/api/v1/admin/access-requests` | `list_access_requests` | Access requests, newest first, with name, contact email, intended use, competitions, and message (erased once the key is claimed or the claim expires); filter: `status`; cursor pagination (admin `X-API-Key` required) |
+| POST | `/api/v1/admin/access-requests/{access_request_id}/reject` | `reject_access_request` | Reject a pending access request; returns it with status `rejected` (unknown ID: `404 unknown-access-request`; already decided: `409 access-request-decided`; admin `X-API-Key` required) |
 
 Interactive documentation is available at `/docs`; the OpenAPI document is at `/openapi.json`.
 Agents should start at `/llms.txt` (see [Agent documentation](#agent-documentation)).
@@ -455,8 +457,8 @@ type `application/problem+json` and `Cache-Control: no-store`:
 - `type` is a stable relative URI; branch on it rather than on `detail`. Types: `invalid-cursor`
   (400), `unauthorized` (401), `forbidden` (403, a `client` key on an admin operation),
   `unknown-competition`, `unknown-season`, `unknown-job`, `unknown-access-request`,
-  `not-found` (404), `method-not-allowed` (405), `job-conflict` and `access-request-pending`
-  (409), `invalid-parameter` (`fields`, `status`, dates, cup `stage`, access-request
+  `not-found` (404), `method-not-allowed` (405), `job-conflict`, `access-request-pending`, and
+  `access-request-decided` (409), `invalid-parameter` (`fields`, `status`, dates, cup `stage`, access-request
   `competitions`), `validation-error` (type, range, pattern, or missing
   values), `invalid-request` (write-endpoint rules) (all 422), `rate-limited` (429),
   `internal-error` (500), `writes-disabled` and `service-unavailable` (503).
@@ -717,7 +719,7 @@ Use `./cli`, not `.`: `uvx --from .` would install the whole API with its depend
 | Variable | Option | Default | Purpose |
 | --- | --- | --- | --- |
 | `FOOTBALL_RESULTS_URL` | `--url` | the public demo once its host is set, until then `http://localhost:8000` | API base URL, optionally with a path prefix |
-| `FOOTBALL_RESULTS_API_KEY` | `--api-key` | none | Sent as `X-API-Key` on every request (it selects the key's quota; a private instance needs it for every command except `health`, `competitions`, and the access-request commands); `refresh`, `fetch-season`, `status`, `scrape-runs`, and `scheduler` need an admin key. The CLI warns on stderr when the API's `API-Key-Expires` header is within 14 days |
+| `FOOTBALL_RESULTS_API_KEY` | `--api-key` | none | Sent as `X-API-Key` on every request (it selects the key's quota; a private instance needs it for every command except `health`, `competitions`, `create-access-request`, and `get-access-request`); `refresh`, `fetch-season`, `status`, `scrape-runs`, `scheduler`, `list-access-requests`, and `reject-access-request` need an admin key. The CLI warns on stderr when the API's `API-Key-Expires` header is within 14 days |
 | `FOOTBALL_RESULTS_TIMEOUT` | `--timeout` | `30` | HTTP timeout in seconds |
 | `FOOTBALL_RESULTS_CLAIM_SECRET` | `--claim-secret` (`get-access-request` only) | none | Claim secret from `create-access-request`, sent as the `Claim-Secret` header; prefer the variable to keep it out of shell history |
 
@@ -746,13 +748,15 @@ ignores these three variables; its settings use other names.
 | `scheduler` | `get_scheduler_status` | none |
 | `create-access-request` | `create_access_request` | `--name`, `--contact-email`, `--intended-use`, `--client-type` (all required), `--competitions` (comma-separated), `--message` |
 | `get-access-request ACCESS_REQUEST_ID` | `get_access_request` | the request ID, `--claim-secret` (required) |
+| `list-access-requests` | `list_access_requests` | `--status`, `--limit`, `--cursor` |
+| `reject-access-request ACCESS_REQUEST_ID` | `reject_access_request` | the request ID |
 
 Options use the API parameter names (`--date-from` is `date_from`). CLI-only options:
 
 - `--json` prints JSON even on a terminal.
 - `--fields` selects item fields. The API applies it for `matches` and `standings`; the CLI applies
   it for `competitions` and `teams`.
-- `--all` (`matches`, `teams`, `scrape-runs`) follows `next_cursor` and prints one combined response with up to
+- `--all` (`matches`, `teams`, `scrape-runs`, `list-access-requests`) follows `next_cursor` and prints one combined response with up to
   `--max-items` items (default 1000).
 - `--fail-if-stale` (`matches`, `standings`) prints the data, then exits 4 if a competition-season
   was never fetched or its `next_update_at` is more than 15 minutes in the past.
@@ -1087,8 +1091,10 @@ about 200 MB of RAM. Terms such as *stale season* and *stalled scheduler* are de
     name (`env` for `FOOTBALL_RESULTS_API_KEYS`, `anonymous` without a valid key) and policy
   - `football_results_api_key_expires_in_seconds{key}`: time until each keys-file key expires
     (negative once expired)
-- Admin endpoints (admin `X-API-Key`): `list_scrape_runs` and `get_scheduler_status`, also available as
-  `football-results scrape-runs` and `football-results scheduler`. They are not MCP tools. Import
+- Admin endpoints (admin `X-API-Key`): `list_scrape_runs`, `get_scheduler_status`,
+  `list_access_requests`, and `reject_access_request`, also available as `football-results
+  scrape-runs`, `scheduler`, `list-access-requests`, and `reject-access-request`. They are not MCP
+  tools. Import
   jobs include their `provider`, a `fallback` flag, and `matches_skipped` (matches a fallback
   refresh skipped because a team is not yet a team of the season; the `scrape-runs` table shows
   it); a fallback refresh records the failed primary run and the fallback run separately. Scheduler seasons include

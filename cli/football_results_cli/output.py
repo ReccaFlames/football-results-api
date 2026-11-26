@@ -156,6 +156,15 @@ SCRAPE_RUN_COLUMNS = (
     Column("Skipped", lambda item: format_value(item.get("matches_skipped")), numeric=True),
     Column("Error", lambda item: truncate(item.get("error_message"))),
 )
+ACCESS_REQUEST_COLUMNS = (
+    Column("ID", lambda item: str(item["id"]), numeric=True),
+    Column("Status", lambda item: format_value(item.get("status"))),
+    Column("Client", lambda item: format_value(item.get("client_type"))),
+    Column("Name", lambda item: truncate(item.get("name"), 30)),
+    Column("Email", lambda item: format_value(item.get("contact_email"))),
+    Column("Created (UTC)", lambda item: format_value(item.get("created_at"), "_at")),
+    Column("Intended use", lambda item: truncate(item.get("intended_use"))),
+)
 SEASON_SCHEDULE_COLUMNS = (
     Column("Competition", lambda item: format_value(item.get("competition"))),
     Column("Season", lambda item: format_value(item.get("season"))),
