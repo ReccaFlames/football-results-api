@@ -23,7 +23,8 @@
           </thead>
           <tbody>
             {% for competition in competitions %}
-            <tr><td>{{ competition.name }}</td><td>{{ competition.country or "–" }}</td><td>{{ competition.current_season or "–" }}</td></tr>
+            {% set flag = country_flags.get(competition.country) %}
+            <tr><td>{{ competition.name }}</td><td>{% if flag %}<img class="flag" src="static/flags/{{ flag }}.svg" alt="{{ competition.country }}" title="{{ competition.country }}" width="28" height="21">{% else %}{{ competition.country or "–" }}{% endif %}</td><td>{{ competition.current_season or "–" }}</td></tr>
             {% endfor %}
           </tbody>
         </table>

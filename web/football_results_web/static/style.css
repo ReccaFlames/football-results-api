@@ -280,6 +280,14 @@ th {
   border-bottom-color: color-mix(in srgb, var(--ink) 50%, transparent);
 }
 
+.flag {
+  display: block;
+  width: 1.75rem;
+  height: auto;
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ink) 20%, transparent);
+}
+
 .resources {
   padding-left: 2.25rem;
   border-left: 1px solid color-mix(in srgb, var(--ink) 50%, transparent);

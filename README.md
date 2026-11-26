@@ -292,7 +292,10 @@ notice in `/llms.txt`). Its footer attributes each data source once, from the co
 the operator contact (`FOOTBALL_RESULTS_OPERATOR_CONTACT`). It follows the browser's light or dark
 preference, has no JavaScript, and loads nothing from other origins: the pitch artwork is inline
 SVG and the Inter typeface (SIL Open Font License, `static/inter-OFL.txt`) is self-hosted, subset
-to Latin and Latin Extended. With the API running on port 8000:
+to Latin and Latin Extended. Countries are shown as self-hosted flags (`static/flags/`,
+flag-icons, MIT) mapped by name in `COUNTRY_FLAGS`; a country without a flag is shown as text, so
+a new country needs its flag added there (a test checks the configured ones). With the API
+running on port 8000:
 
 ~~~bash
 uv run uvicorn football_results_web.main:app --reload --port 8001

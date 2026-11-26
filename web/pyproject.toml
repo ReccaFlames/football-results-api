@@ -28,4 +28,4 @@ Issues = "https://github.com/ReccaFlames/football-results-api/issues"
 include = ["football_results_web*"]
 
 [tool.setuptools.package-data]
-football_results_web = ["templates/*", "static/*"]
+football_results_web = ["templates/*", "static/*", "static/flags/*"]

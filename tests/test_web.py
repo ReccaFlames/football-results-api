@@ -8,6 +8,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+import yaml
 from football_results_web import api as web_api
 from football_results_web import main as web
 from starlette.testclient import TestClient
@@ -121,7 +122,7 @@ def test_page_lists_competitions_and_links_without_scripts_or_absolute_urls(
     assert "font-src 'self'" in response.headers["content-security-policy"]
     page = response.text
     assert "<title>Whistleprint</title>" in page
-    assert "<td>3. Liga</td><td>Germany</td><td>2026-2027</td>" in page
+    assert '<td>3. Liga</td><td><img class="flag" src="static/flags/de.svg" alt="Germany"' in page
     assert "<td>&lt;b&gt;Cup&lt;/b&gt;</td><td>–</td><td>–</td>" in page
     links = re.findall(r'(?:href|src)="([^"]*)"', page)
     for target in (
@@ -301,6 +302,33 @@ def test_demo_instance_shows_no_key_needed_instead_of_the_form(
 
     assert "No key needed" in page and "<form" not in page
     assert 'href="./#request-access"' not in page
+
+
+def test_countries_show_as_flags_and_unknown_ones_as_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    competitions = [
+        {"slug": "a", "name": "A", "country": "Poland", "current_season": None},
+        {"slug": "b", "name": "B", "country": "<i>Narnia</i>", "current_season": None},
+    ]
+    fake_api(monkeypatch, routes(competitions=lambda _: httpx.Response(200, json=competitions)))
+    client = landing()
+
+    page = client.get("/").text
+
+    assert '<td>A</td><td><img class="flag" src="static/flags/pl.svg" alt="Poland"' in page
+    assert "<td>B</td><td>&lt;i&gt;Narnia&lt;/i&gt;</td>" in page
+    assert client.get("/static/flags/pl.svg").headers["content-type"] == "image/svg+xml"
+
+
+def test_every_configured_country_has_a_flag() -> None:
+    countries = {
+        competition["country"]
+        for name in ("competitions.yaml", "demo-competitions.yaml")
+        for competition in yaml.safe_load((ROOT / "config" / name).read_text())["competitions"]
+        if competition.get("country")
+    }
+    assert countries <= set(web.COUNTRY_FLAGS)
+    for flag in web.COUNTRY_FLAGS.values():
+        assert (web.STATIC / "flags" / f"{flag}.svg").is_file()
 
 
 def test_unknown_demo_mode_shows_the_form(monkeypatch: pytest.MonkeyPatch) -> None:

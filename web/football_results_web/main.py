@@ -33,6 +33,10 @@ SECURITY_HEADERS = {
 }
 
 
+# Country names as the API returns them, mapped to flags in `static/flags/` (flag-icons, MIT).
+# A country without an entry is shown as text.
+COUNTRY_FLAGS = {"England": "gb-eng", "Germany": "de", "Poland": "pl"}
+
 # Field limits of the API's `create_access_request` body (a contract test compares them).
 MAX_LENGTHS = {"name": 200, "contact_email": 320, "intended_use": 1000, "message": 2000}
 CLIENT_TYPES = ("human", "agent")
@@ -202,6 +206,7 @@ def create_app(
             {
                 "logo": logo,
                 "api_link": api_link,
+                "country_flags": COUNTRY_FLAGS,
                 "competitions": listed,
                 "attributions": footer_attributions(listed),
                 "max_lengths": MAX_LENGTHS,
