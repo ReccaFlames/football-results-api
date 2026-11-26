@@ -225,6 +225,21 @@ code {
   }
 }
 
+/* The data points drift (SVG animation, no script); a still copy replaces them on request. */
+.pitch-data-still {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pitch-data-moving {
+    display: none;
+  }
+
+  .pitch-data-still {
+    display: inline;
+  }
+}
+
 /* Competitions and resources */
 
 .overview {
