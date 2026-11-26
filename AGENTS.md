@@ -51,6 +51,10 @@ API.
 | `cli/football_results_cli/client.py` | `Config`, `create_http_client` (test seam), `ApiClient` with GET retries and HTTP → problem mapping |
 | `cli/football_results_cli/output.py` | JSON vs Rich tables (TTY detection), freshness footer, staleness rule |
 | `cli/football_results_cli/problems.py` | Exit codes, CLI problem slugs (`urn:football-results:cli:<slug>`), `exit_code_for` |
+| `web/` | Separate uv workspace package `football-results-web` (Starlette + Jinja2 + httpx): the Whistleprint landing page |
+| `web/football_results_web/main.py` | `create_app`: `/` (competitions, developer and agent links, access request form or "no key needed" on a demo), `POST /request-access` (`AccessForm`, honeypot, `form_errors` maps problem slugs to field messages, `no-store`), `/static/*`, `/favicon.ico`, security headers |
+| `web/football_results_web/api.py` | `create_http_client` (test seam), `TimedCache` (5-minute cache, last good value kept): `CompetitionCache`, `DemoModeCache` (demo notice in `/llms.txt`); `create_access_request` (problem parsing), `forwarded_for`; `FOOTBALL_RESULTS_WEB_API_URL` |
+| `web/football_results_web/templates/`, `static/` | Jinja2 templates; stylesheet, logo, mark, and favicon (package data) |
 | `skills/football-results/SKILL.md` | Consumer Agent Skill for API users (teaches the CLI), served unchanged at `/skills/football-results/SKILL.md` |
 | `server.json` | MCP Registry metadata (`io.github.ReccaFlames/football-results`; demo remote first, `{host}` template second), validated against `tests/schemas/server.schema.json` |
 | `scripts/set_demo_host.py` | Replaces the `FOOTBALL_DEMO_HOST` placeholder (server.json) and `DEMO_URL` (CLI) once; `--check` fails while one remains (ADR 0009) |
@@ -75,6 +79,7 @@ uv run ruff format --check .        # formatting (enforced in CI)
 uv run alembic upgrade head --sql   # validate migrations offline
 uv run football-results --help      # CLI from the workspace (FOOTBALL_RESULTS_URL, default :8000)
 uvx --from ./cli football-results --help   # CLI install smoke test (not `--from .`)
+uv run uvicorn football_results_web.main:app --reload --port 8001   # landing page (API on :8000)
 
 # PostgreSQL integration tests (repository + migrations), disposable DB on port 55432
 docker compose --profile test up -d --wait test-db
@@ -171,8 +176,19 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
   `FOOTBALL_RESULTS_TIMEOUT` belong to the CLI; never add `url`, `api_key`, or `timeout` fields to
   the server `Settings` (a test checks). The CLI sends the API key on every request (it selects
   the caller's quota, ADR 0005), only to the configured URL, and never prints it.
-- Both packages share one version; bump `pyproject.toml` and `cli/pyproject.toml` together (a test
-  checks). Both are MIT (`LICENSE`, copied to `cli/LICENSE` for the CLI's PyPI package).
+- The landing app (`web/`, ADR 0010) follows the same rules as the CLI: it must not import `app`
+  and the API must not import it (a test checks); it calls the API over HTTP only
+  (`FOOTBALL_RESULTS_WEB_API_URL`). "Whistleprint" is its UI brand only; package and module names
+  stay `football-results`. No JavaScript, no external assets, and only relative links (it shares
+  the API's origin). Its tests use a fake API through `create_http_client`. It detects a demo
+  instance by the line starting with `**Demo instance:**` in `/llms.txt` (`api.DEMO_NOTICE`; a
+  contract test against the real API pins it), so keep that line when editing the demo notice.
+  The form's `MAX_LENGTHS` mirror `AccessRequestCreate` (a test checks). It shows API problems by
+  their `type` slug, never echoes a claim secret outside the confirmation page, and appends the
+  visitor's address to `X-Forwarded-For`.
+- All three packages share one version; bump `pyproject.toml`, `cli/pyproject.toml`, and
+  `web/pyproject.toml` together (tests check). All are MIT (`LICENSE`, copied to `cli/LICENSE`
+  and `web/LICENSE`).
 - Publishing (ADR 0009): nothing is published from a working copy. The release workflow publishes
   the CLI to PyPI and `server.json` to the MCP Registry from a `v*` tag; the maintainer runs
   `scripts/publish-wizard.sh`. Keep the `FOOTBALL_DEMO_HOST` and `DEMO_URL = None` placeholders
@@ -181,7 +197,7 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
   `/privacy` states what the instance processes; when you add logging or storage of personal
   data (IPs, key names), update `privacy_blocks` in `app/agent_docs.py`.
 - Evals (`evals/`) are run by hand before a release, never in pytest or CI; a new top task or
-  MCP tool deserves an eval task. The Docker image installs only the API (`uv sync --frozen --no-dev`), not `cli/`.
+  MCP tool deserves an eval task. The Docker image installs only the API (`uv sync --frozen --no-dev`), not `cli/` or `web/`.
 - Observability: `/metrics` (not an OpenAPI operation, rate-limit exempt) and the `Admin`
   operations need an API key; `/metrics` also accepts `Authorization: Bearer`. Scheduler and
   season metrics are computed from PostgreSQL at scrape time with the rules in

@@ -1,0 +1,159 @@
+:root {
+  color-scheme: light dark;
+  --ink: #12221c;
+  --paper: #fbf8f3;
+  --muted: #4a5a53;
+  --accent: #b5321a;
+  --rule: #d9d2c5;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #f2ede4;
+    --paper: #12221c;
+    --muted: #b8c2bc;
+    --accent: #f0785f;
+    --rule: #34453e;
+  }
+
+  #wordmark {
+    fill: var(--ink);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 2rem 1rem;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  line-height: 1.5;
+  color: var(--ink);
+  background: var(--paper);
+}
+
+a {
+  color: var(--accent);
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9em;
+}
+
+.logo {
+  display: inline-block;
+}
+
+.logo svg {
+  display: block;
+  width: 100%;
+  max-width: 20rem;
+  height: auto;
+}
+
+.pitch {
+  font-size: 1.15rem;
+}
+
+h2 {
+  margin-top: 2.5rem;
+  font-size: 1.25rem;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  padding: 0.4rem 0.5rem 0.4rem 0;
+  text-align: left;
+  border-bottom: 1px solid var(--rule);
+}
+
+footer {
+  margin-top: 3rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--rule);
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+label,
+legend {
+  display: block;
+  font-weight: 600;
+}
+
+fieldset {
+  margin: 1rem 0;
+  padding: 0.5rem 0.75rem 0.75rem;
+  border: 1px solid var(--rule);
+}
+
+fieldset label {
+  font-weight: normal;
+}
+
+input[type="text"],
+input[type="email"],
+textarea {
+  width: 100%;
+  padding: 0.4rem;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid var(--muted);
+}
+
+[aria-invalid="true"] {
+  border-color: var(--accent);
+}
+
+button {
+  padding: 0.5rem 1rem;
+  font: inherit;
+  color: var(--paper);
+  background: var(--accent);
+  border: 0;
+  cursor: pointer;
+}
+
+.hint,
+.field-error {
+  display: block;
+  font-size: 0.9rem;
+}
+
+.hint {
+  color: var(--muted);
+}
+
+.field-error {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.problem {
+  padding: 0.5rem 0.75rem;
+  border-left: 4px solid var(--accent);
+}
+
+.secret {
+  font-size: 1.05rem;
+  word-break: break-all;
+}
+
+/* The honeypot: off screen, not `display: none`, which some bots detect. */
+.trap {
+  position: absolute;
+  left: -10000px;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+}

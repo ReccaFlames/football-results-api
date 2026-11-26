@@ -500,9 +500,9 @@ the maintainer runs `scripts/publish-wizard.sh`.
   - [ ] 21e. Landing app: new uv workspace package `web/` (`football-results-web`, Starlette +
         Jinja2 + httpx; must not import `app`, talks to the API over HTTP like the CLI). Brand
         "Whistleprint" in the UI only (technical names stay `football-results`). Move `images/`
-        (logo, mark, favicon) to `web/static/`. Server-rendered, no JS required, semantic HTML,
-        single column (~40rem), system fonts, `prefers-color-scheme` light/dark, no external
-        assets. Sections: logo + one-line pitch; competitions (name, country, current season) from
+        (logo, mark, favicon) to `web/football_results_web/static/`. Server-rendered, no JS
+        required, semantic HTML, single column (~40rem), system fonts, `prefers-color-scheme`
+        light/dark, no external assets. Sections: logo + one-line pitch; competitions (name, country, current season) from
         `list_competitions`, cached 5 min (if never fetched: "temporarily unavailable" + link to
         `/llms.txt`); developers (`/docs`, `/openapi.json`, CLI install); agents (`/llms.txt`,
         `/agents`, `/mcp`, skill); private: access request form (plain HTML POST to
@@ -511,6 +511,20 @@ the maintainer runs `scripts/publish-wizard.sh`.
         attributions (OpenLigaDB ODbL), operator contact. Relative links only. Forwards
         `X-Forwarded-For`; listed in `FOOTBALL_RESULTS_TRUSTED_PROXIES`. Stays public on a private
         instance
+    - [x] 21e-1. Package skeleton and read-only page: workspace member `web/`
+          (`football_results_web`, same version as the API and CLI, MIT); images moved into
+          the package (`web/football_results_web/static/`, shipped in the wheel); `GET /` with
+          logo, pitch, competitions (5-minute cache; stale data kept on failure; "temporarily
+          unavailable" + `llms.txt` link if never fetched), developer and agent links (to the
+          generated `/agents` sections, so the page needs no base URL), footer with `/privacy`;
+          `/static/*`, `/favicon.ico`; `create_http_client` test seam; tests with a fake API
+    - [x] 21e-2. Access request form: plain HTML POST to `/request-access` (demo: "no key needed"
+          instead, read from the API), confirmation page with the request ID and claim secret
+          once, API problems rendered readably, hidden honeypot dropped silently,
+          `X-Forwarded-For` forwarded
+    - [ ] 21e-3. Footer details: provider attributions (source to be decided: today only
+          `PROVIDER_ATTRIBUTIONS` in `app/agent_docs.py`, which `web/` cannot import) and
+          operator contact; README and AGENTS.md wrap-up
   - [ ] 21f. Deployment: own Docker image and Compose service; Caddy routes `/`,
         `/request-access`, `/static/*`, `/favicon.ico` to the landing app and everything else to
         the API (the API keeps no `/` route); `docs/DEPLOYMENT.md`, `docs/PRIVATE.md`,
@@ -519,7 +533,7 @@ the maintainer runs `scripts/publish-wizard.sh`.
         processor, 30-day / claim-window retention (`privacy_blocks` in `app/agent_docs.py`)
   - [ ] 21h. Tests (API, CLI, landing app with a fake API; no network), docs (README, AGENTS.md
         layout table, ADR 0010), bump version in `pyproject.toml`, `cli/pyproject.toml`,
-        `server.json`, `uv lock`
+        `web/pyproject.toml`, `server.json`, `uv lock`
 - [ ] **20. OAuth for chat clients on private instances**: claude.ai and ChatGPT connectors cannot
       send `X-API-Key`, so a private instance needs a production authorization server (ADR 0006)
       before they can connect. Until then, chat clients are supported on the demo only.

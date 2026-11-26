@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block main %}
+    <section aria-labelledby="competitions">
+      <h2 id="competitions">Competitions</h2>
+      {% if competitions is none %}
+      <p>The competition list is temporarily unavailable. The <a href="llms.txt">API overview</a> lists the competitions this instance serves.</p>
+      {% elif not competitions %}
+      <p>No competitions are configured yet.</p>
+      {% else %}
+      <table>
+        <thead>
+          <tr><th scope="col">Competition</th><th scope="col">Country</th><th scope="col">Current season</th></tr>
+        </thead>
+        <tbody>
+          {% for competition in competitions %}
+          <tr><td>{{ competition.name }}</td><td>{{ competition.country or "–" }}</td><td>{{ competition.current_season or "–" }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+    </section>
+
+    <section aria-labelledby="developers">
+      <h2 id="developers">For developers</h2>
+      <ul>
+        <li><a href="docs">Interactive API documentation</a></li>
+        <li><a href="openapi.json">OpenAPI specification</a></li>
+        <li><a href="agents#cli">Command-line client</a>: <code>uv tool install football-results-cli</code></li>
+      </ul>
+    </section>
+
+    <section aria-labelledby="agents">
+      <h2 id="agents">For AI agents</h2>
+      <ul>
+        <li><a href="llms.txt"><code>llms.txt</code></a>: the API in one page</li>
+        <li><a href="agents">Agent guide</a>: tasks, errors, and limits</li>
+        <li><a href="agents#mcp">MCP server</a> at <code>/mcp</code></li>
+        <li><a href="agents#skill">Agent Skill</a></li>
+      </ul>
+    </section>
+
+{% include "access.html" %}
+{% endblock %}

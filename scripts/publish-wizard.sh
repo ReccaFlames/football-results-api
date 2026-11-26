@@ -284,12 +284,12 @@ fi
 pause
 
 stage "Version $RELEASE_VERSION"
-say "Bumping pyproject.toml, cli/pyproject.toml, and server.json, then re-testing."
+say "Bumping pyproject.toml, cli/pyproject.toml, web/pyproject.toml, and server.json, then re-testing."
 uv run --no-project python - "$RELEASE_VERSION" <<'PY'
 import json, re, sys
 from pathlib import Path
 version = sys.argv[1]
-for name in ("pyproject.toml", "cli/pyproject.toml"):
+for name in ("pyproject.toml", "cli/pyproject.toml", "web/pyproject.toml"):
     path = Path(name)
     path.write_text(re.sub(r'(?m)^version = ".*"$', f'version = "{version}"', path.read_text(), 1))
 path = Path("server.json")

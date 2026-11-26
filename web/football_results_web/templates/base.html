@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="Football fixtures, results, and league tables for developers and AI agents.">
+  <title>{% block title %}Whistleprint{% endblock %}</title>
+  <link rel="icon" href="favicon.ico">
+  <link rel="stylesheet" href="static/style.css">
+</head>
+<body>
+  <header>
+    <a class="logo" href="./">{{ logo }}</a>
+    <p class="pitch">Football fixtures, results, and league tables as an API, for developers and AI agents.</p>
+  </header>
+  <main>
+{% block main %}{% endblock %}
+  </main>
+  <footer>
+    <nav aria-label="Legal">
+      <a href="privacy">Privacy</a>
+    </nav>
+  </footer>
+</body>
+</html>

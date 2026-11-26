@@ -214,7 +214,8 @@ keys:
 #### Access requests
 
 People and agents ask for a key with `create_access_request` and poll `get_access_request` with
-the one-time claim secret ([ADR 0010](docs/adr/0010-access-requests-are-owned-by-the-api-and-never-auto-approved.md)).
+the one-time claim secret ([ADR 0010](docs/adr/0010-access-requests-are-owned-by-the-api-and-never-auto-approved.md)),
+people usually through the landing page form ([Run the landing page locally](#run-the-landing-page-locally)).
 Nothing is approved automatically; the operator decides on the server (guide:
 [docs/PRIVATE.md](docs/PRIVATE.md#4-access-requests)):
 
@@ -272,6 +273,31 @@ Delete the development database only when intentionally starting over:
 ~~~bash
 docker compose down --volumes
 ~~~
+
+### Run the landing page locally
+
+The Whistleprint landing page (`web/`, package `football-results-web`, Starlette + Jinja2) is a
+separate, stateless app that talks to the API over HTTP only. It shows the competitions (from
+`list_competitions`, cached for 5 minutes), links to the developer and agent documentation, and
+an access request form (on a demo instance, "no key needed" instead; it reads this from the demo
+notice in `/llms.txt`). With the API running on port 8000:
+
+~~~bash
+uv run uvicorn football_results_web.main:app --reload --port 8001
+~~~
+
+`FOOTBALL_RESULTS_WEB_API_URL` sets the API base URL it calls (default `http://localhost:8000`).
+The page uses relative links because it is meant to be served on the same origin as the API, so
+its documentation links work only behind that shared origin (planned in roadmap item 21f), not on
+port 8001.
+
+The form posts to the landing app's `/request-access`, which calls `create_access_request` and
+shows the request ID and claim secret once (`Cache-Control: no-store`). API problems (validation,
+a pending request for the same email, the rate limit, an unreachable API) are shown next to the
+form with the entered values kept. A hidden honeypot field drops bot submissions without calling
+the API. The app appends the visitor's address to `X-Forwarded-For`, so the API's per-IP limit
+counts visitors only when the landing app (and any proxy in front of it) is listed in
+`FOOTBALL_RESULTS_TRUSTED_PROXIES`; otherwise all form requests share the landing app's limit.
 
 ### Run the complete stack
 
@@ -1401,7 +1427,7 @@ uv run alembic upgrade head --sql
 
 Unit and API tests use a repository test double and do not require PostgreSQL. CLI tests
 (`tests/test_cli.py`) run the CLI against the FastAPI app in-process or a mock transport, without
-network access.
+network access; the landing page tests (`tests/test_web.py`) do the same with a fake API.
 
 ### PostgreSQL integration tests
 
