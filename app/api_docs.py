@@ -35,6 +35,7 @@ TAG_STANDINGS = "Standings"
 TAG_REFRESH = "Data refresh"
 TAG_SYSTEM = "System"
 TAG_ADMIN = "Admin"
+TAG_ACCESS = "Access requests"
 
 OPENAPI_TAGS = [
     {
@@ -69,6 +70,14 @@ OPENAPI_TAGS = [
         "description": (
             "Operator views of import jobs and the scheduler. Requires an admin `X-API-Key`. Use to "
             "find out why data is stale; Prometheus metrics are served separately at `/metrics`."
+        ),
+    },
+    {
+        "name": TAG_ACCESS,
+        "description": (
+            "Ask the operator for an API key, mainly for a private instance. No key needed: "
+            "create a request, keep its claim secret, and poll it until the operator approves "
+            "it; the key is returned exactly once."
         ),
     },
 ]
@@ -174,6 +183,9 @@ CACHE_HEADERS = {
 }
 NO_STORE_HEADER = {"Cache-Control": _header("Never cached", "no-store")}
 LOCATION_HEADER = {"Location": _header("The job `status_url`", "/api/v1/jobs/42")}
+ACCESS_REQUEST_LOCATION_HEADER = {
+    "Location": _header("The access request `status_url`", "/api/v1/access-requests/7")
+}
 
 
 def cached_read(path: str) -> dict[int | str, dict[str, Any]]:
@@ -201,7 +213,8 @@ def private_unauthorized(path: str) -> dict[str, Any]:
             path,
             hint=(
                 "This is a private instance: send a key issued by the operator in the X-API-Key "
-                "header. Ask the operator for a key, or for a new one if yours expired."
+                "header. Request one with create_access_request (POST /api/v1/access-requests), "
+                "or ask the operator for a new one if yours expired."
             ),
         ),
     )
@@ -223,6 +236,23 @@ def rate_limited(path: str, policy: str) -> dict[str, Any]:
             hint="Retry after 42 seconds.",
         ),
     )
+
+
+def access_request_rate_limited(path: str) -> dict[str, Any]:
+    """`429` of `create_access_request`: the write quota, or 3 valid requests per hour per IP."""
+    response = rate_limited(path, "write")
+    response["description"] = (
+        "Too many requests from this client (the write quota, or 3 access requests per hour "
+        "per client IP); retry after `Retry-After` seconds"
+    )
+    response["content"][PROBLEM_MEDIA_TYPE]["examples"]["access_request"] = example(
+        "Access request limit",
+        "rate-limited",
+        "Rate limit exceeded: 3 access-request requests per 3600 seconds",
+        path,
+        hint="Retry after 1800 seconds.",
+    )
+    return response
 
 
 def validation_example(path: str, loc: list[str | int], msg: str, kind: str) -> dict[str, Any]:

@@ -111,10 +111,15 @@ class ApiClient:
         self.sleep = sleep
         self._expiry_warned = False
 
-    def get(self, path: str, params: Mapping[str, Any] | None = None) -> ApiResponse:
+    def get(
+        self,
+        path: str,
+        params: Mapping[str, Any] | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> ApiResponse:
         query = {key: value for key, value in (params or {}).items() if value is not None}
         for attempt in range(MAX_RETRIES + 1):
-            response = self._send("GET", path, params=query)
+            response = self._send("GET", path, params=query, extra_headers=headers)
             delay = retry_delay(response)
             if attempt == MAX_RETRIES or delay is None:
                 break
@@ -125,9 +130,16 @@ class ApiClient:
         payload = {key: value for key, value in body.items() if value is not None}
         return self._result(self._send("POST", path, json=payload))
 
-    def _send(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+    def _send(
+        self,
+        method: str,
+        path: str,
+        extra_headers: Mapping[str, str] | None = None,
+        **kwargs: Any,
+    ) -> httpx.Response:
         # Sent on every request: a key selects the caller's quota as well as its role (ADR 0005).
         headers = {"X-API-Key": self.config.api_key} if self.config.api_key else {}
+        headers |= extra_headers or {}
         url = f"{self.config.url}{path}"
         try:
             return self.http.request(method, path, headers=headers, **kwargs)

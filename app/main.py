@@ -7,7 +7,7 @@ from functools import lru_cache
 from importlib.metadata import version
 from typing import Annotated, Literal
 
-from fastapi import Depends, FastAPI, Path, Query, Request, Response
+from fastapi import Depends, FastAPI, Header, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
 from prometheus_client import CONTENT_TYPE_LATEST
@@ -62,6 +62,9 @@ from app.mcp_server import (
 from app.models import (
     PROBLEM_TYPES,
     SCRAPE_RUN_STATUSES,
+    AccessRequestCreate,
+    AccessRequestCreated,
+    AccessRequestStatus,
     Competition,
     CompetitionSummary,
     Freshness,
@@ -83,6 +86,7 @@ from app.models import (
 )
 from app.problems import ProblemError, install_problem_handlers, problem_response
 from app.ratelimit import (
+    ACCESS_REQUEST_POLICY,
     EXEMPT_PATHS,
     READ_METHODS,
     Client,
@@ -90,7 +94,12 @@ from app.ratelimit import (
     RateLimitPolicy,
     client_ip,
 )
-from app.repository import ActiveScrapeJobConflict, PostgresResultRepository
+from app.repository import (
+    AccessRequestPending,
+    ActiveScrapeJobConflict,
+    PostgresResultRepository,
+    StoredAccessRequest,
+)
 from app.seasons import SEASON_PATTERN, validate_season
 from app.standings import compute_standings
 
@@ -105,12 +114,11 @@ METRICS_PATH = "/metrics"
 # Keys from FOOTBALL_RESULTS_API_KEYS_FILE (ADR 0005), reloaded when the file changes (ADR 0008).
 file_keys: tuple[access.FileKey, ...] = ()
 keys_watcher: access.KeysFileWatcher | None = None
-# Every operation except these needs a key on a private instance (ADR 0008).
-PUBLIC_OPERATIONS = frozenset({"get_health"})
 KEY_EXPIRES_HEADER = "API-Key-Expires"
 PRIVATE_HINT = (
     "This is a private instance: send a key issued by the operator in the X-API-Key header. "
-    "Ask the operator for a key, or for a new one if yours expired."
+    "Request one with create_access_request (POST /api/v1/access-requests), or ask the "
+    "operator for a new one if yours expired."
 )
 ADMIN_KEY_HINT = (
     "The operator must configure an admin API key (FOOTBALL_RESULTS_API_KEYS or "
@@ -306,10 +314,13 @@ def _rate_limit_client(request: Request, identity: access.Identity | None) -> Cl
             identity.read_per_minute or read,
             identity.write_per_minute or write,
         )
+    return Client("ip:" + _client_address(request), access.ANONYMOUS, read, write)
+
+
+def _client_address(request: Request) -> str:
     peer = request.client.host if request.client else None
     forwarded = request.headers.getlist("X-Forwarded-For")
-    address = client_ip(peer, forwarded, _trusted_proxies(settings.trusted_proxies))
-    return Client("ip:" + address, access.ANONYMOUS, read, write)
+    return client_ip(peer, forwarded, _trusted_proxies(settings.trusted_proxies))
 
 
 def _rate_limit_hit(
@@ -374,7 +385,9 @@ async def rate_limit_and_cache(
         )
 
     response = await call_next(request)
-    response.headers.update(rate_headers)
+    # A route's own limit (`create_access_request`) keeps its headers.
+    for name, value in rate_headers.items():
+        response.headers.setdefault(name, value)
     if identity is not None and identity.expires_at is not None:
         response.headers[KEY_EXPIRES_HEADER] = access.format_time(identity.expires_at)
     route = request.scope.get("route")
@@ -418,14 +431,14 @@ def _route_for(request: Request) -> object | None:
 
 
 def _needs_key(request: Request) -> bool:
-    """On a private instance, every API operation except `PUBLIC_OPERATIONS` needs a key.
+    """On a private instance, every API operation except `access.PUBLIC_OPERATIONS` needs a key.
 
     `/mcp` and `/metrics` check their own credentials; documentation pages stay public.
     """
     if settings.anonymous_access:
         return False
     operation_id = getattr(_route_for(request), "operation_id", None)
-    return operation_id is not None and operation_id not in PUBLIC_OPERATIONS
+    return operation_id is not None and operation_id not in access.PUBLIC_OPERATIONS
 
 
 METRIC_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"})
@@ -1073,6 +1086,216 @@ async def fetch_historical_results(
     except ActiveScrapeJobConflict as error:
         raise ProblemError("job-conflict", str(error)) from error
     return _job_accepted(response, job_id, status)
+
+
+ACCESS_REQUEST_PATH = "/api/v1/access-requests"
+CLAIM_SECRET_HINT = (
+    "Send the claim_secret from create_access_request in the Claim-Secret header. A lost "
+    "secret cannot be recovered: create a new request."
+)
+
+
+def _access_request_status(
+    request: StoredAccessRequest, api_key: str | None = None
+) -> AccessRequestStatus:
+    return AccessRequestStatus(
+        id=request.id,
+        status=request.status,
+        client_type=request.client_type,
+        created_at=request.created_at,
+        decided_at=request.decided_at,
+        claim_expires_at=request.claim_expires_at,
+        key_name=request.key_name,
+        api_key=api_key,
+    )
+
+
+@app.post(
+    ACCESS_REQUEST_PATH,
+    operation_id="create_access_request",
+    tags=[docs.TAG_ACCESS],
+    summary="Ask the operator for an API key",
+    description=(
+        "Use when this instance is private (operations return `401`) or you need your own "
+        "quota. Needs no key. The operator reviews every request; nothing is granted "
+        "automatically. Store `claim_secret` at once (it is shown only here) and poll "
+        "`get_access_request` with it."
+    ),
+    response_model=AccessRequestCreated,
+    status_code=201,
+    responses={
+        201: {
+            "description": "The request is stored and waits for the operator",
+            "headers": docs.ACCESS_REQUEST_LOCATION_HEADER
+            | docs.NO_STORE_HEADER
+            | docs.RATE_LIMIT_HEADERS,
+        },
+        409: docs.error(
+            "This contact email already has a pending request",
+            pending=docs.example(
+                "Pending request",
+                "access-request-pending",
+                "An access request for this contact email is already pending",
+                ACCESS_REQUEST_PATH,
+                parameter="contact_email",
+                hint="Wait for the operator, and poll the pending request with its claim secret.",
+            ),
+        ),
+        422: docs.error(
+            "Unknown competition slugs (`invalid-parameter`), or request validation failed "
+            "(`validation-error`)",
+            unknown_competition=docs.example(
+                "Unknown competition",
+                "invalid-parameter",
+                "Unknown competitions: premier-league-2",
+                ACCESS_REQUEST_PATH,
+                parameter="competitions",
+                invalid=["premier-league-2"],
+                valid_values=["ekstraklasa", "premier-league"],
+            ),
+            validation=docs.validation_example(
+                ACCESS_REQUEST_PATH, ["body", "contact_email"], "Field required", "missing"
+            ),
+        ),
+        429: docs.access_request_rate_limited(ACCESS_REQUEST_PATH),
+        503: docs.error(
+            "Access requests are disabled on the read-only demo instance",
+            demo=docs.example(
+                "Demo instance",
+                "writes-disabled",
+                "Access requests are disabled on the demo instance",
+                ACCESS_REQUEST_PATH,
+                hint=DEMO_HINT,
+            ),
+        ),
+    },
+)
+async def create_access_request(
+    body: AccessRequestCreate, request: Request, response: Response
+) -> AccessRequestCreated:
+    if settings.demo_mode:
+        raise ProblemError(
+            "writes-disabled",
+            "Access requests are disabled on the demo instance",
+            hint=DEMO_HINT,
+        )
+    if body.competitions:
+        valid = sorted(item.slug for item in await store.list_competitions())
+        unknown = sorted(set(body.competitions) - set(valid))
+        if unknown:
+            raise ProblemError(
+                "invalid-parameter",
+                "Unknown competitions: " + ", ".join(unknown),
+                parameter="competitions",
+                invalid=unknown,
+                valid_values=valid,
+            )
+    if settings.rate_limit_enabled:
+        decision = rate_limiter.hit(
+            ACCESS_REQUEST_POLICY, "ip:" + _client_address(request), time.monotonic()
+        )
+        if not decision.allowed:
+            raise ProblemError(
+                "rate-limited",
+                f"Rate limit exceeded: {ACCESS_REQUEST_POLICY.quota} "
+                f"{ACCESS_REQUEST_POLICY.name} requests per "
+                f"{ACCESS_REQUEST_POLICY.window_seconds} seconds",
+                headers={**decision.headers(), "Retry-After": str(decision.reset_seconds)},
+                hint=f"Retry after {decision.reset_seconds} seconds.",
+            )
+    claim_secret = access.generate_claim_secret()
+    try:
+        stored = await store.create_access_request(
+            name=body.name,
+            contact_email=body.contact_email,
+            intended_use=body.intended_use,
+            client_type=body.client_type,
+            competitions=body.competitions or None,
+            message=body.message or None,
+            claim_secret_hash=access.hash_key(claim_secret),
+        )
+    except AccessRequestPending as error:
+        raise ProblemError(
+            "access-request-pending",
+            "An access request for this contact email is already pending",
+            parameter="contact_email",
+            hint="Wait for the operator, and poll the pending request with its claim secret.",
+        ) from error
+    status_url = f"{ACCESS_REQUEST_PATH}/{stored.id}"
+    response.headers["Location"] = status_url
+    return AccessRequestCreated(
+        id=stored.id,
+        status=stored.status,
+        claim_secret=claim_secret,
+        status_url=status_url,
+        created_at=stored.created_at,
+    )
+
+
+@app.get(
+    ACCESS_REQUEST_PATH + "/{access_request_id}",
+    operation_id="get_access_request",
+    tags=[docs.TAG_ACCESS],
+    summary="Check an access request and claim its key",
+    description=(
+        "Use to poll a request from `create_access_request` with its `Claim-Secret`. Once "
+        "approved, the first call returns the key in `api_key` and the status becomes "
+        "`claimed`; later calls never show it again. Needs no key."
+    ),
+    response_model=AccessRequestStatus,
+    responses={
+        200: {
+            "description": "Successful Response",
+            "headers": docs.NO_STORE_HEADER | docs.RATE_LIMIT_HEADERS,
+        },
+        404: docs.error(
+            "Unknown request, or the claim secret does not match",
+            unknown=docs.example(
+                "Unknown access request",
+                "unknown-access-request",
+                "Unknown access request, or the claim secret does not match: 7",
+                ACCESS_REQUEST_PATH + "/7",
+                parameter="access_request_id",
+                invalid=["7"],
+                hint=CLAIM_SECRET_HINT,
+            ),
+        ),
+        422: docs.request_validation(
+            ACCESS_REQUEST_PATH + "/7",
+            docs.validation_example(
+                ACCESS_REQUEST_PATH + "/7", ["header", "Claim-Secret"], "Field required", "missing"
+            ),
+        ),
+        429: docs.rate_limited(ACCESS_REQUEST_PATH + "/7", "read"),
+    },
+)
+async def get_access_request(
+    access_request_id: Annotated[
+        int, Path(ge=1, description="Access request ID from `status_url`", examples=[7])
+    ],
+    claim_secret: Annotated[
+        str,
+        Header(
+            alias="Claim-Secret",
+            max_length=200,
+            description="The `claim_secret` returned by `create_access_request`",
+        ),
+    ],
+) -> AccessRequestStatus:
+    stored = await store.get_access_request(access_request_id)
+    if stored is None or not access.claim_secret_matches(claim_secret, stored.claim_secret_hash):
+        raise ProblemError(
+            "unknown-access-request",
+            f"Unknown access request, or the claim secret does not match: {access_request_id}",
+            parameter="access_request_id",
+            invalid=[str(access_request_id)],
+            hint=CLAIM_SECRET_HINT,
+        )
+    if stored.status != "approved":
+        return _access_request_status(stored)
+    api_key = await store.claim_access_request(access_request_id)
+    claimed = await store.get_access_request(access_request_id)
+    return _access_request_status(claimed or stored, api_key)
 
 
 # Agent documentation: `/llms.txt`, `/llms-full.txt`, `/agents`, `/agents.md`, `/problems/...`,

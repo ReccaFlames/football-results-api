@@ -109,6 +109,9 @@ How to use this list:
   reflects the change.
 - If scope changes, edit this list in the same PR.
 
+**Next up: item 21 (landing page and access requests).** It blocks the server push; everything
+else for the push is ready. Work on it before any other unchecked item, then remove this note.
+
 ### Phase 0: Foundations
 
 - [x] **1. CI and PostgreSQL integration tests**
@@ -450,6 +453,65 @@ the maintainer runs `scripts/publish-wizard.sh`.
         time, 3 runs each, a task passes at 2 of 3; manual checklist for claude.ai and ChatGPT
   - [x] 19f. Docs (README, AGENTS.md, DEMO.md); version 0.25.0. Tag 1.0.0 at the real publish
         (it declares the public contract stable)
+- [ ] **21. Whistleprint landing page and access requests** (decided 2026-11-26, do before the
+      server push; [ADR 0010](adr/0010-access-requests-are-owned-by-the-api-and-never-auto-approved.md),
+      glossary: *Landing page*, *Access request*)
+  - [ ] 21a. API: `access_request` table (Alembic, `database-migration` skill); public operations
+        `create_access_request` (`POST /api/v1/access-requests`) and `get_access_request`
+        (`GET /api/v1/access-requests/{id}`, needs the one-time claim secret, constant-time check;
+        returns status and, once approved, the key exactly once); admin operations
+        `list_access_requests` and `reject_access_request` (not MCP tools). Fields: required
+        `name`, `contact_email`, `intended_use` (≤1000), `client_type` (`human`|`agent`);
+        optional `competitions` (validated slugs), `message` (≤2000); honeypot field.
+        `create_access_request` and `list_competitions` join `PUBLIC_OPERATIONS`; on the demo
+        `create_access_request` returns `writes-disabled`. Limit 3 per hour per IP; a pending
+        request with the same email → new problem slug `access-request-pending` (with
+        `PROBLEM_GUIDANCE`)
+    - [x] Storage: migration `0013_access_requests` (one pending request per lower-cased email,
+          plaintext key only while `approved`, personal data erased on claim or expiry) and
+          repository methods (create, get, list, approve, reject, claim, purge) with
+          integration tests
+    - [x] Public operations `create_access_request` and `get_access_request` (+ CLI commands,
+          required by the CLI/OpenAPI parity test). The claim secret travels in the
+          `Claim-Secret` header (never the query string, which access logs record); the path
+          parameter is `access_request_id`. The honeypot moved to the landing app (21e): an
+          API field would only confuse agents
+    - [ ] Admin operations `list_access_requests` and `reject_access_request` (+ CLI commands)
+  - [ ] 21b. Telegram notification on each new request (ID, name, client type, intended use,
+        competitions; never the email): optional `FOOTBALL_RESULTS_TELEGRAM_BOT_TOKEN` and
+        `FOOTBALL_RESULTS_TELEGRAM_CHAT_ID`; without them only a log line and a metric
+  - [ ] 21c. Server command `python -m app.config access-requests approve <id>` (role `client`
+        only, default quotas, 365-day expiry, name `req-<id>-<slug of name>`, flags override)
+        using the existing keys-file helpers; plus `list` and `reject`. The key must be claimed
+        within 14 days; after claim or claim expiry the plaintext key and the request's personal
+        data are deleted. Unapproved (pending/rejected) requests are deleted after 30 days
+  - [ ] 21d. CLI commands `create-access-request` and `get-access-request` (and, because every
+        operation needs a command, `list-access-requests` and `reject-access-request`); one line
+        in the consumer skill pointing to `/llms.txt` for requesting access (no instance facts);
+        no MCP tool
+  - [ ] 21e. Landing app: new uv workspace package `web/` (`football-results-web`, Starlette +
+        Jinja2 + httpx; must not import `app`, talks to the API over HTTP like the CLI). Brand
+        "Whistleprint" in the UI only (technical names stay `football-results`). Move `images/`
+        (logo, mark, favicon) to `web/static/`. Server-rendered, no JS required, semantic HTML,
+        single column (~40rem), system fonts, `prefers-color-scheme` light/dark, no external
+        assets. Sections: logo + one-line pitch; competitions (name, country, current season) from
+        `list_competitions`, cached 5 min (if never fetched: "temporarily unavailable" + link to
+        `/llms.txt`); developers (`/docs`, `/openapi.json`, CLI install); agents (`/llms.txt`,
+        `/agents`, `/mcp`, skill); private: access request form (plain HTML POST to
+        `/request-access`, confirmation page shows the request ID and claim secret once, API
+        problems shown readably; a hidden honeypot field the app drops silently) / demo: "no key needed"; footer: `/privacy`, provider
+        attributions (OpenLigaDB ODbL), operator contact. Relative links only. Forwards
+        `X-Forwarded-For`; listed in `FOOTBALL_RESULTS_TRUSTED_PROXIES`. Stays public on a private
+        instance
+  - [ ] 21f. Deployment: own Docker image and Compose service; Caddy routes `/`,
+        `/request-access`, `/static/*`, `/favicon.ico` to the landing app and everything else to
+        the API (the API keeps no `/` route); `docs/DEPLOYMENT.md`, `docs/PRIVATE.md`,
+        `docs/DEMO.md`
+  - [ ] 21g. `/privacy`: access request data (name, email, use, message), Telegram as a
+        processor, 30-day / claim-window retention (`privacy_blocks` in `app/agent_docs.py`)
+  - [ ] 21h. Tests (API, CLI, landing app with a fake API; no network), docs (README, AGENTS.md
+        layout table, ADR 0010), bump version in `pyproject.toml`, `cli/pyproject.toml`,
+        `server.json`, `uv lock`
 - [ ] **20. OAuth for chat clients on private instances**: claude.ai and ChatGPT connectors cannot
       send `X-API-Key`, so a private instance needs a production authorization server (ADR 0006)
       before they can connect. Until then, chat clients are supported on the demo only.

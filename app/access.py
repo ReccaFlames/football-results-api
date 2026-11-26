@@ -48,6 +48,11 @@ KEY_PREFIX = "frk_"
 DEFAULT_KEY_DAYS = 30
 MAX_KEY_LIFETIME = timedelta(days=365)
 EXPIRY_WARNING = timedelta(days=14)
+# Operations that need no key even on a private instance (ADR 0008): monitoring, the landing
+# page's competition list, and access requests (ADR 0010).
+PUBLIC_OPERATIONS = frozenset(
+    {"get_health", "list_competitions", "create_access_request", "get_access_request"}
+)
 # How often the API checks the keys file for changes.
 RELOAD_INTERVAL_SECONDS = 5.0
 # Validation context of the `keys` commands: they may leave older entries without expiry.
@@ -180,6 +185,15 @@ def hash_key(key: str) -> str:
 
 def generate_key() -> str:
     return KEY_PREFIX + secrets.token_urlsafe(KEY_BYTES)
+
+
+def generate_claim_secret() -> str:
+    """The one-time secret of an access request (ADR 0010); only its hash is stored."""
+    return secrets.token_urlsafe(KEY_BYTES)
+
+
+def claim_secret_matches(supplied: str, stored_hash: str) -> bool:
+    return secrets.compare_digest(hash_key(supplied).encode(), stored_hash.encode())
 
 
 def _digest(key: str) -> bytes:

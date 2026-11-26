@@ -84,6 +84,17 @@ provider, but a provider that is not a redistributable provider may reach only k
 covered by that provider's permission.
 _Avoid_: production instance, closed instance
 
+**Access request**:
+A request by a person or an agent to become a keyed client of a private instance, with a contact
+address and the intended use. It never grants access by itself: the operator approves or rejects
+it, and only approval leads to an API key. Requests not approved are deleted after 30 days.
+_Avoid_: signup, registration, whitelist entry
+
+**Landing page**:
+The human front page of an instance, on the same origin as the API, that introduces the API, lists
+its competitions, links to the documentation, and (on a private instance) accepts access requests.
+_Avoid_: home page, index, portal
+
 **Redistributable provider**:
 A data provider whose terms permit public redistribution of its data through this API; only these
 may be served by a demo instance. The list (`REDISTRIBUTABLE_PROVIDERS`, today only OpenLigaDB)

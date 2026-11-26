@@ -62,7 +62,8 @@ Scheduler (app.scheduler) ──┬──▶ ScraperRegistry ──▶ sources
   scheduler.
 
 Database tables: competition, competition_season, team, team_alias, match_result, scrape_run,
-scheduler_heartbeat, and alembic_version.
+scheduler_heartbeat, access_request (key requests for a private instance, ADR 0010), and
+alembic_version.
 
 ### Supported competitions
 
@@ -372,6 +373,8 @@ go through Alembic.
 | GET | `/api/v1/jobs/{job_id}` | `get_job` | Get queued, running, completed, or failed scrape-job status (admin `X-API-Key` required) |
 | GET | `/api/v1/admin/scrape-runs` | `list_scrape_runs` | Import jobs, newest first, with source URL, worker, error, and `matches_skipped` (fallback matches skipped for unknown teams); filters: `competition`, `season`, `status`; cursor pagination (admin `X-API-Key` required) |
 | GET | `/api/v1/admin/scheduler` | `get_scheduler_status` | Scheduler workers and heartbeats plus every scheduled season's next update, overdue time, staleness, and failure count (admin `X-API-Key` required) |
+| POST | `/api/v1/access-requests` | `create_access_request` | Ask the operator for an API key ([ADR 0010](docs/adr/0010-access-requests-are-owned-by-the-api-and-never-auto-approved.md)): `name`, `contact_email`, `intended_use`, `client_type` (`human`/`agent`), optional `competitions` and `message`. `201` with a one-time `claim_secret`; one pending request per email (`409 access-request-pending`); 3 valid requests per hour per client IP; `503 writes-disabled` on the demo. No key needed, even on a private instance |
+| GET | `/api/v1/access-requests/{access_request_id}` | `get_access_request` | Status of an access request; needs the `Claim-Secret` header (wrong secret or ID: `404 unknown-access-request`). Once approved, the first call returns the key in `api_key` and the status becomes `claimed`. No key needed |
 
 Interactive documentation is available at `/docs`; the OpenAPI document is at `/openapi.json`.
 Agents should start at `/llms.txt` (see [Agent documentation](#agent-documentation)).
@@ -451,9 +454,10 @@ type `application/problem+json` and `Cache-Control: no-store`:
 
 - `type` is a stable relative URI; branch on it rather than on `detail`. Types: `invalid-cursor`
   (400), `unauthorized` (401), `forbidden` (403, a `client` key on an admin operation),
-  `unknown-competition`, `unknown-season`, `unknown-job`,
-  `not-found` (404), `method-not-allowed` (405), `job-conflict` (409), `invalid-parameter`
-  (`fields`, `status`, dates, cup `stage`), `validation-error` (type, range, pattern, or missing
+  `unknown-competition`, `unknown-season`, `unknown-job`, `unknown-access-request`,
+  `not-found` (404), `method-not-allowed` (405), `job-conflict` and `access-request-pending`
+  (409), `invalid-parameter` (`fields`, `status`, dates, cup `stage`, access-request
+  `competitions`), `validation-error` (type, range, pattern, or missing
   values), `invalid-request` (write-endpoint rules) (all 422), `rate-limited` (429),
   `internal-error` (500), `writes-disabled` and `service-unavailable` (503).
 - `detail` is always a human-readable string; `instance` is the request path.
@@ -713,8 +717,9 @@ Use `./cli`, not `.`: `uvx --from .` would install the whole API with its depend
 | Variable | Option | Default | Purpose |
 | --- | --- | --- | --- |
 | `FOOTBALL_RESULTS_URL` | `--url` | the public demo once its host is set, until then `http://localhost:8000` | API base URL, optionally with a path prefix |
-| `FOOTBALL_RESULTS_API_KEY` | `--api-key` | none | Sent as `X-API-Key` on every request (it selects the key's quota; a private instance needs it for every command); `refresh`, `fetch-season`, `status`, `scrape-runs`, and `scheduler` need an admin key. The CLI warns on stderr when the API's `API-Key-Expires` header is within 14 days |
+| `FOOTBALL_RESULTS_API_KEY` | `--api-key` | none | Sent as `X-API-Key` on every request (it selects the key's quota; a private instance needs it for every command except `health`, `competitions`, and the access-request commands); `refresh`, `fetch-season`, `status`, `scrape-runs`, and `scheduler` need an admin key. The CLI warns on stderr when the API's `API-Key-Expires` header is within 14 days |
 | `FOOTBALL_RESULTS_TIMEOUT` | `--timeout` | `30` | HTTP timeout in seconds |
+| `FOOTBALL_RESULTS_CLAIM_SECRET` | `--claim-secret` (`get-access-request` only) | none | Claim secret from `create-access-request`, sent as the `Claim-Secret` header; prefer the variable to keep it out of shell history |
 
 Global options go before the command (`football-results --url URL matches`). The default URL
 follows [ADR 0009](docs/adr/0009-published-cli-defaults-to-the-demo-instance.md): a released CLI
@@ -739,6 +744,8 @@ ignores these three variables; its settings use other names.
 | `status JOB_ID` | `get_job` | the job ID |
 | `scrape-runs` | `list_scrape_runs` | `-c/--competition`, `-s/--season`, `--status`, `--limit`, `--cursor` |
 | `scheduler` | `get_scheduler_status` | none |
+| `create-access-request` | `create_access_request` | `--name`, `--contact-email`, `--intended-use`, `--client-type` (all required), `--competitions` (comma-separated), `--message` |
+| `get-access-request ACCESS_REQUEST_ID` | `get_access_request` | the request ID, `--claim-secret` (required) |
 
 Options use the API parameter names (`--date-from` is `date_from`). CLI-only options:
 
@@ -1001,8 +1008,10 @@ A private instance serves only invited people
 ([ADR 0008](docs/adr/0008-private-instances-require-expiring-named-keys.md)); the guide is
 [docs/PRIVATE.md](docs/PRIVATE.md). Set `FOOTBALL_RESULTS_ANONYMOUS_ACCESS=false`, and then:
 
-- Every API operation except `get_health` needs a valid, unexpired key (`401 unauthorized` with
-  `WWW-Authenticate: ApiKey`), and so does `/mcp`. Agent docs, `/problems/*`, the skill,
+- Every API operation except `get_health`, `list_competitions`, `create_access_request`, and
+  `get_access_request` needs a valid, unexpired key (`401 unauthorized` with
+  `WWW-Authenticate: ApiKey`), and so does `/mcp`. People and agents ask for a key with
+  `create_access_request` ([ADR 0010](docs/adr/0010-access-requests-are-owned-by-the-api-and-never-auto-approved.md)). Agent docs, `/problems/*`, the skill,
   `/openapi.json`, `/docs`, and OAuth metadata stay public, and the agent docs say a key is needed.
 - Every `401` counts against the IP read quota. Cacheable reads send `Cache-Control: private`.
 - The API and `config check` refuse to start with `FOOTBALL_RESULTS_API_KEYS`, without
@@ -1296,7 +1305,7 @@ Application variables:
 | FOOTBALL_RESULTS_SCHEDULER_WORKER_TIMEOUT_SECONDS | `300` | A scheduler worker without a heartbeat for this long is treated as dead: its `running` scrape jobs are marked `failed` so their seasons are claimed again |
 | FOOTBALL_RESULTS_API_KEYS | empty | Comma-separated admin API keys (named `env`); an admin key is required for write endpoints, job status, admin endpoints, and `/metrics` |
 | FOOTBALL_RESULTS_API_KEYS_FILE | empty | YAML file of named, hashed, expiring keys with roles and per-minute quotas; reloaded on change (see [Named API keys](#named-api-keys-roles-and-quotas)) |
-| FOOTBALL_RESULTS_ANONYMOUS_ACCESS | `true` | `false` makes a [private instance](#private-instance): every API operation except `get_health`, and `/mcp`, need a key from the keys file |
+| FOOTBALL_RESULTS_ANONYMOUS_ACCESS | `true` | `false` makes a [private instance](#private-instance): every API operation except `get_health`, `list_competitions`, and the access-request operations, and `/mcp`, need a key from the keys file |
 | FOOTBALL_RESULTS_DEMO_MODE | `false` | Public demo instance: startup and `config check` reject admin keys and providers that are not publicly redistributable; agent docs show a demo notice (see [Public demo instance](#public-demo-instance)) |
 | FOOTBALL_RESULTS_LOG_FORMAT | `text` | `text` or `json` (one JSON object per line on stderr, including uvicorn access logs); Docker Compose sets `json` |
 | FOOTBALL_RESULTS_OPERATOR_CONTACT | empty | Who runs the instance (an email or URL), shown on `/privacy`; required in demo mode |

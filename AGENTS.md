@@ -214,7 +214,8 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
   quotas. Protected operations and `/metrics` need an admin key (`403 forbidden` for a client
   key). Key names are metric labels; never log keys or hashes.
 - Private instance (`FOOTBALL_RESULTS_ANONYMOUS_ACCESS=false`, ADR 0008): every operation with an
-  operation ID except `PUBLIC_OPERATIONS` (`get_health`) needs a key, checked in the middleware
+  operation ID except `access.PUBLIC_OPERATIONS` (`get_health`, `list_competitions`, and the
+  public access-request operations, ADR 0010) needs a key, checked in the middleware
   *after* rate-limit counting so every `401` uses the IP quota; doc pages (no operation ID) stay
   public. `check_private_instance` (startup and `config check`) rejects env keys, a missing keys
   file, demo mode, and (unless the public base URL is localhost) a non-https base URL or a
@@ -239,7 +240,8 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
 ## Roadmap workflow
 
 `docs/ROADMAP.md` contains the ordered **Implementation checklist**. When starting work, pick the
-first unchecked item (unless the user says otherwise). When a sub-task is completed, tick it
+item named in its **Next up** note if there is one, else the first unchecked item (unless the user
+says otherwise). When a sub-task is completed, tick it
 (`[x]`) in the same change; tick the parent item once all sub-tasks are done. Do not skip ahead
 without the user's agreement, because later items depend on earlier ones.
 

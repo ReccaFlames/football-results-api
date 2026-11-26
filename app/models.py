@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -292,6 +292,12 @@ class ScrapeJobStatus(BaseModel):
 
 SCRAPE_RUN_STATUSES = ("queued", "running", "completed", "failed", "cancelled")
 
+# Access requests (ADR 0010): pending -> approved -> claimed (or expired after the claim
+# window), or pending -> rejected.
+AccessRequestState = Literal["pending", "approved", "rejected", "claimed", "expired"]
+ACCESS_REQUEST_STATUSES: tuple[str, ...] = ("pending", "approved", "rejected", "claimed", "expired")
+ClientType = Literal["human", "agent"]
+
 
 class ScrapeRun(ScrapeJobStatus):
     source_url: str
@@ -381,6 +387,80 @@ class HistoricalFetchRequest(BaseModel):
     )
 
 
+CONTACT_EMAIL_PATTERN = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
+
+
+class AccessRequestCreate(BaseModel):
+    """A request for an API key (ADR 0010); the operator approves or rejects it."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str = Field(
+        min_length=1, max_length=200, description="Your name or organisation", examples=["Ada"]
+    )
+    contact_email: str = Field(
+        max_length=320,
+        pattern=CONTACT_EMAIL_PATTERN,
+        description="Where the operator can reach you; never shared or sent to notifications",
+        examples=["ada@example.com"],
+    )
+    intended_use: str = Field(
+        min_length=1,
+        max_length=1000,
+        description="What you will use the API for",
+        examples=["Weekly Ekstraklasa tables on a fan site"],
+    )
+    client_type: ClientType = Field(
+        description="`human` for a person, `agent` for an AI agent or automated client",
+        examples=["agent"],
+    )
+    competitions: list[Annotated[str, Field(min_length=1, max_length=100)]] | None = Field(
+        default=None,
+        max_length=50,
+        description="Competition slugs from `list_competitions` you need",
+        examples=[["ekstraklasa"]],
+    )
+    message: str | None = Field(
+        default=None, max_length=2000, description="Anything else for the operator"
+    )
+
+
+class AccessRequestCreated(BaseModel):
+    id: int = Field(description="Access request ID")
+    status: AccessRequestState = Field(description="Always `pending` for a new request")
+    claim_secret: str = Field(
+        description=(
+            "Shown only in this response and never stored in plain text: send it as the "
+            "`Claim-Secret` header to `get_access_request`. A lost secret cannot be recovered"
+        )
+    )
+    status_url: str = Field(description="Poll with `get_access_request` (also in `Location`)")
+    created_at: datetime
+
+
+class AccessRequestStatus(BaseModel):
+    id: int
+    status: AccessRequestState = Field(
+        description=(
+            "`pending` until the operator decides; `approved` keys are returned once and the "
+            "request becomes `claimed`; `expired` when not claimed in time; or `rejected`"
+        )
+    )
+    client_type: ClientType
+    created_at: datetime
+    decided_at: datetime | None = Field(description="When the operator approved or rejected it")
+    claim_expires_at: datetime | None = Field(
+        description="While `approved`: claim the key before this time"
+    )
+    key_name: str | None = Field(description="Name of the issued key, once approved")
+    api_key: str | None = Field(
+        description=(
+            "The issued API key, only in the one response that claims it; store it at once. "
+            "Send it as `X-API-Key`"
+        )
+    )
+
+
 class HealthStatus(BaseModel):
     status: Literal["ok"]
     database: Literal["ok"]
@@ -396,9 +476,11 @@ PROBLEM_TYPES: dict[str, tuple[int, str]] = {
     "unknown-competition": (404, "Unknown competition"),
     "unknown-season": (404, "Unknown season"),
     "unknown-job": (404, "Unknown job"),
+    "unknown-access-request": (404, "Unknown access request"),
     "not-found": (404, "Not found"),
     "method-not-allowed": (405, "Method not allowed"),
     "job-conflict": (409, "Job conflict"),
+    "access-request-pending": (409, "Access request pending"),
     "invalid-parameter": (422, "Invalid parameter"),
     "validation-error": (422, "Request validation failed"),
     "invalid-request": (422, "Invalid request"),

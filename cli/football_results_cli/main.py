@@ -31,6 +31,8 @@ OPERATIONS: dict[str, str] = {
     "status": "get_job",
     "scrape-runs": "list_scrape_runs",
     "scheduler": "get_scheduler_status",
+    "create-access-request": "create_access_request",
+    "get-access-request": "get_access_request",
 }
 
 # Options that only steer the CLI and are never sent to the API, per command.
@@ -46,6 +48,8 @@ CLI_ONLY_OPTIONS: dict[str, frozenset[str]] = {
     "status": _WAIT_OPTIONS,
     "scrape-runs": frozenset({"json_output", "all_pages", "max_items"}),
     "scheduler": frozenset({"json_output"}),
+    "create-access-request": frozenset({"json_output"}),
+    "get-access-request": frozenset({"json_output"}),
 }
 
 # Item fields for commands whose `--fields` is applied by the CLI (the API has no `fields=`).
@@ -837,6 +841,107 @@ def scheduler(ctx: typer.Context, json_output: JsonOption = False) -> None:
     output.print_record(summary, title="Scheduler")
     output.print_table(body.get("seasons") or [], output.SEASON_SCHEDULE_COLUMNS, title="Seasons")
     output.print_table(body.get("workers") or [], output.WORKER_COLUMNS, title="Workers")
+
+
+@app.command(
+    "create-access-request",
+    epilog=(
+        "Examples:\n\n\b\n"
+        "  football-results create-access-request --name Ada --contact-email ada@example.com "
+        '--intended-use "Weekly tables on a fan site" --client-type human\n'
+        "  football-results create-access-request --name my-agent --contact-email "
+        'ops@example.com --intended-use "Match summaries" --client-type agent '
+        "--competitions ekstraklasa,premier-league --json"
+    ),
+)
+def create_access_request(
+    ctx: typer.Context,
+    name: Annotated[str, typer.Option("--name", help="Your name or organisation")],
+    contact_email: Annotated[
+        str, typer.Option("--contact-email", help="Where the operator can reach you")
+    ],
+    intended_use: Annotated[
+        str, typer.Option("--intended-use", help="What you will use the API for")
+    ],
+    client_type: Annotated[
+        Literal["human", "agent"],
+        typer.Option("--client-type", help="human, or agent for an AI agent or automated client"),
+    ],
+    competitions: Annotated[
+        str | None,
+        typer.Option(
+            "--competitions",
+            help="Comma-separated competition slugs you need (from 'competitions')",
+            show_default=False,
+        ),
+    ] = None,
+    message: Annotated[
+        str | None,
+        typer.Option("--message", help="Anything else for the operator", show_default=False),
+    ] = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Ask the operator for an API key; needs no key (create_access_request).
+
+    Prints the request ID and a claim secret that is shown only once: keep it, and check the
+    request with 'get-access-request'. The operator reviews every request.
+    """
+    payload = {
+        "name": name,
+        "contact_email": contact_email,
+        "intended_use": intended_use,
+        "client_type": client_type,
+        "competitions": _split_fields(competitions),
+        "message": message,
+    }
+    body = _api(ctx).post("/api/v1/access-requests", payload).body
+    _print_record(body, json_output=json_output, title="Access request")
+    output.note(
+        "Keep the claim secret: it is shown only once and cannot be recovered. Check the request "
+        f"with 'football-results get-access-request {body['id']}' and FOOTBALL_RESULTS_CLAIM_SECRET "
+        "(or --claim-secret)."
+    )
+
+
+@app.command(
+    "get-access-request",
+    epilog=(
+        "Examples:\n\n\b\n"
+        "  FOOTBALL_RESULTS_CLAIM_SECRET=... football-results get-access-request 7\n"
+        '  football-results get-access-request 7 --claim-secret "$SECRET" --json'
+    ),
+)
+def get_access_request(
+    ctx: typer.Context,
+    access_request_id: Annotated[
+        int, typer.Argument(min=1, help="Access request ID from create-access-request")
+    ],
+    claim_secret: Annotated[
+        str,
+        typer.Option(
+            "--claim-secret",
+            envvar="FOOTBALL_RESULTS_CLAIM_SECRET",
+            help="Claim secret from create-access-request (prefer the environment variable)",
+            show_default=False,
+        ),
+    ],
+    json_output: JsonOption = False,
+) -> None:
+    """Check an access request; once approved, prints the API key once (get_access_request).
+
+    Needs no key. Status is pending, approved, claimed, rejected, or expired. The first call
+    after approval returns the key in api_key; store it at once, it is never shown again.
+    """
+    body = (
+        _api(ctx)
+        .get(f"/api/v1/access-requests/{access_request_id}", headers={"Claim-Secret": claim_secret})
+        .body
+    )
+    _print_record(body, json_output=json_output, title="Access request")
+    if body.get("api_key"):
+        output.note(
+            "Store the API key now: it is never shown again. Use it as FOOTBALL_RESULTS_API_KEY."
+        )
 
 
 command = typer.main.get_command(app)

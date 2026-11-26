@@ -10,6 +10,7 @@ from sqlalchemy import (
     Select,
     and_,
     cast,
+    delete,
     exists,
     func,
     literal,
@@ -19,11 +20,13 @@ from sqlalchemy import (
     update,
 )
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased, selectinload
 
 from app.competitions import source_from_url
 from app.db_models import (
+    AccessRequestRow,
     CompetitionRow,
     CompetitionSeasonRow,
     MatchRow,
@@ -33,6 +36,8 @@ from app.db_models import (
     TeamRow,
 )
 from app.models import (
+    AccessRequestState,
+    ClientType,
     Competition,
     CompetitionSummary,
     Freshness,
@@ -216,6 +221,76 @@ class SeasonCheckResult:
     missing_season: str | None = None
     # Known seasons that got a discovered fallback source.
     fallback_seasons: list[str] = field(default_factory=list)
+
+
+# Access request retention (ADR 0010): an approved key must be claimed within CLAIM_WINDOW;
+# pending and rejected requests are deleted UNAPPROVED_RETENTION after they were created.
+CLAIM_WINDOW = timedelta(days=14)
+UNAPPROVED_RETENTION = timedelta(days=30)
+# Cleared on claim or claim expiry; `key_name` stays, as it does in the keys file.
+_ERASED_ACCESS_REQUEST_FIELDS = {
+    "name": None,
+    "contact_email": None,
+    "intended_use": None,
+    "competitions": None,
+    "message": None,
+    "api_key": None,
+}
+
+
+class AccessRequestPending(ValueError):
+    """The contact email already has a pending access request."""
+
+
+class AccessRequestStateConflict(ValueError):
+    """The access request is no longer pending, so it cannot be approved or rejected."""
+
+    def __init__(self, request_id: int, status: str) -> None:
+        super().__init__(f"Access request {request_id} is {status}, not pending")
+        self.status = status
+
+
+@dataclass(frozen=True)
+class StoredAccessRequest:
+    """An access request without its key; personal data is None once claimed or expired."""
+
+    id: int
+    status: AccessRequestState
+    client_type: ClientType
+    name: str | None
+    contact_email: str | None
+    intended_use: str | None
+    competitions: tuple[str, ...] | None
+    message: str | None
+    claim_secret_hash: str
+    key_name: str | None
+    created_at: datetime
+    decided_at: datetime | None
+    claimed_at: datetime | None
+
+    @property
+    def claim_expires_at(self) -> datetime | None:
+        if self.status != "approved" or self.decided_at is None:
+            return None
+        return self.decided_at + CLAIM_WINDOW
+
+
+def _access_request(row: AccessRequestRow) -> StoredAccessRequest:
+    return StoredAccessRequest(
+        id=row.id,
+        status=row.status,  # type: ignore[arg-type]
+        client_type=row.client_type,  # type: ignore[arg-type]
+        name=row.name,
+        contact_email=row.contact_email,
+        intended_use=row.intended_use,
+        competitions=None if row.competitions is None else tuple(row.competitions),
+        message=row.message,
+        claim_secret_hash=row.claim_secret_hash,
+        key_name=row.key_name,
+        created_at=row.created_at,
+        decided_at=row.decided_at,
+        claimed_at=row.claimed_at,
+    )
 
 
 def _season_start(season: str) -> int:
@@ -1567,6 +1642,130 @@ class PostgresResultRepository:
         async with self.sessions() as session:
             rows = (await session.execute(statement)).all()
         return [ScrapeRunCount(slug, status, count) for slug, status, count in rows]
+
+    async def create_access_request(
+        self,
+        *,
+        name: str,
+        contact_email: str,
+        intended_use: str,
+        client_type: ClientType,
+        claim_secret_hash: str,
+        competitions: list[str] | None = None,
+        message: str | None = None,
+    ) -> StoredAccessRequest:
+        """Stores a pending request; raises `AccessRequestPending` if the email (ignoring case)
+        already has one."""
+        row = AccessRequestRow(
+            status="pending",
+            client_type=client_type,
+            name=name,
+            contact_email=contact_email.strip().lower(),
+            intended_use=intended_use,
+            competitions=competitions,
+            message=message,
+            claim_secret_hash=claim_secret_hash,
+            created_at=_now(),
+        )
+        try:
+            async with self.sessions.begin() as session:
+                session.add(row)
+        except IntegrityError as error:
+            if "uq_access_request_pending_email" in str(error.orig):
+                raise AccessRequestPending(
+                    "A pending access request for this contact email already exists"
+                ) from error
+            raise
+        return _access_request(row)
+
+    async def get_access_request(self, request_id: int) -> StoredAccessRequest | None:
+        async with self.sessions() as session:
+            row = await session.get(AccessRequestRow, request_id)
+            return None if row is None else _access_request(row)
+
+    async def list_access_requests(
+        self,
+        statuses: tuple[str, ...] = (),
+        limit: int | None = None,
+        before_id: int | None = None,
+    ) -> list[StoredAccessRequest]:
+        """Newest first; ``before_id`` continues after the last request of a page."""
+        statement = select(AccessRequestRow).order_by(AccessRequestRow.id.desc())
+        if statuses:
+            statement = statement.where(AccessRequestRow.status.in_(statuses))
+        if before_id is not None:
+            statement = statement.where(AccessRequestRow.id < before_id)
+        if limit is not None:
+            statement = statement.limit(limit)
+        async with self.sessions() as session:
+            return [_access_request(row) for row in await session.scalars(statement)]
+
+    async def _decide_access_request(
+        self, request_id: int, values: dict[str, object]
+    ) -> StoredAccessRequest | None:
+        async with self.sessions.begin() as session:
+            row = await session.get(AccessRequestRow, request_id, with_for_update=True)
+            if row is None:
+                return None
+            if row.status != "pending":
+                raise AccessRequestStateConflict(request_id, row.status)
+            for key, value in {**values, "decided_at": _now()}.items():
+                setattr(row, key, value)
+            return _access_request(row)
+
+    async def approve_access_request(
+        self, request_id: int, key_name: str, api_key: str
+    ) -> StoredAccessRequest | None:
+        """Stores the issued key until it is claimed; None for an unknown request, and
+        `AccessRequestStateConflict` unless the request is pending."""
+        return await self._decide_access_request(
+            request_id, {"status": "approved", "key_name": key_name, "api_key": api_key}
+        )
+
+    async def reject_access_request(self, request_id: int) -> StoredAccessRequest | None:
+        """None for an unknown request; `AccessRequestStateConflict` unless it is pending."""
+        return await self._decide_access_request(request_id, {"status": "rejected"})
+
+    async def claim_access_request(self, request_id: int) -> str | None:
+        """The approved key, exactly once and within `CLAIM_WINDOW`, else None.
+
+        Claiming or missing the claim window erases the key and the personal data. The caller
+        checks the claim secret first.
+        """
+        now = _now()
+        async with self.sessions.begin() as session:
+            row = await session.get(AccessRequestRow, request_id, with_for_update=True)
+            if row is None or row.status != "approved" or row.decided_at is None:
+                return None
+            key = row.api_key
+            if row.decided_at + CLAIM_WINDOW <= now:
+                row.status, key = "expired", None
+            else:
+                row.status, row.claimed_at = "claimed", now
+            for field_name, value in _ERASED_ACCESS_REQUEST_FIELDS.items():
+                setattr(row, field_name, value)
+            return key
+
+    async def purge_access_requests(self) -> tuple[int, int]:
+        """Deletes unapproved requests older than `UNAPPROVED_RETENTION` and expires approved
+        ones past `CLAIM_WINDOW`; returns (deleted, expired)."""
+        now = _now()
+        async with self.sessions.begin() as session:
+            deleted = await session.execute(
+                delete(AccessRequestRow).where(
+                    AccessRequestRow.status.in_(("pending", "rejected")),
+                    AccessRequestRow.created_at <= now - UNAPPROVED_RETENTION,
+                )
+            )
+            expired = await session.execute(
+                update(AccessRequestRow)
+                .where(
+                    AccessRequestRow.status == "approved",
+                    AccessRequestRow.decided_at <= now - CLAIM_WINDOW,
+                )
+                .values(status="expired", **_ERASED_ACCESS_REQUEST_FIELDS)
+            )
+            return deleted.rowcount, expired.rowcount
 
     @staticmethod
     async def _ensure_season(

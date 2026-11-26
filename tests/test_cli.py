@@ -25,7 +25,12 @@ runner = CliRunner()
 
 @pytest.fixture(autouse=True)
 def isolated(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in ("FOOTBALL_RESULTS_URL", "FOOTBALL_RESULTS_API_KEY", "FOOTBALL_RESULTS_TIMEOUT"):
+    for name in (
+        "FOOTBALL_RESULTS_URL",
+        "FOOTBALL_RESULTS_API_KEY",
+        "FOOTBALL_RESULTS_TIMEOUT",
+        "FOOTBALL_RESULTS_CLAIM_SECRET",
+    ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(main_module.settings, "api_keys", "test-api-key")
     monkeypatch.setattr(main_module, "rate_limiter", FixedWindowRateLimiter())
@@ -353,6 +358,71 @@ def test_status_wait_polls_until_the_job_finishes(
     assert problem(late)["type"] == "urn:football-results:cli:wait-timeout"
 
 
+def test_access_request_commands_create_then_claim_the_key_once(requests, repository) -> None:
+    created = invoke(
+        "create-access-request",
+        "--name",
+        "Ada",
+        "--contact-email",
+        "ada@example.com",
+        "--intended-use",
+        "Fan site",
+        "--client-type",
+        "human",
+        "--competitions",
+        "ekstraklasa,premier-league",
+    )
+    assert created.exit_code == 0, created.stderr
+    body = json.loads(created.stdout)
+    assert json.loads(requests[-1].content)["competitions"] == ["ekstraklasa", "premier-league"]
+    assert "shown only once" in created.stderr
+    secret = {"FOOTBALL_RESULTS_CLAIM_SECRET": body["claim_secret"]}
+
+    pending = invoke("get-access-request", str(body["id"]), env=secret)
+    assert pending.exit_code == 0, pending.stderr
+    assert json.loads(pending.stdout)["status"] == "pending"
+    assert requests[-1].headers["Claim-Secret"] == body["claim_secret"]
+
+    repository.approve_access_request(body["id"], "req-1-ada", "frk_issued")
+    claimed = invoke("get-access-request", str(body["id"]), "--claim-secret", body["claim_secret"])
+    assert json.loads(claimed.stdout)["api_key"] == "frk_issued"
+    assert "never shown again" in claimed.stderr
+    assert (
+        json.loads(invoke("get-access-request", str(body["id"]), env=secret).stdout)["api_key"]
+        is None
+    )
+
+    wrong = invoke("get-access-request", str(body["id"]), "--claim-secret", "wrong")
+    assert wrong.exit_code == 3
+    assert problem(wrong)["type"].endswith("/problems/unknown-access-request")
+    duplicate = invoke(
+        "create-access-request",
+        "--name",
+        "Ada",
+        "--contact-email",
+        "ada@example.com",
+        "--intended-use",
+        "Fan site",
+        "--client-type",
+        "human",
+    )
+    assert repository.access_requests[1].status == "claimed"
+    assert duplicate.exit_code == 0
+    again = invoke(
+        "create-access-request",
+        "--name",
+        "Ada",
+        "--contact-email",
+        "ada@example.com",
+        "--intended-use",
+        "Fan site",
+        "--client-type",
+        "human",
+    )
+    assert again.exit_code == 4
+    assert problem(again)["type"].endswith("/problems/access-request-pending")
+
+
 @pytest.mark.parametrize(
     ("handler", "slug"),
     [
@@ -525,7 +595,10 @@ def test_every_command_has_help_with_examples() -> None:
 
 
 def _api_parameters(spec: dict[str, Any], operation: dict[str, Any]) -> set[str]:
-    names = {item["name"] for item in operation.get("parameters", ())}
+    names = {
+        item["name"].lower().replace("-", "_") if item["in"] == "header" else item["name"]
+        for item in operation.get("parameters", ())
+    }
     body = operation.get("requestBody", {}).get("content", {}).get("application/json")
     if body:
         schema = body["schema"]

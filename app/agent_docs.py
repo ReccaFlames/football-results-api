@@ -16,6 +16,7 @@ from ipaddress import IPv4Network, IPv6Network
 from pathlib import Path
 from typing import Any, Literal
 
+from app.access import PUBLIC_OPERATIONS
 from app.models import PROBLEM_TYPES, CompetitionSummary
 from app.problems import PROBLEM_MEDIA_TYPE
 from app.ratelimit import is_trusted_proxy
@@ -65,6 +66,14 @@ PROBLEM_GUIDANCE: dict[str, tuple[str, str]] = {
         "No import job has this ID.",
         "Use the `status_url` returned by `request_refresh` or `fetch_historical_season`.",
     ),
+    "unknown-access-request": (
+        "No access request has this ID, or the `Claim-Secret` header does not match it.",
+        (
+            "Send the `claim_secret` from `create_access_request` unchanged. A lost secret "
+            "cannot be recovered, and requests that were not approved are deleted after 30 days: "
+            "create a new request."
+        ),
+    ),
     "not-found": (
         "No route matches the request path.",
         "Check the path against `/openapi.json` or `/llms.txt`.",
@@ -77,11 +86,18 @@ PROBLEM_GUIDANCE: dict[str, tuple[str, str]] = {
         "An import job for this competition-season is already active with another source URL.",
         "Poll the active job with `get_job` until it finishes, then retry.",
     ),
+    "access-request-pending": (
+        "This contact email already has an access request waiting for the operator.",
+        (
+            "Poll the pending request with `get_access_request` and its claim secret; create a "
+            "new request only after it is decided."
+        ),
+    ),
     "invalid-parameter": (
         (
             "A parameter has an unsupported value: an unknown `fields` entry or `status`, a date "
-            "that is not ISO 8601, a cup table without `stage`, or a competition without a current "
-            "season."
+            "that is not ISO 8601, a cup table without `stage`, a competition without a current "
+            "season, or an unknown competition in an access request."
         ),
         "Correct `parameter` using `valid_values` or `examples`.",
     ),
@@ -143,16 +159,19 @@ CLI_COMMANDS: dict[str, str] = {
     "get_job": "status",
     "list_scrape_runs": "scrape-runs",
     "get_scheduler_status": "scheduler",
+    "create_access_request": "create-access-request",
+    "get_access_request": "get-access-request",
 }
 CLI_EXIT_CODES: tuple[tuple[int, str], ...] = (
     (0, "Success"),
     (2, "Usage error: invalid option or parameter (HTTP 400, 422, or a local check)"),
-    (3, "Not found: unknown competition, season, or job (HTTP 404)"),
+    (3, "Not found: unknown competition, season, job, or access request (HTTP 404)"),
     (
         4,
         (
-            "Upstream or stale: server error, job conflict, rate limit after retries, network "
-            "failure, timeout, failed job, or stale data with `--fail-if-stale`"
+            "Upstream or stale: server error, job conflict or pending access request (HTTP "
+            "409), rate limit after retries, network failure, timeout, failed job, or stale "
+            "data with `--fail-if-stale`"
         ),
     ),
     (5, "Auth: missing or invalid API key (HTTP 401/403), or writes disabled"),
@@ -1065,10 +1084,13 @@ def _auth_text(guide: AgentGuide) -> str:
     protected = [item.operation_id for item in guide.operations if item.requires_api_key]
     if guide.key_required:
         return (
-            "**Auth:** this is a private instance: every operation except `get_health` needs an "
-            "`X-API-Key` header with a key issued by the operator, and so does the MCP server. "
-            "Without a valid key a request returns `401` (`unauthorized`); ask the operator for "
-            "a key. Keys expire: each keyed response has an `API-Key-Expires` header (UTC), "
+            "**Auth:** this is a private instance: every operation except "
+            + ", ".join(f"`{item}`" for item in sorted(PUBLIC_OPERATIONS))
+            + " needs an `X-API-Key` header with a key issued by the operator, and so does the "
+            "MCP server. Without a valid key a request returns `401` (`unauthorized`). To ask "
+            "for a key, call `create_access_request`, keep its `claim_secret`, and poll "
+            "`get_access_request` with the `Claim-Secret` header until the operator approves "
+            "it; the key is shown exactly once. Keys expire: each keyed response has an `API-Key-Expires` header (UTC), "
             "and an expired key returns `401` like a wrong one, so ask the operator to extend "
             "it in time. "
             + ", ".join(f"`{item}`" for item in protected)

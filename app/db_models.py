@@ -14,6 +14,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -237,3 +238,46 @@ class SchedulerHeartbeatRow(Base):
     worker_id: Mapped[str] = mapped_column(String(200), primary_key=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class AccessRequestRow(Base):
+    """A request for an API key on a private instance (ADR 0010)."""
+
+    __tablename__ = "access_request"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'approved', 'rejected', 'claimed', 'expired')",
+            name="ck_access_request_status",
+        ),
+        CheckConstraint("client_type IN ('human', 'agent')", name="ck_access_request_client_type"),
+        # The plaintext key exists only between approval and claim.
+        CheckConstraint("api_key IS NULL OR status = 'approved'", name="ck_access_request_api_key"),
+        # Personal data is erased only once a request is claimed or expired.
+        CheckConstraint(
+            "status IN ('claimed', 'expired') OR (name IS NOT NULL "
+            "AND contact_email IS NOT NULL AND intended_use IS NOT NULL)",
+            name="ck_access_request_personal_data",
+        ),
+        Index(
+            "uq_access_request_pending_email",
+            "contact_email",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    status: Mapped[str] = mapped_column(String(20))
+    client_type: Mapped[str] = mapped_column(String(10))
+    name: Mapped[str | None] = mapped_column(String(200))
+    # Stored lower-cased so the pending-request check ignores case.
+    contact_email: Mapped[str | None] = mapped_column(String(320))
+    intended_use: Mapped[str | None] = mapped_column(String(1000))
+    competitions: Mapped[list[str] | None] = mapped_column(ARRAY(String(100)))
+    message: Mapped[str | None] = mapped_column(String(2000))
+    claim_secret_hash: Mapped[str] = mapped_column(String(71))
+    key_name: Mapped[str | None] = mapped_column(String(200))
+    api_key: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

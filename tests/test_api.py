@@ -1,4 +1,5 @@
 import re
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from app.models import (
 )
 from app.observability import ScrapeRunCount, SeasonState, WorkerHeartbeat
 from app.ratelimit import FixedWindowRateLimiter
+from app.repository import AccessRequestPending, StoredAccessRequest
 
 AUTH_HEADERS = {"X-API-Key": "test-api-key"}
 KEYS_NOW = datetime.now(UTC).replace(microsecond=0)
@@ -52,6 +54,8 @@ class FakeRepository:
         self.season_states: list[SeasonState] = []
         self.scrape_runs: list[ScrapeRun] = []
         self.run_counts: list[ScrapeRunCount] = []
+        self.access_requests: dict[int, StoredAccessRequest] = {}
+        self.access_request_keys: dict[int, str] = {}
 
     async def health(self) -> None:
         return None
@@ -214,6 +218,47 @@ class FakeRepository:
 
     async def get_scrape_job(self, job_id):
         return self.jobs.get(job_id)
+
+    async def create_access_request(self, *, contact_email, competitions=None, **fields):
+        email = contact_email.strip().lower()
+        if any(
+            item.status == "pending" and item.contact_email == email
+            for item in self.access_requests.values()
+        ):
+            raise AccessRequestPending(email)
+        request_id = max(self.access_requests, default=0) + 1
+        self.access_requests[request_id] = StoredAccessRequest(
+            id=request_id,
+            status="pending",
+            contact_email=email,
+            competitions=tuple(competitions) if competitions else None,
+            key_name=None,
+            created_at=datetime.now(UTC),
+            decided_at=None,
+            claimed_at=None,
+            **fields,
+        )
+        return self.access_requests[request_id]
+
+    async def get_access_request(self, request_id):
+        return self.access_requests.get(request_id)
+
+    def approve_access_request(self, request_id: int, key_name: str, api_key: str) -> None:
+        self.access_requests[request_id] = replace(
+            self.access_requests[request_id],
+            status="approved",
+            key_name=key_name,
+            decided_at=datetime.now(UTC),
+        )
+        self.access_request_keys[request_id] = api_key
+
+    async def claim_access_request(self, request_id):
+        api_key = self.access_request_keys.pop(request_id, None)
+        if api_key is not None:
+            self.access_requests[request_id] = replace(
+                self.access_requests[request_id], status="claimed", claimed_at=datetime.now(UTC)
+            )
+        return api_key
 
     async def replace_competition(self, competition, source, fresh, run_id=None):
         competition.seasons[source.season] = source
@@ -1558,6 +1603,10 @@ def test_demo_mode_writes_and_metrics_are_disabled(
         assert "read-only demo instance" in body["hint"]
     metrics = client.get("/metrics", headers={"Authorization": "Bearer test-api-key"})
     assert_problem(metrics, 503, "writes-disabled")
+    access_request = client.post("/api/v1/access-requests", json=ACCESS_REQUEST)
+    assert (
+        "read-only demo instance" in assert_problem(access_request, 503, "writes-disabled")["hint"]
+    )
     assert client.get("/api/v1/matches", params={"competition": "3-liga"}).status_code == 200
 
 
@@ -1612,7 +1661,14 @@ def test_private_instances_need_a_key_for_api_operations(tmp_path: Path) -> None
         assert_problem(response, 401, "unauthorized")
         assert response.headers["www-authenticate"] == "ApiKey"
         assert response.headers["cache-control"] == "no-store"
-    assert client.get("/api/v1/competitions").status_code == 401
+    # Public even here: the landing page's competition list and access requests (ADR 0010).
+    assert client.get("/api/v1/competitions").status_code == 200
+    created = client.post("/api/v1/access-requests", json=ACCESS_REQUEST)
+    assert created.status_code == 201
+    status = client.get(
+        created.headers["Location"], headers={"Claim-Secret": created.json()["claim_secret"]}
+    )
+    assert status.json()["status"] == "pending"
 
     keyed = client.get("/api/v1/matches", headers=CLIENT_HEADERS)
     assert keyed.status_code == 200
@@ -1700,3 +1756,89 @@ def test_metrics_report_key_expiry(tmp_path: Path) -> None:
     assert match is not None
     assert 29 * 86400 < float(match.group(1)) <= 30 * 86400
     assert re.search(r'expires_in_seconds\{key="old"\} -', metrics)
+
+
+ACCESS_REQUEST = {
+    "name": "Ada",
+    "contact_email": "Ada@Example.com",
+    "intended_use": "Weekly tables on a fan site",
+    "client_type": "agent",
+    "competitions": ["ekstraklasa"],
+}
+
+
+def test_access_request_key_is_claimed_exactly_once_with_the_claim_secret(
+    tmp_path: Path,
+) -> None:
+    client, repository = client_with_empty_store(tmp_path)
+
+    created = client.post("/api/v1/access-requests", json=ACCESS_REQUEST)
+    assert created.status_code == 201
+    body = created.json()
+    assert (
+        created.headers["location"] == body["status_url"] == f"/api/v1/access-requests/{body['id']}"
+    )
+    assert created.headers["cache-control"] == "no-store"
+    assert body["status"] == "pending"
+    stored = repository.access_requests[body["id"]]
+    assert stored.claim_secret_hash == access.hash_key(body["claim_secret"])
+    assert stored.contact_email == "ada@example.com"
+    secret = {"Claim-Secret": body["claim_secret"]}
+
+    pending = client.get(body["status_url"], headers=secret)
+    assert pending.status_code == 200
+    assert pending.headers["cache-control"] == "no-store"
+    assert pending.json()["status"] == "pending" and pending.json()["api_key"] is None
+    for path, headers in (
+        (body["status_url"], {"Claim-Secret": "wrong"}),
+        ("/api/v1/access-requests/99", secret),
+    ):
+        assert_problem(client.get(path, headers=headers), 404, "unknown-access-request")
+    assert_problem(client.get(body["status_url"]), 422, "validation-error")
+
+    repository.approve_access_request(body["id"], "req-1-ada", "frk_issued")
+    claimed = client.get(body["status_url"], headers=secret).json()
+    assert claimed["status"] == "claimed"
+    assert claimed["api_key"] == "frk_issued" and claimed["key_name"] == "req-1-ada"
+    again = client.get(body["status_url"], headers=secret).json()
+    assert again["status"] == "claimed" and again["api_key"] is None
+
+
+def test_access_requests_reject_unknown_competitions_and_a_second_pending_request(
+    tmp_path: Path,
+) -> None:
+    client, _ = client_with_empty_store(tmp_path)
+
+    unknown = client.post(
+        "/api/v1/access-requests",
+        json=ACCESS_REQUEST | {"competitions": ["la-liga", "ekstraklasa"]},
+    )
+    body = assert_problem(unknown, 422, "invalid-parameter")
+    assert body["parameter"] == "competitions" and body["invalid"] == ["la-liga"]
+    assert "ekstraklasa" in body["valid_values"]
+    extra = client.post("/api/v1/access-requests", json=ACCESS_REQUEST | {"website": "x"})
+    assert_problem(extra, 422, "validation-error")
+
+    assert client.post("/api/v1/access-requests", json=ACCESS_REQUEST).status_code == 201
+    again = client.post(
+        "/api/v1/access-requests", json=ACCESS_REQUEST | {"contact_email": "ADA@example.com "}
+    )
+    assert assert_problem(again, 409, "access-request-pending")["parameter"] == "contact_email"
+
+
+def test_access_requests_are_limited_to_three_valid_requests_per_hour_per_ip(
+    tmp_path: Path,
+) -> None:
+    client, _ = client_with_empty_store(tmp_path)
+    invalid = ACCESS_REQUEST | {"competitions": ["la-liga"]}
+    assert client.post("/api/v1/access-requests", json=invalid).status_code == 422
+
+    for number in range(3):
+        request = ACCESS_REQUEST | {"contact_email": f"user{number}@example.com"}
+        assert client.post("/api/v1/access-requests", json=request).status_code == 201
+    limited = client.post(
+        "/api/v1/access-requests", json=ACCESS_REQUEST | {"contact_email": "late@example.com"}
+    )
+    assert_problem(limited, 429, "rate-limited")
+    assert limited.headers["ratelimit-policy"] == '"access-request";q=3;w=3600'
+    assert 3500 < int(limited.headers["retry-after"]) <= 3600

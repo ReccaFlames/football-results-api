@@ -13,7 +13,8 @@ invited client ──HTTPS + X-API-Key──▶ Caddy :443 ──▶ API 127.0.0
 
 ## What changes with `FOOTBALL_RESULTS_ANONYMOUS_ACCESS=false`
 
-- Every API operation except `get_health` returns `401 unauthorized` (with
+- Every API operation except `get_health`, `list_competitions`, `create_access_request`, and
+  `get_access_request` returns `401 unauthorized` (with
   `WWW-Authenticate: ApiKey`) without a valid, unexpired key. `/mcp` needs a key or an OAuth
   token; `/metrics` needs an admin key, as before.
 - These stay public, so people and agents can learn how to ask for access: `/health`,

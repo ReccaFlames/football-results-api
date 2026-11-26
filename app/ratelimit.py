@@ -129,3 +129,8 @@ class Client:
         if method in READ_METHODS:
             return RateLimitPolicy("read", self.read_per_minute, 60)
         return RateLimitPolicy("write", self.write_per_minute, 60)
+
+
+# Valid `create_access_request` calls per client IP (ADR 0010), counted by the handler so that
+# invalid requests do not use it up.
+ACCESS_REQUEST_POLICY = RateLimitPolicy("access-request", 3, 3600)

@@ -67,7 +67,7 @@ def test_guides_mention_every_operation_and_no_unknown_ones() -> None:
     reference = agent_docs.agent_guide_markdown(rendered)
     mentioned = set()
     for text in (agent_docs.llms_txt(rendered), reference, agent_docs.llms_full_txt(rendered)):
-        mentioned |= set(re.findall(r"`((?:list|get|request|fetch)_[a-z_]+)`", text))
+        mentioned |= set(re.findall(r"`((?:list|get|request|fetch|create)_[a-z_]+)`", text))
 
     assert all(f"`{operation_id}`" in reference for operation_id in operation_ids)
     assert mentioned <= operation_ids

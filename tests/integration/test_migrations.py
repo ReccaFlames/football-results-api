@@ -14,6 +14,7 @@ APP_TABLES = {
     "team_alias",
     "scrape_run",
     "scheduler_heartbeat",
+    "access_request",
 }
 
 
