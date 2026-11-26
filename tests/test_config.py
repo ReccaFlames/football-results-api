@@ -433,12 +433,14 @@ def test_keys_resolve_by_hash_and_environment_keys_are_admin(tmp_path: Path) -> 
 
 DEMO_CONFIG = Path(__file__).parents[1] / "config/demo-competitions.yaml"
 DEMO_COMPOSE = Path(__file__).parents[1] / "compose.demo.yaml"
+DEMO_DATABASE_URL = "postgresql+psycopg_async://football:0123456789abcdef@db:5432/football"
 
 
 @pytest.fixture
 def demo_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(config_module.settings, "demo_mode", True)
     monkeypatch.setattr(config_module.settings, "operator_contact", "demo@example.com")
+    monkeypatch.setattr(config_module.settings, "database_url", DEMO_DATABASE_URL)
     monkeypatch.setattr(config_module.settings, "api_keys", "")
 
 
@@ -474,6 +476,20 @@ def test_demo_mode_requires_an_operator_contact(
     error = check_fails(capsys, "--config-file", str(DEMO_CONFIG))
 
     assert "FOOTBALL_RESULTS_OPERATOR_CONTACT is not set" in error
+
+
+@pytest.mark.usefixtures("demo_mode")
+@pytest.mark.parametrize("password", ["football", "change-me", "short-password", ""])
+def test_demo_mode_rejects_a_weak_database_password_without_printing_it(
+    password: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    url = f"postgresql+psycopg_async://football:{password}@db:5432/football"
+    monkeypatch.setattr(config_module.settings, "database_url", url)
+
+    error = check_fails(capsys, "--config-file", str(DEMO_CONFIG))
+
+    assert "the database password is missing, a shipped default, or shorter than 16" in error
+    assert not password or password not in error
 
 
 @pytest.mark.usefixtures("demo_mode")
@@ -534,8 +550,27 @@ def test_demo_mode_rejects_admin_keys_without_printing_them(
         assert secret not in error
 
 
+class ComposeLoader(yaml.SafeLoader):
+    """Reads Compose's `!override` merge tag as the plain sequence."""
+
+
+ComposeLoader.add_constructor("!override", lambda loader, node: loader.construct_sequence(node))
+
+
+def test_demo_compose_override_hardens_the_public_origin() -> None:
+    text = DEMO_COMPOSE.read_text()
+    compose = yaml.load(text, Loader=ComposeLoader)
+    assert compose["services"]["api"]["ports"] == ["127.0.0.1:${API_PORT:-8000}:8000"]
+    required = "${POSTGRES_PASSWORD:?"
+    assert compose["services"]["db"]["environment"]["POSTGRES_PASSWORD"].startswith(required)
+    for name in ("api", "scheduler"):
+        url = compose["services"][name]["environment"]["FOOTBALL_RESULTS_DATABASE_URL"]
+        assert required in url
+    assert "POSTGRES_PASSWORD:-" not in text
+
+
 def test_demo_compose_override_runs_the_demo_without_admin_keys() -> None:
-    compose = yaml.safe_load(DEMO_COMPOSE.read_text())
+    compose = yaml.load(DEMO_COMPOSE.read_text(), Loader=ComposeLoader)
     target = "/app/config/demo-competitions.yaml"
     for name in ("api", "scheduler"):
         service = compose["services"][name]

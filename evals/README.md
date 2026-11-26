@@ -27,8 +27,9 @@ The agent ends its reply with `ANSWER: {json}`. A run passes when that JSON matc
 
 ~~~bash
 # 1. A local demo-mode stack (the 3. Liga, read-only) on http://localhost:8000
-FOOTBALL_RESULTS_OPERATOR_CONTACT=evals@localhost docker compose -p football-evals \
-  -f compose.yaml -f compose.demo.yaml -f evals/compose.yaml up -d --build --wait
+POSTGRES_PASSWORD=$(openssl rand -hex 32) FOOTBALL_RESULTS_OPERATOR_CONTACT=evals@localhost \
+  docker compose -p football-evals -f compose.yaml -f compose.demo.yaml -f evals/compose.yaml \
+  up -d --build --wait
 # wait until the scheduler has imported the season: football-results standings -c 3-liga
 
 # 2. Ground truth and scorer self-check (no agent runs, no credits)
@@ -39,7 +40,8 @@ uv run python evals/run.py
 uv run python evals/run.py --tasks leader form --modes cli --runs 1   # a cheap subset
 
 # 4. Clean up
-docker compose -p football-evals -f compose.yaml -f compose.demo.yaml -f evals/compose.yaml down -v
+POSTGRES_PASSWORD=unused docker compose -p football-evals -f compose.yaml -f compose.demo.yaml \
+  -f evals/compose.yaml down -v
 ~~~
 
 Options: `--base-url` (another instance, such as the public demo; mind its read quota and use

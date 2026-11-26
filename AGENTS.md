@@ -54,6 +54,7 @@ API.
 | `server.json` | MCP Registry metadata (`io.github.ReccaFlames/football-results`; demo remote first, `{host}` template second), validated against `tests/schemas/server.schema.json` |
 | `scripts/set_demo_host.py` | Replaces the `FOOTBALL_DEMO_HOST` placeholder (server.json) and `DEMO_URL` (CLI) once; `--check` fails while one remains (ADR 0009) |
 | `scripts/publish-wizard.sh` | Interactive wizard for the one-time manual publish steps (GitHub repo, PyPI pending publisher, demo host, tag) |
+| `.github/dependabot.yml` | Weekly grouped dependency updates (uv, Actions, Docker, Compose) with a 7-day cooldown |
 | `.github/workflows/release.yml` | Dormant `v*` tag release: reuses CI, version and placeholder checks, PyPI trusted publishing, MCP Registry via GitHub OIDC |
 | `evals/` | Agent evals with `copilot -p` (CLI + skill and MCP) against a local demo stack; manual chat-client checklist. Never in pytest or CI |
 | `keycloak/` | Realm import for the `oauth-example` Compose profile (no users, no secrets) |
@@ -224,8 +225,11 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
   `python -m app.config keys ...` helpers (atomic replace, validated).
 - Demo mode (`FOOTBALL_RESULTS_DEMO_MODE`, ADR 0007): `check_demo_mode` in `app/config.py` runs
   at API startup (before seeding), in the scheduler before every (re)seed, and in `config check`.
-  It rejects admin keys and providers not in `REDISTRIBUTABLE_PROVIDERS` (code, not config;
-  adding one needs written permission). Messages name the key, never the secret or hash. Writes
+  It rejects admin keys, providers not in `REDISTRIBUTABLE_PROVIDERS` (code, not config;
+  adding one needs written permission), and a weak database password
+  (`weak_database_password`). Messages name the key, never the secret, hash, or password.
+  `compose.demo.yaml` binds the API to `127.0.0.1` (`ports: !override`) and requires
+  `POSTGRES_PASSWORD` (`:?`); tests read it with `ComposeLoader`. Writes
   use the existing `writes-disabled` problem. The demo notice in the agent docs reads quotas
   from settings; keep instance facts out of the consumer skill.
 - `RefreshRequest.competition` is required. Competition summaries may have a null `current_season`.

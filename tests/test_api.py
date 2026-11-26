@@ -1490,11 +1490,13 @@ def test_private_instance_startup_refuses_environment_keys(
 
 DEFAULT_CONFIG = Path(__file__).parents[1] / "config/competitions.yaml"
 DEMO_CONFIG = Path(__file__).parents[1] / "config/demo-competitions.yaml"
+DEMO_DATABASE_URL = "postgresql+psycopg_async://football:0123456789abcdef@db:5432/football"
 
 
 def use_demo_mode(monkeypatch: pytest.MonkeyPatch, config_file: Path = DEMO_CONFIG) -> None:
     monkeypatch.setattr(main_module.settings, "demo_mode", True)
     monkeypatch.setattr(main_module.settings, "operator_contact", "demo@example.com")
+    monkeypatch.setattr(main_module.settings, "database_url", DEMO_DATABASE_URL)
     monkeypatch.setattr(main_module.settings, "api_keys", "")
     monkeypatch.setattr(main_module.settings, "api_keys_file", None)
     monkeypatch.setattr(main_module.settings, "config_file", config_file)

@@ -6,11 +6,18 @@
 # key. Client keys in FOOTBALL_RESULTS_API_KEYS_FILE stay allowed.
 # Container logs go to journald, which deletes them by age (docs/DEMO.md, section 2); keep its
 # MaxRetentionSec equal to FOOTBALL_RESULTS_LOG_RETENTION_DAYS, which /privacy states.
+# The API port is bound to 127.0.0.1 whatever API_BIND_ADDRESS says: only Caddy on the host may
+# reach it, because Docker-published ports bypass the host firewall. POSTGRES_PASSWORD has no
+# default here, and demo mode refuses a shipped default or short password (use hex: the password
+# is part of the database URL).
 x-demo-logging: &demo-logging
   driver: journald
 
+x-demo-database-url: &demo-database-url postgresql+psycopg_async://${POSTGRES_USER:-football}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (openssl rand -hex 32)}@db:5432/${POSTGRES_DB:-football}
+
 x-demo-environment: &demo-environment
   FOOTBALL_RESULTS_DEMO_MODE: "true"
+  FOOTBALL_RESULTS_DATABASE_URL: *demo-database-url
   FOOTBALL_RESULTS_CONFIG_FILE: /app/config/demo-competitions.yaml
   FOOTBALL_RESULTS_LOG_FORMAT: json
   # Shown on /privacy; demo mode refuses to start without it.
@@ -18,7 +25,13 @@ x-demo-environment: &demo-environment
   FOOTBALL_RESULTS_LOG_RETENTION_DAYS: ${FOOTBALL_RESULTS_LOG_RETENTION_DAYS:-14}
 
 services:
+  db:
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (openssl rand -hex 32)}
+
   api:
+    ports: !override
+      - "127.0.0.1:${API_PORT:-8000}:8000"
     environment:
       <<: *demo-environment
       # Overrides any admin keys from .env; demo mode would refuse to start with them.

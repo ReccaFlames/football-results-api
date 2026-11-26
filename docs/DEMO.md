@@ -67,9 +67,13 @@ cp .env.example .env
 Set these in `.env` (leave everything else at its default):
 
 ```bash
-POSTGRES_PASSWORD=<long random password>
-# Only Caddy on the same host may reach the API. Docker-published ports bypass the host
-# firewall (https://docs.docker.com/engine/network/packet-filtering-firewalls/).
+# Hex only: the password is part of the database URL. Demo mode refuses shipped defaults and
+# passwords shorter than 16 characters. Set it before the first start; PostgreSQL keeps the
+# password it was created with.
+POSTGRES_PASSWORD=<output of: openssl rand -hex 32>
+# Only Caddy on the same host may reach the API: Docker-published ports bypass the host firewall
+# (https://docs.docker.com/engine/network/packet-filtering-firewalls/). compose.demo.yaml binds
+# the API to 127.0.0.1 regardless; this keeps the base file consistent.
 API_BIND_ADDRESS=127.0.0.1
 FOOTBALL_RESULTS_PUBLIC_BASE_URL=https://demo.example.com
 FOOTBALL_RESULTS_USER_AGENT="FootballResultsAPI demo (contact: you@example.com)"
@@ -292,6 +296,5 @@ provider, for example 90minut.pl for the Ekstraklasa:
    `providers` entry. Its fallback provider must be allowed too; for the Ekstraklasa that means
    leaving out the TheSportsDB fallback (`fallback_provider` and the `fallback_url`s) unless
    TheSportsDB grants permission as well.
-5. **Check and release**: `FOOTBALL_RESULTS_DEMO_MODE=true uv run python -m app.config check
-   --config-file config/demo-competitions.yaml`, the tests, a version bump, then update the
-   demo (section 6).
+5. **Check and release**: the demo `config check` from section 6, the tests, a version bump,
+   then update the demo (section 6).

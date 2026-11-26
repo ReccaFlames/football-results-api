@@ -1034,10 +1034,15 @@ demo mode:
   are shortened (`/24` for IPv4, `/48` for IPv6), and container logs go to journald, which deletes
   them after `FOOTBALL_RESULTS_LOG_RETENTION_DAYS` (set its `MaxRetentionSec` to match; see the
   guide). `/robots.txt` lets crawlers and AI agents in; the guide's Cloudflare settings keep it so.
+- The origin is hardened: `compose.demo.yaml` publishes the API on `127.0.0.1` only, whatever
+  `API_BIND_ADDRESS` says, and has no default `POSTGRES_PASSWORD`; demo mode also refuses a
+  database password that is a shipped default or shorter than 16 characters (use
+  `openssl rand -hex 32`: the password is part of the database URL).
 
 ~~~bash
-FOOTBALL_RESULTS_DEMO_MODE=true uv run python -m app.config check \
-  --config-file config/demo-competitions.yaml
+FOOTBALL_RESULTS_DEMO_MODE=true FOOTBALL_RESULTS_OPERATOR_CONTACT=you@example.com \
+FOOTBALL_RESULTS_DATABASE_URL=postgresql+psycopg_async://football:$(openssl rand -hex 16)@localhost/football \
+  uv run python -m app.config check --config-file config/demo-competitions.yaml
 ~~~
 
 ### Observability
@@ -1394,6 +1399,10 @@ secret scan, PyPI pending publisher, demo host, version 1.0.0, tag) are scripted
 ~~~bash
 bash scripts/publish-wizard.sh   # interactive; run from a clean checkout as the ReccaFlames account
 ~~~
+
+`.github/dependabot.yml` proposes weekly, grouped updates for uv (API and CLI), GitHub Actions,
+the Dockerfile, and the Compose images, each at least 7 days after its release; security updates
+open immediately. Every update runs CI and is merged by hand.
 
 ## Target state and roadmap
 

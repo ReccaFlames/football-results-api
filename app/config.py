@@ -20,6 +20,8 @@ from pydantic import (
     model_validator,
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError
 
 from app import access
 from app.competitions import provider_competition_code, source_from_url
@@ -623,6 +625,19 @@ def demo_mode_errors(
     return errors
 
 
+DEFAULT_DATABASE_PASSWORDS = frozenset({"football", "change-me"})
+MIN_DATABASE_PASSWORD_LENGTH = 16
+
+
+def weak_database_password(database_url: str) -> bool:
+    """Whether the URL's password is missing, a shipped default, or too short."""
+    try:
+        password = make_url(database_url).password or ""
+    except ArgumentError:
+        return True
+    return password in DEFAULT_DATABASE_PASSWORDS or len(password) < MIN_DATABASE_PASSWORD_LENGTH
+
+
 def check_demo_mode(config: CompetitionFile, file_keys: Sequence[access.FileKey]) -> None:
     """Raise when ``FOOTBALL_RESULTS_DEMO_MODE`` is on and the setup breaks ADR 0007."""
     if not settings.demo_mode:
@@ -632,6 +647,12 @@ def check_demo_mode(config: CompetitionFile, file_keys: Sequence[access.FileKey]
         errors.append(
             "FOOTBALL_RESULTS_OPERATOR_CONTACT is not set; a public instance must name its "
             "operator on /privacy"
+        )
+    if weak_database_password(settings.database_url):
+        errors.append(
+            "the database password is missing, a shipped default, or shorter than "
+            f"{MIN_DATABASE_PASSWORD_LENGTH} characters; set POSTGRES_PASSWORD to "
+            "`openssl rand -hex 32` before the database is first created"
         )
     if errors:
         raise ValueError(
