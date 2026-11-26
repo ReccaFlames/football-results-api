@@ -61,7 +61,8 @@ path:
 | Everything else (`/api/*`, `/llms.txt`, `/agents`, `/docs`, `/privacy`, `/mcp`, ...) | API, `127.0.0.1:8000` |
 
 The API has no route on the landing paths. The landing page links relatively (`docs`,
-`llms.txt`, `agents`, `privacy`), so those links work only on this shared origin. The Caddyfiles
+`llms.txt`, `agents`, `privacy`) when `FOOTBALL_RESULTS_WEB_PUBLIC_API_URL` is empty, so those
+links work only on this shared origin. The Caddyfiles
 are in [DEMO.md](DEMO.md#3-caddy) and [PRIVATE.md](PRIVATE.md#2-https-with-caddy).
 
 ### Client addresses and trusted proxies
@@ -99,6 +100,8 @@ visitor ─▶ (Cloudflare, demo only) ─▶ Caddy on the host ─┬─▶ API
 3. [ ] Create `.env` with `chmod 600`, and set:
        - `POSTGRES_PASSWORD=$(openssl rand -hex 32)`, before the first start
        - `API_BIND_ADDRESS=127.0.0.1` and `WEB_BIND_ADDRESS=127.0.0.1`
+       - `WEB_PUBLIC_API_URL=` (empty, so the landing page links relatively; `compose.demo.yaml`
+         forces this for the demo)
        - `FOOTBALL_RESULTS_PUBLIC_BASE_URL`
        - `FOOTBALL_RESULTS_USER_AGENT` with a contact address
        - `FOOTBALL_RESULTS_TRUSTED_PROXIES`: `172.16.0.0/12` for Caddy and the landing app,

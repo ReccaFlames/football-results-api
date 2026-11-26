@@ -51,6 +51,8 @@ Follow the [Ubuntu deployment](../README.md#ubuntu-deployment) steps, then set i
 ```bash
 API_BIND_ADDRESS=127.0.0.1
 WEB_BIND_ADDRESS=127.0.0.1
+# Empty: Caddy serves the landing page and the API on one origin, so its links stay relative.
+WEB_PUBLIC_API_URL=
 FOOTBALL_RESULTS_ANONYMOUS_ACCESS=false
 FOOTBALL_RESULTS_API_KEYS=
 FOOTBALL_RESULTS_API_KEYS_FILE=/app/secrets/api-keys.yaml

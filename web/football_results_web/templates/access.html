@@ -5,12 +5,12 @@
           <h2 id="request-access">{% if demo %}No key needed{% else %}Request an API key{% endif %}</h2>
           {% if not demo %}
           <p class="lede">Requests are reviewed by hand.</p>
-          <p class="hint">Nothing is granted automatically. Agents can send the same request through the API (<code>create_access_request</code>, see the <a href="llms.txt">API overview</a>).</p>
+          <p class="hint">Nothing is granted automatically. Agents can send the same request through the API (<code>create_access_request</code>, see the <a href="{{ api_link("llms.txt") }}">API overview</a>).</p>
           {% endif %}
         </div>
         {% if demo %}
         <div class="request-body">
-          <p>This is a public, read-only demo instance: read the data without a key, within the anonymous rate limits. It takes no access requests. The <a href="llms.txt">API overview</a> describes its limits and data licences.</p>
+          <p>This is a public, read-only demo instance: read the data without a key, within the anonymous rate limits. It takes no access requests. The <a href="{{ api_link("llms.txt") }}">API overview</a> describes its limits and data licences.</p>
         </div>
         {% else %}
         <div class="request-body">

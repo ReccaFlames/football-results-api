@@ -14,6 +14,7 @@ import httpx
 from football_results_web import __version__
 
 API_URL_VARIABLE = "FOOTBALL_RESULTS_WEB_API_URL"
+PUBLIC_API_URL_VARIABLE = "FOOTBALL_RESULTS_WEB_PUBLIC_API_URL"
 DEFAULT_API_URL = "http://localhost:8000"
 USER_AGENT = f"football-results-web/{__version__}"
 TIMEOUT = httpx.Timeout(5.0)
@@ -28,7 +29,22 @@ Clock = Callable[[], datetime]
 
 def api_url_from_env(environ: Mapping[str, str] = os.environ) -> str:
     """The API base URL without a trailing slash; raises `ValueError` if it is not usable."""
-    url = (environ.get(API_URL_VARIABLE) or "").strip() or DEFAULT_API_URL
+    return _base_url(
+        API_URL_VARIABLE, (environ.get(API_URL_VARIABLE) or "").strip() or DEFAULT_API_URL
+    )
+
+
+def public_api_url_from_env(environ: Mapping[str, str] = os.environ) -> str | None:
+    """The API's address as browsers reach it, or `None` when it shares the landing page's origin.
+
+    Behind the shared-origin reverse proxy, links stay relative; without one (local development),
+    links to the API's documentation pages need the API's own address.
+    """
+    url = (environ.get(PUBLIC_API_URL_VARIABLE) or "").strip()
+    return _base_url(PUBLIC_API_URL_VARIABLE, url) if url else None
+
+
+def _base_url(variable: str, url: str) -> str:
     parts = urlsplit(url)
     if (
         parts.scheme not in ("http", "https")
@@ -38,7 +54,7 @@ def api_url_from_env(environ: Mapping[str, str] = os.environ) -> str:
         or parts.username is not None
         or parts.password is not None
     ):
-        raise ValueError(f"{API_URL_VARIABLE} must be an http(s) base URL, got {url!r}")
+        raise ValueError(f"{variable} must be an http(s) base URL, got {url!r}")
     return url.rstrip("/")
 
 

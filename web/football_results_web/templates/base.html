@@ -28,7 +28,7 @@
       <p>{{ names | join(", ") }}: data from <a href="{{ attribution.source_url }}">{{ attribution.source }}</a>, licensed under the <a rel="license" href="{{ attribution.license_url }}">{{ attribution.license }}</a>.</p>
       {% endfor %}
       <nav aria-label="Legal">
-        <a href="privacy">Privacy and operator contact</a>
+        <a href="{{ api_link("privacy") }}">Privacy and operator contact</a>
       </nav>
     </div>
   </footer>

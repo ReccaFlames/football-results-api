@@ -572,6 +572,7 @@ def test_demo_compose_override_hardens_the_public_origin() -> None:
     compose = yaml.load(text, Loader=ComposeLoader)
     assert compose["services"]["api"]["ports"] == ["127.0.0.1:${API_PORT:-8000}:8000"]
     assert compose["services"]["web"]["ports"] == ["127.0.0.1:${WEB_PORT:-8001}:8001"]
+    assert compose["services"]["web"]["environment"]["FOOTBALL_RESULTS_WEB_PUBLIC_API_URL"] == ""
     required = "${POSTGRES_PASSWORD:?"
     assert compose["services"]["db"]["environment"]["POSTGRES_PASSWORD"].startswith(required)
     for name in ("api", "scheduler"):
@@ -602,6 +603,10 @@ def test_compose_runs_the_landing_app_next_to_the_api_on_loopback() -> None:
     assert "profiles" not in web
     assert web["build"] == {"context": ".", "dockerfile": "web/Dockerfile"}
     assert web["environment"]["FOOTBALL_RESULTS_WEB_API_URL"] == "http://api:8000"
+    # Local use links to the published API; WEB_PUBLIC_API_URL= (empty) keeps links relative.
+    assert web["environment"]["FOOTBALL_RESULTS_WEB_PUBLIC_API_URL"] == (
+        "${WEB_PUBLIC_API_URL-http://localhost:${API_PORT:-8000}}"
+    )
     assert web["ports"] == ["${WEB_BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-8001}:8001"]
 
 

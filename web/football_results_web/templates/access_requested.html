@@ -15,10 +15,10 @@
       <h3>Check the status and claim your key</h3>
       <p>Send the request ID and the claim secret to <code>get_access_request</code>. Once the operator approves the request, the response contains your API key exactly once; claim it before its <code>claim_expires_at</code>.</p>
       <ul>
-        <li>With the <a href="agents#cli">command-line client</a>, pointed at this site with <code>FOOTBALL_RESULTS_URL</code>: <code>FOOTBALL_RESULTS_CLAIM_SECRET=&lt;claim secret&gt; football-results get-access-request {{ receipt.id }}</code></li>
-        <li>Over HTTP: <code>GET {{ receipt.status_url }}</code> with the header <code>Claim-Secret: &lt;claim secret&gt;</code></li>
+        <li>With the <a href="{{ api_link("agents#cli") }}">command-line client</a>, pointed at this site with <code>FOOTBALL_RESULTS_URL</code>: <code>FOOTBALL_RESULTS_CLAIM_SECRET=&lt;claim secret&gt; football-results get-access-request {{ receipt.id }}</code></li>
+        <li>Over HTTP: <code>GET {{ api_link(receipt.status_url) }}</code> with the header <code>Claim-Secret: &lt;claim secret&gt;</code></li>
       </ul>
-      <p>The <a href="llms.txt">API overview</a> explains how to send the key.</p>
+      <p>The <a href="{{ api_link("llms.txt") }}">API overview</a> explains how to send the key.</p>
       {% endif %}
       <p><a href="./">Back to the start page</a></p>
     </section>

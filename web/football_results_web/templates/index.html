@@ -4,7 +4,7 @@
       <div class="hero-text">
         <h1 id="hero-title">Football data API.</h1>
         <p class="lede">Fixtures, results and league tables for developers and AI agents.</p>
-        <p><a class="button button-large" href="docs">Explore API docs</a></p>
+        <p><a class="button button-large" href="{{ api_link("docs") }}">Explore API docs</a></p>
       </div>
       {% include "pitch.svg" %}
     </section>
@@ -13,7 +13,7 @@
       <section class="competitions" aria-labelledby="competitions">
         <h2 id="competitions">Competitions</h2>
         {% if competitions is none %}
-        <p>The competition list is temporarily unavailable. The <a href="llms.txt">API overview</a> lists the competitions this instance serves.</p>
+        <p>The competition list is temporarily unavailable. The <a href="{{ api_link("llms.txt") }}">API overview</a> lists the competitions this instance serves.</p>
         {% elif not competitions %}
         <p>No competitions are configured yet.</p>
         {% else %}
@@ -34,19 +34,19 @@
         <section aria-labelledby="developers">
           <h2 id="developers">For developers</h2>
           <ul class="links">
-            <li><a href="docs">Interactive API documentation</a></li>
-            <li><a href="openapi.json">OpenAPI specification</a></li>
-            <li><a href="agents#cli">Command-line client</a> <code class="block">uv tool install football-results-cli</code></li>
+            <li><a href="{{ api_link("docs") }}">Interactive API documentation</a></li>
+            <li><a href="{{ api_link("openapi.json") }}">OpenAPI specification</a></li>
+            <li><a href="{{ api_link("agents#cli") }}">Command-line client</a> <code class="block">uv tool install football-results-cli</code></li>
           </ul>
         </section>
 
         <section aria-labelledby="agents">
           <h2 id="agents">For AI agents</h2>
           <ul class="links">
-            <li><a href="llms.txt">llms.txt</a></li>
-            <li><a href="agents">Agent guide</a></li>
-            <li><a href="agents#mcp">MCP server</a> <code>/mcp</code></li>
-            <li><a href="agents#skill">Agent Skill</a></li>
+            <li><a href="{{ api_link("llms.txt") }}">llms.txt</a></li>
+            <li><a href="{{ api_link("agents") }}">Agent guide</a></li>
+            <li><a href="{{ api_link("agents#mcp") }}">MCP server</a> <code>/mcp</code></li>
+            <li><a href="{{ api_link("agents#skill") }}">Agent Skill</a></li>
           </ul>
         </section>
       </div>

@@ -2,7 +2,7 @@
 
 import logging
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -170,8 +170,22 @@ def footer_attributions(
     return list(grouped.items())
 
 
-def create_app(api_url: str | None = None, clock: api.Clock | None = None) -> Starlette:
+def api_links(public_api_url: str | None) -> Callable[[str], str]:
+    """Links to pages the API serves: relative on the shared origin, else on the API's address."""
+
+    def api_link(path: str) -> str:
+        return f"{public_api_url}/{path.lstrip('/')}" if public_api_url else path
+
+    return api_link
+
+
+def create_app(
+    api_url: str | None = None,
+    clock: api.Clock | None = None,
+    public_api_url: str | None = None,
+) -> Starlette:
     base_url = api_url or api.api_url_from_env()
+    api_link = api_links(public_api_url or api.public_api_url_from_env())
     competitions = api.CompetitionCache(base_url, clock)
     demo_mode = api.DemoModeCache(base_url, clock)
     templates = Jinja2Templates(directory=TEMPLATES)
@@ -187,6 +201,7 @@ def create_app(api_url: str | None = None, clock: api.Clock | None = None) -> St
             template,
             {
                 "logo": logo,
+                "api_link": api_link,
                 "competitions": listed,
                 "attributions": footer_attributions(listed),
                 "max_lengths": MAX_LENGTHS,

@@ -53,7 +53,7 @@ API.
 | `cli/football_results_cli/problems.py` | Exit codes, CLI problem slugs (`urn:football-results:cli:<slug>`), `exit_code_for` |
 | `web/` | Separate uv workspace package `football-results-web` (Starlette + Jinja2 + httpx): the Whistleprint landing page |
 | `web/football_results_web/main.py` | `create_app`: `/` (competitions, developer and agent links, access request form or "no key needed" on a demo), `POST /request-access` (`AccessForm`, honeypot, `form_errors` maps problem slugs to field messages, `no-store`), `/static/*`, `/favicon.ico`, security headers; footer with `footer_attributions` (each source once) and the `privacy` link (operator contact) |
-| `web/football_results_web/api.py` | `create_http_client` (test seam), `TimedCache` (5-minute cache, last good value kept): `CompetitionCache` (with `data_attributions`, http(s) URLs only), `DemoModeCache` (demo notice in `/llms.txt`); `create_access_request` (problem parsing), `forwarded_for`; `FOOTBALL_RESULTS_WEB_API_URL` |
+| `web/football_results_web/api.py` | `create_http_client` (test seam), `TimedCache` (5-minute cache, last good value kept): `CompetitionCache` (with `data_attributions`, http(s) URLs only), `DemoModeCache` (demo notice in `/llms.txt`); `create_access_request` (problem parsing), `forwarded_for`; `FOOTBALL_RESULTS_WEB_API_URL`, optional `FOOTBALL_RESULTS_WEB_PUBLIC_API_URL` (browser-facing API address for links) |
 | `web/football_results_web/templates/`, `static/` | Jinja2 templates (with the inline `pitch.svg` hero); stylesheet (light and dark palettes), logo, mark, favicon, and self-hosted Inter font with its `inter-OFL.txt` (package data) |
 | `web/Dockerfile` | Landing image (build context: repository root): only `football-results-web` from `uv.lock`, UID 10001, port 8001; Compose service `web` |
 | `.dockerignore` | Keeps `.env`, `secrets/`, `.venv`, and build artefacts out of both image build contexts |
@@ -182,7 +182,8 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
   and the API must not import it (a test checks); it calls the API over HTTP only
   (`FOOTBALL_RESULTS_WEB_API_URL`). "Whistleprint" is its UI brand only; package and module names
   stay `football-results`. No JavaScript, no external assets, and only relative links (it shares
-  the API's origin); the only exception is the footer's data attribution (source and licence
+  the API's origin; links to API pages go through `api_link`, absolute only when
+  `FOOTBALL_RESULTS_WEB_PUBLIC_API_URL` is set for use without the shared-origin proxy); the only exception is the footer's data attribution (source and licence
   URLs, which the licence requires), read from `data_attributions` in `list_competitions`. The
   operator contact is not duplicated: the footer links to `privacy`. Its tests use a fake API through `create_http_client`. It detects a demo
   instance by the line starting with `**Demo instance:**` in `/llms.txt` (`api.DEMO_NOTICE`; a

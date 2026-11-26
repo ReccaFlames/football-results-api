@@ -299,10 +299,21 @@ uv run uvicorn football_results_web.main:app --reload --port 8001
 ~~~
 
 `FOOTBALL_RESULTS_WEB_API_URL` sets the API base URL it calls (default `http://localhost:8000`).
-The page uses relative links because it is meant to be served on the same origin as the API, so
-its documentation links work only behind that shared origin (a reverse proxy that routes `/`,
+The page is meant to be served on the same origin as the API (a reverse proxy that routes `/`,
 `/request-access`, `/static/*`, and `/favicon.ico` to it and everything else to the API; see
-[Ubuntu deployment](#ubuntu-deployment)), not on port 8001.
+[Ubuntu deployment](#ubuntu-deployment)), so by default its links to the API's pages (`docs`,
+`llms.txt`, `agents`, `privacy`) are relative. Without such a proxy, set
+`FOOTBALL_RESULTS_WEB_PUBLIC_API_URL` to the API's address as browsers reach it, and those links
+point there instead:
+
+~~~bash
+FOOTBALL_RESULTS_WEB_PUBLIC_API_URL=http://localhost:8000 \
+  uv run uvicorn football_results_web.main:app --reload --port 8001
+~~~
+
+`compose.yaml` sets it to `http://localhost:${API_PORT}` unless `WEB_PUBLIC_API_URL` is set in
+`.env`; deployments behind the reverse proxy set `WEB_PUBLIC_API_URL=` (empty), and
+`compose.demo.yaml` forces it empty.
 
 The form posts to the landing app's `/request-access`, which calls `create_access_request` and
 shows the request ID and claim secret once (`Cache-Control: no-store`). API problems (validation,

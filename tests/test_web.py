@@ -645,6 +645,35 @@ def test_api_url_must_be_a_plain_http_base_url(value: str) -> None:
         web_api.api_url_from_env({"FOOTBALL_RESULTS_WEB_API_URL": value})
 
 
+def test_api_pages_are_linked_on_the_public_api_url_when_it_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_api(monkeypatch, routes())
+    client = TestClient(web.create_app(API_URL, public_api_url="http://localhost:8000"))
+
+    page = client.get("/").text
+    receipt = client.post("/request-access", data=FORM).text
+
+    links = re.findall(r'href="([^"]*)"', page)
+    for target in ("docs", "openapi.json", "llms.txt", "agents#mcp", "privacy"):
+        assert f"http://localhost:8000/{target}" in links and target not in links
+    for target in ("./#competitions", "./#request-access", "static/style.css", "favicon.ico"):
+        assert target in links
+    assert '<form method="post" action="request-access">' in page
+    assert "GET http://localhost:8000/api/v1/access-requests/7" in receipt
+
+
+def test_public_api_url_is_optional_and_validated() -> None:
+    variable = "FOOTBALL_RESULTS_WEB_PUBLIC_API_URL"
+    assert web_api.public_api_url_from_env({}) is None
+    assert web_api.public_api_url_from_env({variable: " "}) is None
+    assert web_api.public_api_url_from_env({variable: "http://localhost:8000/"}) == (
+        "http://localhost:8000"
+    )
+    with pytest.raises(ValueError, match=variable):
+        web_api.public_api_url_from_env({variable: "localhost:8000"})
+
+
 def test_api_url_defaults_to_a_local_api_without_trailing_slash() -> None:
     assert web_api.api_url_from_env({}) == "http://localhost:8000"
     assert web_api.api_url_from_env({"FOOTBALL_RESULTS_WEB_API_URL": "http://api:8000/"}) == (

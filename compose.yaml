@@ -115,6 +115,10 @@ services:
         condition: service_started
     environment:
       FOOTBALL_RESULTS_WEB_API_URL: http://api:8000
+      # The API as browsers reach it, for the page's documentation links when nothing shares the
+      # origin (local use). Behind the reverse proxy, set WEB_PUBLIC_API_URL= (empty) in .env so
+      # the links stay relative.
+      FOOTBALL_RESULTS_WEB_PUBLIC_API_URL: ${WEB_PUBLIC_API_URL-http://localhost:${API_PORT:-8000}}
     ports:
       - "${WEB_BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-8001}:8001"
 
