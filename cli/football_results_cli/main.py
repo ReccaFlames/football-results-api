@@ -70,6 +70,7 @@ COMPETITION_FIELDS = (
     "automatic_refresh_enabled",
     "scheduler_state",
     "next_check_at",
+    "data_attributions",
 )
 TEAM_FIELDS = ("slug", "name", "aliases")
 JOB_DONE_STATUSES = frozenset({"completed"})

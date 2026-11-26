@@ -25,7 +25,12 @@ from app.caching import (
     max_age_seconds,
     private_cache_control,
 )
-from app.competitions import competition_summary, provider_competition_code, source_from_url
+from app.competitions import (
+    competition_summary,
+    provider_competition_code,
+    source_from_url,
+    with_data_attributions,
+)
 from app.config import (
     check_demo_mode,
     check_private_instance,
@@ -517,13 +522,16 @@ async def health() -> dict[str, str]:
     summary="List competitions and their seasons",
     description=(
         "Use first to discover competition slugs, the current season, available and fetched "
-        "seasons, the season format, and scheduler state. Not paginated."
+        "seasons, the season format, scheduler state, and the data attributions to keep when "
+        "you publish the data. Not paginated."
     ),
     response_model=list[CompetitionSummary],
     responses=docs.cached_read("/api/v1/competitions"),
 )
 async def get_competitions() -> list[CompetitionSummary]:
-    return await store.list_competitions()
+    return with_data_attributions(
+        await store.list_competitions(), _configured_provider_competitions()
+    )
 
 
 @app.get(
@@ -1712,7 +1720,7 @@ def _configured_provider_competitions() -> dict[str, list[str]]:
     try:
         return load_config().competitions_by_provider()
     except (TypeError, ValueError):
-        logger.warning("Agent docs omit data attributions: the configuration file is invalid")
+        logger.warning("Data attributions omitted: the configuration file is invalid")
         return {}
 
 

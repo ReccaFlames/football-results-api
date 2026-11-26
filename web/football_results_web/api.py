@@ -57,11 +57,46 @@ class MalformedResponse(ValueError):
 
 
 @dataclass(frozen=True)
+class Attribution:
+    """A data source whose licence requires attribution (`data_attributions`)."""
+
+    source: str
+    source_url: str
+    license: str
+    license_url: str
+
+
+@dataclass(frozen=True)
 class CompetitionItem:
     slug: str
     name: str
     country: str | None
     current_season: str | None
+    attributions: tuple[Attribution, ...] = ()
+
+
+def _web_url(value: Any) -> bool:
+    # The URLs become `href`s, so nothing but http(s) is accepted.
+    return isinstance(value, str) and urlsplit(value).scheme in ("http", "https")
+
+
+def parse_attributions(value: Any) -> tuple[Attribution, ...]:
+    """Well-formed `data_attributions` entries; an API without the field yields none."""
+    items = []
+    for entry in value if isinstance(value, list) else ():
+        if (
+            isinstance(entry, dict)
+            and isinstance(entry.get("source"), str)
+            and isinstance(entry.get("license"), str)
+            and _web_url(entry.get("source_url"))
+            and _web_url(entry.get("license_url"))
+        ):
+            items.append(
+                Attribution(
+                    entry["source"], entry["source_url"], entry["license"], entry["license_url"]
+                )
+            )
+    return tuple(items)
 
 
 def parse_competitions(body: Any) -> list[CompetitionItem]:
@@ -83,6 +118,7 @@ def parse_competitions(body: Any) -> list[CompetitionItem]:
                 name=entry["name"],
                 country=country if isinstance(country, str) else None,
                 current_season=season if isinstance(season, str) else None,
+                attributions=parse_attributions(entry.get("data_attributions")),
             )
         )
     return items

@@ -1,7 +1,8 @@
 import re
+from collections.abc import Iterable, Mapping, Sequence
 from urllib.parse import parse_qs, urlsplit
 
-from app.models import Competition, CompetitionSummary, SeasonSource
+from app.models import Competition, CompetitionSummary, DataAttribution, SeasonSource
 from app.seasons import season_years
 
 NINETY_MINUT_PATH_RE = re.compile(r"^/liga/1/liga\d+\.html$")
@@ -42,6 +43,36 @@ def competition_summary(
         available_seasons=sorted(set(competition.seasons) | fetched, reverse=True),
         fetched_seasons=sorted(fetched, reverse=True),
     )
+
+
+# Data licences that require attribution, by provider name (ADR 0004). `list_competitions`,
+# `/llms.txt`, `/agents`, and the landing page all show these.
+PROVIDER_ATTRIBUTIONS = {
+    "openligadb": DataAttribution(
+        source="OpenLigaDB",
+        source_url="https://www.openligadb.de",
+        license="Open Database License (ODbL) 1.0",
+        license_url="https://opendatacommons.org/licenses/odbl/1-0/",
+        notice=(
+            "Keep this attribution when you publish the data; a database derived from it is "
+            "subject to the ODbL's share-alike terms."
+        ),
+    ),
+}
+
+
+def with_data_attributions(
+    summaries: Iterable[CompetitionSummary], provider_competitions: Mapping[str, Sequence[str]]
+) -> list[CompetitionSummary]:
+    """`summaries` with the attributions of their configured primary and fallback providers."""
+    by_slug: dict[str, list[DataAttribution]] = {}
+    for provider, attribution in PROVIDER_ATTRIBUTIONS.items():
+        for slug in sorted(set(provider_competitions.get(provider, ()))):
+            by_slug.setdefault(slug, []).append(attribution)
+    return [
+        summary.model_copy(update={"data_attributions": by_slug.get(summary.slug, [])})
+        for summary in summaries
+    ]
 
 
 def football_data_source_url(code: str, season: str) -> str:

@@ -354,6 +354,9 @@ def test_lists_configured_competitions(tmp_path: Path) -> None:
     assert ekstraklasa["current_season"] == "2026-2027"
     assert ekstraklasa["available_seasons"] == ["2026-2027", "2025-2026"]
     assert ekstraklasa["fetched_seasons"] == []
+    attributions = {item["slug"]: item["data_attributions"] for item in response.json()}
+    assert [item["source"] for item in attributions.pop("3-liga")] == ["OpenLigaDB"]
+    assert set(map(len, attributions.values())) == {0}
 
 
 def test_unknown_competition_is_rejected(tmp_path: Path) -> None:

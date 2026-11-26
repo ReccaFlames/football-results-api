@@ -497,7 +497,7 @@ the maintainer runs `scripts/publish-wizard.sh`.
         operation needs a command, `list-access-requests` and `reject-access-request`); one line
         in the consumer skill pointing to `/llms.txt` for requesting access (no instance facts);
         no MCP tool
-  - [ ] 21e. Landing app: new uv workspace package `web/` (`football-results-web`, Starlette +
+  - [x] 21e. Landing app: new uv workspace package `web/` (`football-results-web`, Starlette +
         Jinja2 + httpx; must not import `app`, talks to the API over HTTP like the CLI). Brand
         "Whistleprint" in the UI only (technical names stay `football-results`). Move `images/`
         (logo, mark, favicon) to `web/football_results_web/static/`. Server-rendered, no JS
@@ -522,9 +522,13 @@ the maintainer runs `scripts/publish-wizard.sh`.
           instead, read from the API), confirmation page with the request ID and claim secret
           once, API problems rendered readably, hidden honeypot dropped silently,
           `X-Forwarded-For` forwarded
-    - [ ] 21e-3. Footer details: provider attributions (source to be decided: today only
-          `PROVIDER_ATTRIBUTIONS` in `app/agent_docs.py`, which `web/` cannot import) and
-          operator contact; README and AGENTS.md wrap-up
+    - [x] 21e-3. Footer details: provider attributions and operator contact; README and
+          AGENTS.md wrap-up. Decided 2026-11-26: `list_competitions` gains an add-only
+          `data_attributions` list per competition (`source`, `source_url`, `license`,
+          `license_url`, `notice`; primary or fallback provider; `PROVIDER_ATTRIBUTIONS` moved
+          to `app/competitions.py`, the agent docs render from it). The footer shows each
+          source once with its competitions (the only external links: source and licence) and
+          links to `privacy` for the operator contact instead of duplicating it
   - [ ] 21f. Deployment: own Docker image and Compose service; Caddy routes `/`,
         `/request-access`, `/static/*`, `/favicon.ico` to the landing app and everything else to
         the API (the API keeps no `/` route); `docs/DEPLOYMENT.md`, `docs/PRIVATE.md`,

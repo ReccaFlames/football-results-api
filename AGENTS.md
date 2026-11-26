@@ -34,7 +34,7 @@ API.
 | `app/scheduling.py` | Pure rules driven by `SchedulePolicy`: `calculate_next_check`, `failure_backoff`, `rollover_target` |
 | `app/scraper.py` | Provider adapters (`NinetyMinutScraper`, `FootballDataScraper`), parsers, `ScraperRegistry` |
 | `app/seasons.py` | Season formats (`2026-2027`, `2026`) and season/date mapping |
-| `app/competitions.py` | Competition summary helpers and `source_from_url` validation |
+| `app/competitions.py` | Competition summary helpers, `source_from_url` validation, `PROVIDER_ATTRIBUTIONS` and `with_data_attributions` (`data_attributions` in `list_competitions`) |
 | `app/config.py` | Environment settings, validated competition configuration, and `python -m app.config` (`check`, `keys`, `access-requests`) |
 | `config/competitions.yaml` | Competition, provider, and schedule defaults |
 | `config/demo-competitions.yaml` | Demo instance competitions: only redistributable providers (the 3. Liga) |
@@ -52,8 +52,8 @@ API.
 | `cli/football_results_cli/output.py` | JSON vs Rich tables (TTY detection), freshness footer, staleness rule |
 | `cli/football_results_cli/problems.py` | Exit codes, CLI problem slugs (`urn:football-results:cli:<slug>`), `exit_code_for` |
 | `web/` | Separate uv workspace package `football-results-web` (Starlette + Jinja2 + httpx): the Whistleprint landing page |
-| `web/football_results_web/main.py` | `create_app`: `/` (competitions, developer and agent links, access request form or "no key needed" on a demo), `POST /request-access` (`AccessForm`, honeypot, `form_errors` maps problem slugs to field messages, `no-store`), `/static/*`, `/favicon.ico`, security headers |
-| `web/football_results_web/api.py` | `create_http_client` (test seam), `TimedCache` (5-minute cache, last good value kept): `CompetitionCache`, `DemoModeCache` (demo notice in `/llms.txt`); `create_access_request` (problem parsing), `forwarded_for`; `FOOTBALL_RESULTS_WEB_API_URL` |
+| `web/football_results_web/main.py` | `create_app`: `/` (competitions, developer and agent links, access request form or "no key needed" on a demo), `POST /request-access` (`AccessForm`, honeypot, `form_errors` maps problem slugs to field messages, `no-store`), `/static/*`, `/favicon.ico`, security headers; footer with `footer_attributions` (each source once) and the `privacy` link (operator contact) |
+| `web/football_results_web/api.py` | `create_http_client` (test seam), `TimedCache` (5-minute cache, last good value kept): `CompetitionCache` (with `data_attributions`, http(s) URLs only), `DemoModeCache` (demo notice in `/llms.txt`); `create_access_request` (problem parsing), `forwarded_for`; `FOOTBALL_RESULTS_WEB_API_URL` |
 | `web/football_results_web/templates/`, `static/` | Jinja2 templates; stylesheet, logo, mark, and favicon (package data) |
 | `skills/football-results/SKILL.md` | Consumer Agent Skill for API users (teaches the CLI), served unchanged at `/skills/football-results/SKILL.md` |
 | `server.json` | MCP Registry metadata (`io.github.ReccaFlames/football-results`; demo remote first, `{host}` template second), validated against `tests/schemas/server.schema.json` |
@@ -180,7 +180,9 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
   and the API must not import it (a test checks); it calls the API over HTTP only
   (`FOOTBALL_RESULTS_WEB_API_URL`). "Whistleprint" is its UI brand only; package and module names
   stay `football-results`. No JavaScript, no external assets, and only relative links (it shares
-  the API's origin). Its tests use a fake API through `create_http_client`. It detects a demo
+  the API's origin); the only exception is the footer's data attribution (source and licence
+  URLs, which the licence requires), read from `data_attributions` in `list_competitions`. The
+  operator contact is not duplicated: the footer links to `privacy`. Its tests use a fake API through `create_http_client`. It detects a demo
   instance by the line starting with `**Demo instance:**` in `/llms.txt` (`api.DEMO_NOTICE`; a
   contract test against the real API pins it), so keep that line when editing the demo notice.
   The form's `MAX_LENGTHS` mirror `AccessRequestCreate` (a test checks). It shows API problems by
@@ -217,7 +219,9 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
 - OpenLigaDB (`openligadb`, 3. Liga primary source, ADR 0004) is key-free, throttled
   (`FOOTBALL_RESULTS_OPENLIGADB_MIN_REQUEST_INTERVAL_SECONDS`, default 2s), and has no postponed
   status (`providers.openligadb.postponed_after_hours`, default 24). Its data is ODbL-licensed:
-  `/llms.txt` and `/agents` attribute it via `PROVIDER_ATTRIBUTIONS` in `app/agent_docs.py`.
+  `/llms.txt`, `/agents`, `list_competitions` (`data_attributions`), and the landing page
+  attribute it via `PROVIDER_ATTRIBUTIONS` in `app/competitions.py` (primary or fallback
+  provider, from the configuration file).
 - Tests must not hit the network. Parser tests use inline HTML/JSON fixtures.
 - The integration test database name must contain `test`; the fixtures truncate all tables and
   the migration test downgrades to `base`.

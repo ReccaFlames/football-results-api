@@ -78,8 +78,10 @@ alembic_version.
 3. Liga data comes from [OpenLigaDB](https://www.openligadb.de) and is licensed under the
 [Open Database License (ODbL)](https://opendatacommons.org/licenses/odbl/1-0/). If you publish it,
 keep the attribution to OpenLigaDB; a database derived from it is subject to the ODbL's
-share-alike terms. `/llms.txt` and `/agents` add this attribution whenever a configured
-competition uses `openligadb` ([ADR 0004](docs/adr/0004-openligadb-primary-source-for-3-liga.md)).
+share-alike terms. `/llms.txt`, `/agents`, the competition's `data_attributions` in
+`list_competitions`, and the landing page footer add this attribution whenever a configured
+competition uses `openligadb` as its primary or fallback provider
+([ADR 0004](docs/adr/0004-openligadb-primary-source-for-3-liga.md)).
 
 ### Known limitations
 
@@ -280,7 +282,9 @@ The Whistleprint landing page (`web/`, package `football-results-web`, Starlette
 separate, stateless app that talks to the API over HTTP only. It shows the competitions (from
 `list_competitions`, cached for 5 minutes), links to the developer and agent documentation, and
 an access request form (on a demo instance, "no key needed" instead; it reads this from the demo
-notice in `/llms.txt`). With the API running on port 8000:
+notice in `/llms.txt`). Its footer attributes each data source once, from the competitions'
+`data_attributions` (the only external links on the page), and links to `/privacy`, which names
+the operator contact (`FOOTBALL_RESULTS_OPERATOR_CONTACT`). With the API running on port 8000:
 
 ~~~bash
 uv run uvicorn football_results_web.main:app --reload --port 8001
@@ -416,7 +420,7 @@ go through Alembic.
 | Method | Path | Operation ID | Purpose |
 | --- | --- | --- | --- |
 | GET | `/health` | `get_health` | Database connectivity and scheduler heartbeat (`ok`, `stale`, or `not_started`) |
-| GET | `/api/v1/competitions` | `list_competitions` | Competitions with `season_format`, `season_start_month`, available/fetched seasons, and scheduler state; `current_season` is `null` when none is designated |
+| GET | `/api/v1/competitions` | `list_competitions` | Competitions with `season_format`, `season_start_month`, available/fetched seasons, and scheduler state; `current_season` is `null` when none is designated; `data_attributions` lists the sources (primary or fallback) whose licence requires attribution (`source`, `source_url`, `license`, `license_url`, `notice`), empty if none does |
 | GET | `/api/v1/matches` | `list_matches` | Finished, scheduled, and inactive matches with cursor pagination, `fields=`, and per-season freshness; filters: `competition`, `season`, `status`, `date_from`, `date_to`, `team`, `round`, `stage`, `order` |
 | GET | `/api/v1/standings` | `get_standings` | League table computed from stored finished matches for one competition-season (`stage` required for cups) |
 | GET | `/api/v1/teams` | `list_teams` | Teams with canonical slugs and aliases; filters: `competition`, `season`, `q`; cursor pagination |

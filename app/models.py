@@ -33,6 +33,16 @@ class Competition(BaseModel):
     seasons: dict[str, SeasonSource]
 
 
+class DataAttribution(BaseModel):
+    """A data source whose licence requires attribution when its data is published."""
+
+    source: str = Field(description="Name of the data source", examples=["OpenLigaDB"])
+    source_url: str = Field(examples=["https://www.openligadb.de"])
+    license: str = Field(examples=["Open Database License (ODbL) 1.0"])
+    license_url: str = Field(examples=["https://opendatacommons.org/licenses/odbl/1-0/"])
+    notice: str = Field(description="What the licence asks of anyone who publishes the data")
+
+
 class CompetitionSummary(BaseModel):
     slug: str
     name: str
@@ -46,6 +56,13 @@ class CompetitionSummary(BaseModel):
     automatic_refresh_enabled: bool = False
     scheduler_state: str | None = None
     next_check_at: datetime | None = None
+    data_attributions: list[DataAttribution] = Field(
+        default_factory=list,
+        description=(
+            "Sources of this competition's data (primary or fallback) whose licence requires "
+            "attribution; keep it when you publish the data. Empty if none does."
+        ),
+    )
 
 
 class MatchResult(BaseModel):

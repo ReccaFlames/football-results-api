@@ -17,7 +17,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 from app.access import PUBLIC_OPERATIONS
-from app.models import PROBLEM_TYPES, CompetitionSummary
+from app.competitions import PROVIDER_ATTRIBUTIONS
+from app.models import PROBLEM_TYPES, CompetitionSummary, DataAttribution
 from app.problems import PROBLEM_MEDIA_TYPE
 from app.ratelimit import is_trusted_proxy
 
@@ -656,24 +657,22 @@ def build_guide(
     )
 
 
-# Data licences that require attribution, by provider name (ADR 0004).
-PROVIDER_ATTRIBUTIONS = {
-    "openligadb": (
-        "data from [OpenLigaDB](https://www.openligadb.de), licensed under the "
-        "[Open Database License (ODbL)](https://opendatacommons.org/licenses/odbl/1-0/). Keep "
-        "this attribution when you publish the data; a database derived from it is subject to "
-        "the ODbL's share-alike terms."
-    ),
-}
+def _attribution_markdown(attribution: DataAttribution) -> str:
+    return (
+        f"data from [{attribution.source}]({attribution.source_url}), licensed under the "
+        f"[{attribution.license}]({attribution.license_url}). {attribution.notice}"
+    )
 
 
 def data_attributions(provider_competitions: Mapping[str, Sequence[str]]) -> tuple[str, ...]:
     """Attribution notes for the configured providers whose data licence requires one."""
     notes = []
-    for provider, text in PROVIDER_ATTRIBUTIONS.items():
+    for provider, attribution in PROVIDER_ATTRIBUTIONS.items():
         slugs = sorted(set(provider_competitions.get(provider, ())))
         if slugs:
-            notes.append(", ".join(f"`{slug}`" for slug in slugs) + f": {text}")
+            notes.append(
+                ", ".join(f"`{slug}`" for slug in slugs) + f": {_attribution_markdown(attribution)}"
+            )
     return tuple(notes)
 
 

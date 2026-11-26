@@ -85,8 +85,9 @@ ignored. Cards, corners, and fouls are always `null`. `discover_seasons` uses
 `2026-2027`. Requests are throttled by `providers.openligadb.min_request_interval_seconds`
 (default 2 s). OpenLigaDB data is licensed under the
 [Open Database License (ODbL)](https://opendatacommons.org/licenses/odbl/1-0/): attribute
-[OpenLigaDB](https://www.openligadb.de) when publishing it. `/llms.txt` and `/agents` add that
-attribution for every configured competition that uses `openligadb`.
+[OpenLigaDB](https://www.openligadb.de) when publishing it. `/llms.txt`, `/agents`,
+`list_competitions` (`data_attributions`), and the landing page add that attribution for every
+configured competition that uses `openligadb` (`PROVIDER_ATTRIBUTIONS` in `app/competitions.py`).
 
 Statistic rules shared by providers: a card count is yellow plus red cards, so a second yellow
 counts as 2; an own goal belongs to the team whose score it raised; a goalless match has no first

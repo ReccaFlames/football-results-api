@@ -220,6 +220,46 @@ def test_reads_competitions_from_the_real_api(monkeypatch: pytest.MonkeyPatch) -
     for competition in repository.competitions.values():
         assert f"<td>{competition.name}</td>" in page
         assert f"<td>{competition.current_season}</td>" in page
+    assert '3. Liga: data from <a href="https://www.openligadb.de">OpenLigaDB</a>' in page
+
+
+ODBL = {
+    "source": "OpenLigaDB",
+    "source_url": "https://www.openligadb.de",
+    "license": "Open Database License (ODbL) 1.0",
+    "license_url": "https://opendatacommons.org/licenses/odbl/1-0/",
+    "notice": "Keep this attribution.",
+}
+
+
+def test_footer_attributes_each_source_once_and_links_the_operator_contact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unsafe = ODBL | {"source": "Evil", "source_url": "javascript:alert(1)"}
+    competitions = [
+        COMPETITIONS[0] | {"data_attributions": [ODBL]},
+        COMPETITIONS[1] | {"data_attributions": [ODBL, unsafe, "junk"]},
+        {"slug": "plain", "name": "Plain", "data_attributions": []},
+    ]
+    fake_api(monkeypatch, routes(competitions=lambda _: httpx.Response(200, json=competitions)))
+    client = landing()
+
+    for page in (
+        client.get("/").text,
+        client.post("/request-access", data=FORM | {"website": "x"}).text,
+    ):
+        footer = page[page.index("<footer>") :]
+        assert footer.count("OpenLigaDB") == 1
+        assert (
+            '<p>3. Liga, &lt;b&gt;Cup&lt;/b&gt;: data from <a href="https://www.openligadb.de">'
+            'OpenLigaDB</a>, licensed under the <a rel="license" '
+            'href="https://opendatacommons.org/licenses/odbl/1-0/">Open Database License (ODbL) '
+            "1.0</a>.</p>"
+        ) in footer
+        assert "Evil" not in footer and "javascript:" not in page
+        assert '<a href="privacy">Privacy and operator contact</a>' in footer
+        external = [link for link in re.findall(r'href="([^"]*)"', page) if ":" in link]
+        assert external == [ODBL["source_url"], ODBL["license_url"]]
 
 
 def test_private_or_public_instance_shows_the_access_request_form(
@@ -301,7 +341,7 @@ def test_filled_honeypot_is_dropped_without_an_api_call(monkeypatch: pytest.Monk
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
     assert "Access request sent" in response.text
-    assert sent == []
+    assert paths(sent, "/api/v1/access-requests") == []
 
 
 @pytest.mark.parametrize(

@@ -311,8 +311,8 @@ provider, for example 90minut.pl for the Ekstraklasa:
 2. **Record it**: a new ADR (or an update to ADR 0007) that links or quotes the permission, and
    the provider's row in `docs/PROVIDERS.md`.
 3. **Change the code**: add the provider to `REDISTRIBUTABLE_PROVIDERS`; if it requires
-   attribution, add its text to `PROVIDER_ATTRIBUTIONS` in `app/agent_docs.py` so the demo
-   notice and `/llms.txt` show it.
+   attribution, add it to `PROVIDER_ATTRIBUTIONS` in `app/competitions.py` so the demo
+   notice, `/llms.txt`, `list_competitions` (`data_attributions`), and the landing page show it.
 4. **Configure it**: add the competition to `config/demo-competitions.yaml` together with its
    `providers` entry. Its fallback provider must be allowed too; for the Ekstraklasa that means
    leaving out the TheSportsDB fallback (`fallback_provider` and the `fallback_url`s) unless

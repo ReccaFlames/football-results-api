@@ -2,7 +2,7 @@
 
 import logging
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -159,6 +159,17 @@ def form_errors(problem: api.Problem) -> FormErrors:
     return errors
 
 
+def footer_attributions(
+    competitions: Sequence[api.CompetitionItem] | None,
+) -> list[tuple[api.Attribution, list[str]]]:
+    """Each attribution once, with the names of the competitions it covers."""
+    grouped: dict[api.Attribution, list[str]] = {}
+    for competition in competitions or ():
+        for attribution in competition.attributions:
+            grouped.setdefault(attribution, []).append(competition.name)
+    return list(grouped.items())
+
+
 def create_app(api_url: str | None = None, clock: api.Clock | None = None) -> Starlette:
     base_url = api_url or api.api_url_from_env()
     competitions = api.CompetitionCache(base_url, clock)
@@ -167,12 +178,17 @@ def create_app(api_url: str | None = None, clock: api.Clock | None = None) -> St
     # Inline, so that the stylesheet can recolour the wordmark for dark mode.
     logo = Markup((STATIC / "whistleprint-logo.svg").read_text(encoding="utf-8"))
 
-    def render(request: Request, template: str, status_code: int = 200, **context: Any) -> Response:
+    async def render(
+        request: Request, template: str, status_code: int = 200, **context: Any
+    ) -> Response:
+        listed = await competitions.get()
         return templates.TemplateResponse(
             request,
             template,
             {
                 "logo": logo,
+                "competitions": listed,
+                "attributions": footer_attributions(listed),
                 "max_lengths": MAX_LENGTHS,
                 "honeypot": HONEYPOT,
                 "form": AccessForm(),
@@ -188,12 +204,7 @@ def create_app(api_url: str | None = None, clock: api.Clock | None = None) -> St
         return response
 
     async def index(request: Request) -> Response:
-        return render(
-            request,
-            "index.html",
-            competitions=await competitions.get(),
-            demo=bool(await demo_mode.get()),
-        )
+        return await render(request, "index.html", demo=bool(await demo_mode.get()))
 
     async def show_form(_: Request) -> Response:
         return RedirectResponse("./#request-access", status_code=303)
@@ -202,7 +213,7 @@ def create_app(api_url: str | None = None, clock: api.Clock | None = None) -> St
         data = await request.form(max_files=0, max_fields=100)
         form = AccessForm.from_form(data, data.getlist("competitions"))
         if data.get(HONEYPOT):
-            return private(render(request, "access_requested.html", receipt=None))
+            return private(await render(request, "access_requested.html", receipt=None))
         forwarded = api.forwarded_for(
             request.headers.getlist("x-forwarded-for"),
             request.client.host if request.client else None,
@@ -214,14 +225,13 @@ def create_app(api_url: str | None = None, clock: api.Clock | None = None) -> St
             errors, status_code = FormErrors(general=[UNREACHABLE]), 503
         else:
             if isinstance(result, api.AccessRequestReceipt):
-                return private(render(request, "access_requested.html", receipt=result))
+                return private(await render(request, "access_requested.html", receipt=result))
             errors, status_code = form_errors(result), result.status
         return private(
-            render(
+            await render(
                 request,
                 "request_access.html",
                 status_code,
-                competitions=await competitions.get(),
                 demo=errors.demo,
                 form=form,
                 errors=errors,
