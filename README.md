@@ -7,7 +7,7 @@ scheduler, and serves them over a REST API.
 The repository started as an Ekstraklasa-only scraper and is evolving into a **generic, configurable
 league-data API**. This README describes both:
 
-- **[Current state](#current-state)** – what is implemented and works today (version 0.20.0).
+- **[Current state](#current-state)** – what is implemented and works today (version 0.25.0).
 - **[Target state](#target-state-and-roadmap)** – where the project is heading and what is still
   missing.
 
@@ -390,6 +390,8 @@ competitions in the database. They are not operations, so they are absent from `
 | `/llms-full.txt` | `text/markdown; charset=utf-8` | The guide plus every problem type in one file (a common, non-standard convention) |
 | `/problems`, `/problems/<slug>` | `text/markdown; charset=utf-8` | Meaning and fix of each problem `type`, so `type` URIs resolve |
 | `/skills/football-results/SKILL.md` | `text/markdown; charset=utf-8` | The [Agent Skill](#agent-skill), served unchanged from the repository |
+| `/robots.txt` | `text/plain; charset=utf-8` | Allows every crawler and agent and points to `/llms.txt`; on a [private instance](#private-instance) it disallows everything. Not rate-limited |
+| `/privacy`, `/privacy.md` | HTML / Markdown | What the instance processes (client IPs for rate limits, access logs, API key names), why, for how long (`FOOTBALL_RESULTS_LOG_RETENTION_DAYS`), and the operator contact. Linked from `/llms.txt` and `/agents` |
 
 - The top 5 tasks are: discover competitions, resolve a team slug, a team's latest results,
   upcoming fixtures, and the league table. Examples use the first configured league.
@@ -687,11 +689,19 @@ and its version matches the API's.
 
 ### Install
 
-Nothing is published to PyPI or a public Git URL yet, so install from a checkout:
+The CLI is prepared for PyPI as `football-results-cli` (published by the
+[release workflow](#releases)):
 
 ~~~bash
-uv tool install ./cli                     # puts football-results on PATH
-pipx install ./cli                        # the same with pipx
+uv tool install football-results-cli                     # puts football-results on PATH
+pipx install football-results-cli                        # the same with pipx
+uvx --from football-results-cli football-results --help  # run once without installing
+~~~
+
+Until the first release, install from a checkout:
+
+~~~bash
+uv tool install ./cli                     # or: pipx install ./cli
 uvx --from ./cli football-results --help  # run once without installing
 uv run football-results --help            # inside the repository (dev extra)
 ~~~
@@ -702,11 +712,16 @@ Use `./cli`, not `.`: `uvx --from .` would install the whole API with its depend
 
 | Variable | Option | Default | Purpose |
 | --- | --- | --- | --- |
-| `FOOTBALL_RESULTS_URL` | `--url` | `http://localhost:8000` | API base URL, optionally with a path prefix |
+| `FOOTBALL_RESULTS_URL` | `--url` | the public demo once its host is set, until then `http://localhost:8000` | API base URL, optionally with a path prefix |
 | `FOOTBALL_RESULTS_API_KEY` | `--api-key` | none | Sent as `X-API-Key` on every request (it selects the key's quota; a private instance needs it for every command); `refresh`, `fetch-season`, `status`, `scrape-runs`, and `scheduler` need an admin key. The CLI warns on stderr when the API's `API-Key-Expires` header is within 14 days |
 | `FOOTBALL_RESULTS_TIMEOUT` | `--timeout` | `30` | HTTP timeout in seconds |
 
-Global options go before the command (`football-results --url URL matches`). The API key is never
+Global options go before the command (`football-results --url URL matches`). The default URL
+follows [ADR 0009](docs/adr/0009-published-cli-defaults-to-the-demo-instance.md): a released CLI
+talks to the public demo out of the box (`--help` shows the default). An API key is never sent to
+that default: with a key, set `FOOTBALL_RESULTS_URL` or `--url` (otherwise a `usage-error`, exit
+2). When the CLI uses the local default and cannot connect, the error explains how to set the URL.
+The API key is never
 printed. Redirects are not followed, so the key is only sent to the configured URL. The server
 ignores these three variables; its settings use other names.
 
@@ -864,10 +879,11 @@ a project `.mcp.json`):
 
 `/agents#mcp` shows the same setup with the server's base URL.
 [`server.json`](server.json) describes the server for the
-[MCP Registry](https://registry.modelcontextprotocol.io) (a remote with a `{host}` variable and an
-optional secret `X-API-Key` header) and is validated against the vendored schema in
-`tests/schemas/`. It is not published yet: replace `OWNER` in its `name` with the GitHub account
-that publishes it, then run `mcp-publisher login github` and `mcp-publisher publish`.
+[MCP Registry](https://registry.modelcontextprotocol.io) as `io.github.ReccaFlames/football-results`
+with two remotes: the public demo first (`FOOTBALL_DEMO_HOST` until
+`scripts/set_demo_host.py` sets it), then a `{host}` template for your own deployment with an
+optional secret `X-API-Key` header. It is validated against the vendored schema in
+`tests/schemas/` and published by the [release workflow](#releases), not by hand.
 
 ### OAuth for the MCP server
 
@@ -1014,6 +1030,10 @@ demo mode:
 - Without an admin key, writes, jobs, admin operations, and `/metrics` return `503`
   `writes-disabled`. `/mcp` stays anonymous; the observability profile cannot scrape `/metrics`.
 - `/llms.txt` and `/agents` show the demo notice (see [Agent documentation](#agent-documentation)).
+- `FOOTBALL_RESULTS_OPERATOR_CONTACT` is required (shown on `/privacy`), client IPs in access logs
+  are shortened (`/24` for IPv4, `/48` for IPv6), and container logs go to journald, which deletes
+  them after `FOOTBALL_RESULTS_LOG_RETENTION_DAYS` (set its `MaxRetentionSec` to match; see the
+  guide). `/robots.txt` lets crawlers and AI agents in; the guide's Cloudflare settings keep it so.
 
 ~~~bash
 FOOTBALL_RESULTS_DEMO_MODE=true uv run python -m app.config check \
@@ -1267,6 +1287,9 @@ Application variables:
 | FOOTBALL_RESULTS_ANONYMOUS_ACCESS | `true` | `false` makes a [private instance](#private-instance): every API operation except `get_health`, and `/mcp`, need a key from the keys file |
 | FOOTBALL_RESULTS_DEMO_MODE | `false` | Public demo instance: startup and `config check` reject admin keys and providers that are not publicly redistributable; agent docs show a demo notice (see [Public demo instance](#public-demo-instance)) |
 | FOOTBALL_RESULTS_LOG_FORMAT | `text` | `text` or `json` (one JSON object per line on stderr, including uvicorn access logs); Docker Compose sets `json` |
+| FOOTBALL_RESULTS_OPERATOR_CONTACT | empty | Who runs the instance (an email or URL), shown on `/privacy`; required in demo mode |
+| FOOTBALL_RESULTS_LOG_RETENTION_DAYS | `14` | How long logs are kept, as stated on `/privacy`; keep the log driver's retention equal |
+| FOOTBALL_RESULTS_ANONYMIZE_LOG_IPS | `false` | Shorten client IPs in access logs (`/24` IPv4, `/48` IPv6); always on in demo mode |
 | FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN | empty | football-data.org token (needed only for football-data competitions) |
 | FOOTBALL_RESULTS_FOOTBALL_DATA_MIN_REQUEST_INTERVAL_SECONDS | `6` (from YAML) | Optional environment override for the football-data.org throttle (free tier: 10 req/min) |
 | FOOTBALL_RESULTS_ESPN_MIN_REQUEST_INTERVAL_SECONDS | `2` (from YAML) | Optional environment override for the minimum delay between ESPN requests |
@@ -1347,6 +1370,30 @@ database configuration is an error rather than a skip.
 
 Before deployment, run the Compose stack and exercise at least one real refresh against
 PostgreSQL.
+
+### Agent evals
+
+[`evals/`](evals/README.md) asks `copilot -p` 11 questions (top tasks, error recovery, freshness,
+pagination) through the CLI + Agent Skill and through the MCP server, against a local demo-mode
+stack, with ground truth read from the API at run time. A task passes when 2 of 3 runs answer
+correctly with the tools under test. The evals cost AI credits, so they are not part of pytest
+or CI; run them before a release. [`evals/CHAT_CLIENTS.md`](evals/CHAT_CLIENTS.md) is the manual
+checklist for claude.ai and ChatGPT.
+
+### Releases
+
+Nothing is published yet. `.github/workflows/release.yml` is dormant until a `v*` tag is pushed
+to `github.com/ReccaFlames/football-results-api`: it reruns CI, checks that the tag equals the
+versions in `pyproject.toml`, `cli/pyproject.toml`, and `server.json`, fails while a demo-host
+placeholder remains (`scripts/set_demo_host.py --check`), builds `football-results-cli`,
+publishes it to PyPI with trusted publishing (environment `pypi`, no token), and publishes
+`server.json` to the MCP Registry with GitHub OIDC. The one-time manual steps (repository,
+secret scan, PyPI pending publisher, demo host, version 1.0.0, tag) are scripted in
+`scripts/publish-wizard.sh`:
+
+~~~bash
+bash scripts/publish-wizard.sh   # interactive; run from a clean checkout as the ReccaFlames account
+~~~
 
 ## Target state and roadmap
 
@@ -1475,3 +1522,8 @@ The current adaptive scheduler is the foundation; planned improvements:
 5. ~~Add admin/status endpoints with API-key authentication and metrics.~~ (done)
 6. ~~Automatic season discovery and rollover.~~ (done)
 7. Additional providers and fallback sources.
+
+## License
+
+[MIT](LICENSE). The data served by an instance has its own licences, listed in its `/llms.txt`
+(for example OpenLigaDB data is ODbL).

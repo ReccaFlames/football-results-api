@@ -1,16 +1,25 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.OWNER/football-results",
+  "name": "io.github.ReccaFlames/football-results",
   "title": "Football Results",
   "description": "Football fixtures, results, league tables, and team form, with data freshness.",
-  "version": "0.24.0",
+  "repository": {
+    "url": "https://github.com/ReccaFlames/football-results-api",
+    "source": "github"
+  },
+  "websiteUrl": "https://FOOTBALL_DEMO_HOST/agents#mcp",
+  "version": "0.25.0",
   "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://FOOTBALL_DEMO_HOST/mcp"
+    },
     {
       "type": "streamable-http",
       "url": "https://{host}/mcp",
       "variables": {
         "host": {
-          "description": "Host (and optional path prefix) of your Football Results API deployment",
+          "description": "Host (and optional path prefix) of your own Football Results API deployment",
           "isRequired": true,
           "placeholder": "football.example.com"
         }
@@ -18,7 +27,7 @@
       "headers": [
         {
           "name": "X-API-Key",
-          "description": "API key; needed only for the request_refresh tool",
+          "description": "API key; needed for request_refresh and on private instances",
           "isRequired": false,
           "isSecret": true
         }

@@ -438,6 +438,7 @@ DEMO_COMPOSE = Path(__file__).parents[1] / "compose.demo.yaml"
 @pytest.fixture
 def demo_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(config_module.settings, "demo_mode", True)
+    monkeypatch.setattr(config_module.settings, "operator_contact", "demo@example.com")
     monkeypatch.setattr(config_module.settings, "api_keys", "")
 
 
@@ -462,6 +463,17 @@ def test_demo_mode_accepts_the_demo_competitions_file(
     assert "(1 competitions)" in output
     assert "Demo mode: read-only (no admin keys), providers limited to openligadb" in output
     assert set(load_config(DEMO_CONFIG).to_competitions()) == {"3-liga"}
+
+
+@pytest.mark.usefixtures("demo_mode")
+def test_demo_mode_requires_an_operator_contact(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(config_module.settings, "operator_contact", " ")
+
+    error = check_fails(capsys, "--config-file", str(DEMO_CONFIG))
+
+    assert "FOOTBALL_RESULTS_OPERATOR_CONTACT is not set" in error
 
 
 @pytest.mark.usefixtures("demo_mode")

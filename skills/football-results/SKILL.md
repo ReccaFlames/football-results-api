@@ -15,11 +15,14 @@ an answer comes from command output; report gaps (`null`, stale seasons) as gaps
 football-results --version
 ```
 
-If the command is missing, install it from a checkout of the API repository with
-`uv tool install ./cli` (or `pipx install ./cli`), or use [curl](#without-the-cli).
+If the command is missing, install it with `uv tool install football-results-cli` (or
+`pipx install football-results-cli`; in a checkout of the API repository, `uv tool install ./cli`),
+or use [curl](#without-the-cli).
 
-- `FOOTBALL_RESULTS_URL` is the API base URL (default `http://localhost:8000`). When it is unset and
-  the CLI exits 4 with `connection-failed`, ask the user for the URL.
+- `FOOTBALL_RESULTS_URL` is the API base URL. When it is unset, the CLI uses its built-in default
+  (listed under `--url` in the CLI's help). If that fails with `connection-failed`, ask the user for
+  the URL. With `FOOTBALL_RESULTS_API_KEY` set, also set `FOOTBALL_RESULTS_URL` to the instance
+  that issued the key.
 - Piped stdout is the API's JSON response body, so agents get JSON by default; `--json` forces it.
   Notes and errors go to stderr.
 

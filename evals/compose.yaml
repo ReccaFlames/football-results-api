@@ -1,0 +1,14 @@
+# Local demo-mode stack for the agent evals (evals/README.md):
+#   FOOTBALL_RESULTS_OPERATOR_CONTACT=evals@localhost docker compose -p football-evals \
+#     -f compose.yaml -f compose.demo.yaml -f evals/compose.yaml up -d --build --wait
+# Same as the demo, except local logs (no journald on Docker Desktop) and a read quota that
+# parallel agent runs from one IP do not exhaust.
+services:
+  api:
+    environment:
+      FOOTBALL_RESULTS_RATE_LIMIT_READ_PER_MINUTE: "600"
+    logging: !override
+      driver: json-file
+  scheduler:
+    logging: !override
+      driver: json-file

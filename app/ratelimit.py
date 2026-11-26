@@ -19,6 +19,7 @@ EXEMPT_PATHS = frozenset(
         "/docs/oauth2-redirect",
         "/redoc",
         "/openapi.json",
+        "/robots.txt",
         "/.well-known/oauth-protected-resource/mcp",
     }
 )

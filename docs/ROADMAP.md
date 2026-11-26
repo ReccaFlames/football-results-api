@@ -209,8 +209,7 @@ How to use this list:
   - [x] Read-only tools: `list_competitions`, `find_matches`, `get_standings`, `get_team_form`
   - [x] Optional authenticated `request_refresh`
   - [x] Structured output schemas
-  - [ ] Published to the MCP Registry (`server.json` is ready and schema-validated; set the
-        namespace owner, then `mcp-publisher login github` and `mcp-publisher publish`)
+  - [ ] Published to the MCP Registry (prepared and published by item 19)
 
 ### Phase 3: Operations and growth
 
@@ -419,3 +418,38 @@ How to use this list:
           caching, `401` counting
     - [x] Docs (README, ADR 0008, glossary, AGENTS.md); version 0.24.0 (`pyproject.toml`,
           `cli/pyproject.toml`, `server.json`, `uv lock`)
+
+### Phase 4: Public launch
+
+Decided on 2026-11-25. Put a demo instance and private instances on the internet ready for AI
+agents. Coding agents (CLI + skill) and chat clients (MCP on the demo, anonymously) are both
+first-class. Publishing needs a GitHub account switch, so the repository only **prepares** it, and
+the maintainer runs `scripts/publish-wizard.sh`.
+
+- [x] **19. Launch readiness**
+  - [x] 19a. Crawlers and agents: `/robots.txt` (allow everything and point to `/llms.txt`
+        when anonymous access is on; disallow everything on a private instance); `docs/DEMO.md`
+        Cloudflare settings that keep AI-bot blocking, Bot Fight Mode, and managed `robots.txt`
+        off
+  - [x] 19b. Privacy: `/privacy` page (what is processed, why, and for how long; operator
+        contact), linked from `/llms.txt`, `/agents`, and the README; client IPs anonymised in
+        access logs in demo mode; Docker log rotation in `compose.demo.yaml`
+  - [x] 19c. CLI default URL ([ADR 0009](adr/0009-published-cli-defaults-to-the-demo-instance.md)):
+        `DEMO_URL` placeholder; a failed connection to the unset default explains
+        `FOOTBALL_RESULTS_URL`; a key needs an explicit URL when the default is the demo
+  - [x] 19d. Publishing prep (nothing is published here): MIT `LICENSE`; repository renamed to
+        `ReccaFlames/football-results-api` in docs and metadata; PyPI metadata for
+        `football-results-cli`; `server.json` named `io.github.ReccaFlames/football-results`
+        with the demo remote first and the `{host}` template second;
+        `scripts/set_demo_host.py`; dormant tag-triggered release workflow (checks, PyPI trusted
+        publishing, `mcp-publisher` with GitHub OIDC; fails on placeholders);
+        `scripts/publish-wizard.sh` for the manual steps
+  - [x] 19e. Agent evals in `evals/` (never in pytest or CI): about 10 tasks (top 5, error
+        recovery, freshness, pagination) through the CLI + skill and through MCP, run with
+        `copilot -p` against a local demo-mode stack, ground truth read from the API at run
+        time, 3 runs each, a task passes at 2 of 3; manual checklist for claude.ai and ChatGPT
+  - [x] 19f. Docs (README, AGENTS.md, DEMO.md); version 0.25.0. Tag 1.0.0 at the real publish
+        (it declares the public contract stable)
+- [ ] **20. OAuth for chat clients on private instances**: claude.ai and ChatGPT connectors cannot
+      send `X-API-Key`, so a private instance needs a production authorization server (ADR 0006)
+      before they can connect. Until then, chat clients are supported on the demo only.

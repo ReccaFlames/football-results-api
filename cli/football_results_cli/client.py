@@ -15,7 +15,10 @@ import httpx
 from football_results_cli import __version__
 from football_results_cli.problems import CliFailure, cli_problem, exit_code_for
 
-DEFAULT_URL = "http://localhost:8000"
+# The public demo instance (ADR 0009), set by `scripts/set_demo_host.py` before a release. While it
+# is None, the CLI defaults to a local server.
+DEMO_URL: str | None = None
+LOCAL_URL = "http://localhost:8000"
 DEFAULT_TIMEOUT_SECONDS = 30.0
 USER_AGENT = f"football-results-cli/{__version__}"
 MAX_RETRIES = 2
@@ -30,11 +33,34 @@ class Config:
     url: str
     api_key: str | None = None
     timeout: float = DEFAULT_TIMEOUT_SECONDS
+    # True when neither FOOTBALL_RESULTS_URL nor --url was given.
+    url_is_default: bool = False
+
+
+def default_url() -> str:
+    return DEMO_URL or LOCAL_URL
+
+
+def config_from_options(url: str | None, api_key: str | None, timeout: float) -> Config:
+    """The CLI configuration; a key is never sent to the built-in demo default (ADR 0009)."""
+    explicit = bool((url or "").strip())
+    if api_key and not explicit and DEMO_URL:
+        raise cli_problem(
+            "usage-error",
+            "FOOTBALL_RESULTS_API_KEY is set but FOOTBALL_RESULTS_URL is not; the CLI does not "
+            f"send an API key to its default URL {DEMO_URL}",
+            parameter="url",
+            hint=(
+                "Set FOOTBALL_RESULTS_URL (or --url) to the instance that issued the key, or "
+                "unset FOOTBALL_RESULTS_API_KEY to use the public demo anonymously."
+            ),
+        )
+    return Config(normalize_url(url), api_key, timeout, url_is_default=not explicit)
 
 
 def normalize_url(value: str | None) -> str:
     """The API base URL without a trailing slash; raises a usage error if it is not usable."""
-    url = (value or "").strip() or DEFAULT_URL
+    url = (value or "").strip() or default_url()
     parts = urlsplit(url)
     if (
         parts.scheme not in ("http", "https")
@@ -50,7 +76,7 @@ def normalize_url(value: str | None) -> str:
             parameter="url",
             hint=(
                 "Set FOOTBALL_RESULTS_URL or --url to the API base URL, for example "
-                f"{DEFAULT_URL} or https://football.example.com/prefix"
+                f"{LOCAL_URL} or https://football.example.com/prefix"
             ),
         )
     return url.rstrip("/")
@@ -112,10 +138,15 @@ class ApiClient:
                 hint="Retry later, or raise --timeout / FOOTBALL_RESULTS_TIMEOUT.",
             ) from error
         except httpx.HTTPError as error:
+            hint = "Check that the API is running and FOOTBALL_RESULTS_URL / --url is right."
+            if self.config.url_is_default and not DEMO_URL:
+                hint = (
+                    f"FOOTBALL_RESULTS_URL is not set, so the CLI tried its local default "
+                    f"{LOCAL_URL}. Set FOOTBALL_RESULTS_URL (or --url) to the API base URL, "
+                    "for example https://football.example.com; ask the user if it is unknown."
+                )
             raise cli_problem(
-                "connection-failed",
-                f"Cannot reach {url}: {error}",
-                hint="Check that the API is running and FOOTBALL_RESULTS_URL / --url is right.",
+                "connection-failed", f"Cannot reach {url}: {error}", hint=hint
             ) from error
 
     def _warn_if_key_expires(self, response: httpx.Response) -> None:

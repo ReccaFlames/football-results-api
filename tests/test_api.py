@@ -1494,6 +1494,7 @@ DEMO_CONFIG = Path(__file__).parents[1] / "config/demo-competitions.yaml"
 
 def use_demo_mode(monkeypatch: pytest.MonkeyPatch, config_file: Path = DEMO_CONFIG) -> None:
     monkeypatch.setattr(main_module.settings, "demo_mode", True)
+    monkeypatch.setattr(main_module.settings, "operator_contact", "demo@example.com")
     monkeypatch.setattr(main_module.settings, "api_keys", "")
     monkeypatch.setattr(main_module.settings, "api_keys_file", None)
     monkeypatch.setattr(main_module.settings, "config_file", config_file)
@@ -1623,6 +1624,41 @@ def test_private_instances_need_a_key_for_api_operations(tmp_path: Path) -> None
 
     for path in ("/health", "/llms.txt", "/openapi.json", "/problems/unauthorized"):
         assert client.get(path).status_code == 200, path
+
+
+@pytest.mark.usefixtures("private_instance")
+def test_robots_txt_closes_private_instances(tmp_path: Path) -> None:
+    client, _ = client_with_empty_store(tmp_path)
+    response = client.get("/robots.txt")
+    assert response.status_code == 200
+    assert "Disallow: /\n" in response.text
+    assert client.get("/privacy").status_code == 200
+
+
+def test_robots_txt_and_privacy_page_on_public_instances(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _ = client_with_empty_store(tmp_path)
+    robots = client.get("/robots.txt")
+    assert robots.headers["content-type"].startswith("text/plain")
+    assert "Allow: /\n" in robots.text and "Disallow" not in robots.text
+    assert "http://testserver/llms.txt" in robots.text
+    assert "etag" in robots.headers
+
+    privacy = client.get("/privacy.md").text
+    assert "has not published a contact" in privacy
+    assert "client IP address in full" in privacy
+    assert "at most 14 days" in privacy
+    assert "/privacy" in client.get("/llms.txt").text
+    assert "/privacy" in client.get("/agents.md").text
+
+    use_demo_mode(monkeypatch)
+    monkeypatch.setattr(main_module.settings, "log_retention_days", 7)
+    page = client.get("/privacy")
+    assert page.headers["content-type"].startswith("text/html")
+    assert "demo@example.com" in page.text
+    assert "shortened to its network" in page.text
+    assert "at most 7 days" in page.text
 
 
 def test_public_instances_keep_anonymous_reads_and_public_caching(tmp_path: Path) -> None:

@@ -6,9 +6,10 @@ prints the API's JSON response body; on a terminal it prints tables. Errors go t
 line of RFC 9457 problem JSON, with stable exit codes.
 
 ~~~bash
-uv tool install ./cli        # from a checkout of the repository (or: pipx install ./cli)
-export FOOTBALL_RESULTS_URL=http://localhost:8000
-export FOOTBALL_RESULTS_API_KEY=...   # optional; admin key for refresh, fetch-season, status
+uv tool install football-results-cli   # or: pipx install football-results-cli
+football-results competitions          # without FOOTBALL_RESULTS_URL: the built-in default (see --help)
+export FOOTBALL_RESULTS_URL=https://football.example.com   # your own or a private instance
+export FOOTBALL_RESULTS_API_KEY=...   # optional; needs FOOTBALL_RESULTS_URL; admin key for refresh, fetch-season, status
 football-results competitions
 football-results matches -c ekstraklasa --team legia-warszawa --status finished --order desc --limit 5
 football-results standings -c ekstraklasa --fields position,team_name,points --json
@@ -22,8 +23,13 @@ football-results standings -c ekstraklasa --fields position,team_name,points --j
 | 4 | Upstream or stale: server, network, timeout, rate limit, failed job, `--fail-if-stale` |
 | 5 | Auth: missing or invalid API key, or writes disabled |
 
-Run `football-results COMMAND --help` for options and examples. The repository README has the
-full reference ("Command-line client"), and a running server documents the CLI at `/agents#cli`.
+Run `football-results COMMAND --help` for options and examples. The
+[repository README](https://github.com/ReccaFlames/football-results-api#command-line-client) has
+the full reference, and a running server documents the CLI at `/agents#cli`.
 
-For coding agents, the Agent Skill in `skills/football-results/SKILL.md` (also served at
-`/skills/football-results/SKILL.md`) teaches this CLI; see `/agents#skill` for how to install it.
+For coding agents, the
+[Agent Skill](https://github.com/ReccaFlames/football-results-api/blob/main/skills/football-results/SKILL.md)
+(also served by every instance at `/skills/football-results/SKILL.md`) teaches this CLI; see
+`/agents#skill` on an instance for how to install it.
+
+MIT licensed. Data licences depend on the instance you query; its `/llms.txt` lists them.

@@ -93,6 +93,12 @@ class Settings(BaseSettings):
     demo_mode: bool = False
     # False makes a private instance (ADR 0008): every data operation needs a key.
     anonymous_access: bool = True
+    # Shown on `/privacy`; required in demo mode (a public instance must name its operator).
+    operator_contact: str | None = None
+    # How long the operator keeps access logs; shown on `/privacy`.
+    log_retention_days: int = Field(default=14, ge=1)
+    # Shorten client IPs in access logs (always on in demo mode).
+    anonymize_log_ips: bool = False
 
     @field_validator("oauth_issuer", "oauth_jwks_url")
     @classmethod
@@ -112,6 +118,10 @@ class Settings(BaseSettings):
                 "FOOTBALL_RESULTS_OAUTH_ISSUER requires FOOTBALL_RESULTS_PUBLIC_BASE_URL"
             )
         return self
+
+    @property
+    def log_ips_anonymized(self) -> bool:
+        return self.anonymize_log_ips or self.demo_mode
 
     @property
     def mcp_resource(self) -> str | None:
@@ -618,6 +628,11 @@ def check_demo_mode(config: CompetitionFile, file_keys: Sequence[access.FileKey]
     if not settings.demo_mode:
         return
     errors = demo_mode_errors(config, access.env_keys(settings.api_keys), file_keys)
+    if not (settings.operator_contact or "").strip():
+        errors.append(
+            "FOOTBALL_RESULTS_OPERATOR_CONTACT is not set; a public instance must name its "
+            "operator on /privacy"
+        )
     if errors:
         raise ValueError(
             "FOOTBALL_RESULTS_DEMO_MODE is on, but:\n" + "\n".join(f"  - {item}" for item in errors)

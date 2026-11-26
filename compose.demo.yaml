@@ -4,10 +4,18 @@
 # writes, jobs, admin operations, and /metrics return writes-disabled), and gives anonymous
 # clients a low read quota. Do not use the observability profile here: Prometheus needs an admin
 # key. Client keys in FOOTBALL_RESULTS_API_KEYS_FILE stay allowed.
+# Container logs go to journald, which deletes them by age (docs/DEMO.md, section 2); keep its
+# MaxRetentionSec equal to FOOTBALL_RESULTS_LOG_RETENTION_DAYS, which /privacy states.
+x-demo-logging: &demo-logging
+  driver: journald
+
 x-demo-environment: &demo-environment
   FOOTBALL_RESULTS_DEMO_MODE: "true"
   FOOTBALL_RESULTS_CONFIG_FILE: /app/config/demo-competitions.yaml
   FOOTBALL_RESULTS_LOG_FORMAT: json
+  # Shown on /privacy; demo mode refuses to start without it.
+  FOOTBALL_RESULTS_OPERATOR_CONTACT: ${FOOTBALL_RESULTS_OPERATOR_CONTACT:-}
+  FOOTBALL_RESULTS_LOG_RETENTION_DAYS: ${FOOTBALL_RESULTS_LOG_RETENTION_DAYS:-14}
 
 services:
   api:
@@ -18,6 +26,7 @@ services:
       FOOTBALL_RESULTS_RATE_LIMIT_ENABLED: "true"
       FOOTBALL_RESULTS_RATE_LIMIT_READ_PER_MINUTE: ${DEMO_READ_PER_MINUTE:-30}
       FOOTBALL_RESULTS_RATE_LIMIT_WRITE_PER_MINUTE: "5"
+    logging: *demo-logging
     volumes:
       - ./config/demo-competitions.yaml:/app/config/demo-competitions.yaml:ro
 
@@ -25,5 +34,6 @@ services:
     environment:
       <<: *demo-environment
       FOOTBALL_RESULTS_API_KEYS: ""
+    logging: *demo-logging
     volumes:
       - ./config/demo-competitions.yaml:/app/config/demo-competitions.yaml:ro

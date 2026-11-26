@@ -5,7 +5,7 @@ Guidance for AI coding agents working **on** this repository. For how to *use* t
 
 ## Project in one paragraph
 
-Football Results API (repo: `ekstraklasa-results-api`, package: `football-results-api`) imports
+Football Results API (repo: `ReccaFlames/football-results-api`, package: `football-results-api`) imports
 fixtures and results from external sources (90minut.pl HTML, football-data.org JSON,
 ESPN scoreboard JSON, TheSportsDB JSON, OpenLigaDB JSON), stores them in
 PostgreSQL, and serves them through FastAPI. A separate scheduler process refreshes current seasons
@@ -22,12 +22,12 @@ API.
 | `app/problems.py` | RFC 9457 problem details: `ProblemError`, exception handlers for every error |
 | `app/ratelimit.py` | In-process fixed-window rate limiter, `RateLimit` headers, trusted-proxy client IP |
 | `app/access.py` | Named API keys (ADR 0005, 0008): keys-file models with required expiry, SHA-256 hashing, constant-time key resolution to an `Identity` (name, role, quotas, expiry), `KeysFileWatcher` (reload on change), `issue_key`/`extend_key`/`revoke_key` |
-| `app/agent_docs.py` | Pure generator of `/llms.txt`, `/agents`, `/agents.md`, `/llms-full.txt`, `/problems/<slug>` from the OpenAPI spec and competitions; `SKILL_PATH`/`SKILL_FILE` for the served skill; `MCP_TOOLS` (tool → operation) |
+| `app/agent_docs.py` | Pure generator of `/llms.txt`, `/agents`, `/agents.md`, `/llms-full.txt`, `/problems/<slug>`, `/robots.txt`, `/privacy` from the OpenAPI spec and competitions; `SKILL_PATH`/`SKILL_FILE` for the served skill; `MCP_TOOLS` (tool → operation) |
 | `app/oauth.py` | Optional OAuth for `/mcp` (ADR 0006): `OAuthConfig` (RFC 9728 metadata, `WWW-Authenticate` challenge), `JwksCache`, `JwtVerifier`; `create_http_client` is the test seam |
 | `app/mcp_server.py` | Curated MCP server (`mcp` SDK `MCPServer`) at `/mcp`: 5 tools calling the API in-process, output models, Host/Origin checks, `McpRoute` |
 | `app/caching.py` | Weak body-hash `ETag`, `If-None-Match`, and `Cache-Control` rules for read endpoints |
 | `app/observability.py` | Stale-season and stalled-scheduler rules (`STALE_GRACE`, `stall_window`), Prometheus rendering for `/metrics`, HTTP request metrics |
-| `app/logs.py` | `configure_logging` (`FOOTBALL_RESULTS_LOG_FORMAT`: `text` or `json`) for the API and scheduler |
+| `app/logs.py` | `configure_logging` (`FOOTBALL_RESULTS_LOG_FORMAT`: `text` or `json`) for the API and scheduler; access-log IP anonymisation |
 | `app/standings.py` | Pure league-table calculation and tie-breakers from finished matches |
 | `app/scheduler.py` | Scheduler loop (`python -m app.scheduler`): seed → heartbeat → season checks (discovery/rollover) → claim due seasons → scrape → persist |
 | `app/scheduling.py` | Pure rules driven by `SchedulePolicy`: `calculate_next_check`, `failure_backoff`, `rollover_target` |
@@ -51,7 +51,11 @@ API.
 | `cli/football_results_cli/output.py` | JSON vs Rich tables (TTY detection), freshness footer, staleness rule |
 | `cli/football_results_cli/problems.py` | Exit codes, CLI problem slugs (`urn:football-results:cli:<slug>`), `exit_code_for` |
 | `skills/football-results/SKILL.md` | Consumer Agent Skill for API users (teaches the CLI), served unchanged at `/skills/football-results/SKILL.md` |
-| `server.json` | MCP Registry metadata (remote `/mcp`), validated against `tests/schemas/server.schema.json` |
+| `server.json` | MCP Registry metadata (`io.github.ReccaFlames/football-results`; demo remote first, `{host}` template second), validated against `tests/schemas/server.schema.json` |
+| `scripts/set_demo_host.py` | Replaces the `FOOTBALL_DEMO_HOST` placeholder (server.json) and `DEMO_URL` (CLI) once; `--check` fails while one remains (ADR 0009) |
+| `scripts/publish-wizard.sh` | Interactive wizard for the one-time manual publish steps (GitHub repo, PyPI pending publisher, demo host, tag) |
+| `.github/workflows/release.yml` | Dormant `v*` tag release: reuses CI, version and placeholder checks, PyPI trusted publishing, MCP Registry via GitHub OIDC |
+| `evals/` | Agent evals with `copilot -p` (CLI + skill and MCP) against a local demo stack; manual chat-client checklist. Never in pytest or CI |
 | `keycloak/` | Realm import for the `oauth-example` Compose profile (no users, no secrets) |
 | `observability/` | Prometheus scrape config and Grafana provisioning (data source, dashboard, alert rules, policy; the Telegram contact point is in `compose.yaml`) for the `observability` Compose profile |
 | `GLOSSARY.md` | Domain terms (stale season, stalled scheduler, grace period) |
@@ -166,7 +170,16 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
   the server `Settings` (a test checks). The CLI sends the API key on every request (it selects
   the caller's quota, ADR 0005), only to the configured URL, and never prints it.
 - Both packages share one version; bump `pyproject.toml` and `cli/pyproject.toml` together (a test
-  checks). The Docker image installs only the API (`uv sync --frozen --no-dev`), not `cli/`.
+  checks). Both are MIT (`LICENSE`, copied to `cli/LICENSE` for the CLI's PyPI package).
+- Publishing (ADR 0009): nothing is published from a working copy. The release workflow publishes
+  the CLI to PyPI and `server.json` to the MCP Registry from a `v*` tag; the maintainer runs
+  `scripts/publish-wizard.sh`. Keep the `FOOTBALL_DEMO_HOST` and `DEMO_URL = None` placeholders
+  until `scripts/set_demo_host.py` replaces them; never send an API key to the CLI's demo default.
+- `/robots.txt` allows everyone (and points to `/llms.txt`) unless the instance is private.
+  `/privacy` states what the instance processes; when you add logging or storage of personal
+  data (IPs, key names), update `privacy_blocks` in `app/agent_docs.py`.
+- Evals (`evals/`) are run by hand before a release, never in pytest or CI; a new top task or
+  MCP tool deserves an eval task. The Docker image installs only the API (`uv sync --frozen --no-dev`), not `cli/`.
 - Observability: `/metrics` (not an OpenAPI operation, rate-limit exempt) and the `Admin`
   operations need an API key; `/metrics` also accepts `Authorization: Bearer`. Scheduler and
   season metrics are computed from PostgreSQL at scrape time with the rules in

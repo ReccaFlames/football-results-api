@@ -1,7 +1,7 @@
 """Agent-facing documentation generated from the OpenAPI spec and the competition data.
 
 Backs `/llms.txt` (llmstxt.org v2), `/agents` (HTML), `/agents.md`, `/llms-full.txt`, and the
-`/problems/<slug>` pages. The Agent Skill is a static file (`SKILL_FILE`) served unchanged. Everything here is pure: callers pass the OpenAPI document, the
+`/problems/<slug>` pages, plus `/robots.txt` and `/privacy`. The Agent Skill is a static file (`SKILL_FILE`) served unchanged. Everything here is pure: callers pass the OpenAPI document, the
 competitions, and the public base URL. Pages are built as `Block`s so that the Markdown and the
 HTML renderings always carry the same content.
 """
@@ -169,8 +169,8 @@ CLI_PROBLEM_GUIDANCE: dict[str, tuple[int, str]] = {
     "wait-timeout": (4, "With `--wait`: the job did not finish within `--wait-timeout`."),
 }
 CLI_INSTALL = (
-    "uv tool install ./cli        # from a checkout of the repository (or: pipx install ./cli)\n"
-    "uvx --from ./cli football-results --help   # run once without installing"
+    "uv tool install football-results-cli   # or: pipx install football-results-cli\n"
+    "uvx --from football-results-cli football-results --help   # run once without installing"
 )
 
 # The consumer Agent Skill (agentskills.io format) teaching the CLI. It is a static file served
@@ -850,6 +850,10 @@ def llms_txt(guide: AgentGuide) -> str:
                     ),
                     f"[Agent guide (HTML)]({guide.url('/agents')}): the agent guide for people",
                     f"[Swagger UI]({guide.url('/docs')}): interactive API documentation",
+                    (
+                        f"[Privacy]({guide.url('/privacy')}): what this instance logs, why, "
+                        "and for how long"
+                    ),
                 )
             ),
         ]
@@ -867,6 +871,7 @@ def agent_guide_blocks(guide: AgentGuide) -> list[Block]:
             f"Version {guide.version}. Base URL: `{guide.base_url}`. "
             f"[OpenAPI spec]({guide.url('/openapi.json')}) · [llms.txt]({guide.url('/llms.txt')})"
             f" · [Full reference]({guide.url('/llms-full.txt')})"
+            f" · [Privacy]({guide.url('/privacy')})"
         ),
         *_demo_blocks(guide, heading=True),
         Heading(2, "Quick start"),
@@ -1353,5 +1358,86 @@ def _mcp_blocks(guide: AgentGuide) -> list[Block]:
         Code(
             json.dumps({"mcpServers": {MCP_SERVER_NAME: {"type": "http", "url": url}}}, indent=2),
             "json",
+        ),
+    ]
+
+
+# --- Crawlers and privacy -------------------------------------------------------------------
+
+
+def robots_txt(base_url: str, *, crawlable: bool) -> str:
+    """`/robots.txt`: open to every crawler and agent unless the instance is private."""
+    if not crawlable:
+        return (
+            "# Private instance: every data operation needs an API key.\n"
+            "User-agent: *\n"
+            "Disallow: /\n"
+        )
+    return (
+        f"# Football Results API. Agents: start at {base_url}/llms.txt\nUser-agent: *\nAllow: /\n"
+    )
+
+
+@dataclass(frozen=True)
+class PrivacyInfo:
+    """What `/privacy` states about this instance (settings, not request data)."""
+
+    operator_contact: str | None
+    log_retention_days: int
+    ips_anonymized: bool
+    rate_limited: bool
+    keys_enabled: bool
+    oauth_enabled: bool
+
+
+def privacy_blocks(info: PrivacyInfo, base_url: str) -> list[Block]:
+    """The `/privacy` page: personal data this instance processes, why, and for how long."""
+    contact = (
+        f"Operator contact: {info.operator_contact}."
+        if info.operator_contact
+        else "The operator of this instance has not published a contact."
+    )
+    ip_text = (
+        "shortened to its network (the first three bytes of an IPv4 address, the first 48 bits "
+        "of an IPv6 address)"
+        if info.ips_anonymized
+        else "in full"
+    )
+    processed = [
+        (
+            f"**Access logs**: time, method, path with query, status, and the client IP address "
+            f"{ip_text}, to run and protect the service. Kept for at most "
+            f"{info.log_retention_days} days."
+        ),
+    ]
+    if info.rate_limited:
+        processed.append(
+            "**Rate limiting**: the full client IP address (or API key name), held in memory "
+            "for the current one-minute window only and never written to disk."
+        )
+    if info.keys_enabled or info.oauth_enabled:
+        processed.append(
+            "**Keyed clients**: the name of the API key or OAuth subject that made a request, "
+            "for quotas and usage metrics. Keys are stored only as SHA-256 hashes."
+        )
+    return [
+        Heading(1, "Privacy"),
+        Paragraph(
+            "This API serves public football data. It has no accounts, sets no cookies, and "
+            "runs no analytics or tracking. " + contact
+        ),
+        Heading(2, "What is processed"),
+        Bullets(tuple(processed)),
+        Heading(2, "Legal basis and your rights"),
+        Paragraph(
+            "Processing is limited to what is needed to operate and secure the service "
+            "(legitimate interest, Art. 6(1)(f) GDPR). You may ask the operator for access to, "
+            "or erasure of, data about you, and you may object to the processing."
+        ),
+        Heading(2, "Intermediaries"),
+        Paragraph(
+            "Requests may pass through a CDN or reverse proxy run for the operator, which "
+            "processes the same request data under its own terms. Football data itself comes "
+            f"from the sources listed in the [agent guide]({base_url}/agents)."
         ),
     ]

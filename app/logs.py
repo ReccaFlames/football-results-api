@@ -1,5 +1,6 @@
 """Logging setup shared by the API and the scheduler (`FOOTBALL_RESULTS_LOG_FORMAT`)."""
 
+import ipaddress
 import json
 import logging
 import sys
@@ -15,6 +16,34 @@ _RESERVED = frozenset(vars(logging.makeLogRecord({}))) | {
 }
 _OWN_HANDLER = "_football_results_handler"
 _ACCESS_FIELDS = ("client", "method", "path", "http_version", "status")
+
+
+def anonymize_ip(value: str) -> str:
+    """The network of an IP address: /24 for IPv4, /48 for IPv6; other values unchanged.
+
+    Accepts uvicorn's `host:port` and `[host]:port` client strings and drops the port.
+    """
+    host = value
+    if value.startswith("["):
+        host = value[1:].split("]", 1)[0]
+    elif value.count(":") == 1:
+        host = value.split(":", 1)[0]
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return value
+    prefix = 24 if address.version == 4 else 48
+    return str(ipaddress.ip_network(f"{address}/{prefix}", strict=False).network_address)
+
+
+class AnonymizeClientFilter(logging.Filter):
+    """Replaces the client address of uvicorn access records with its network (GDPR)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) == 5 and isinstance(args[0], str):
+            record.args = (anonymize_ip(args[0]), *args[1:])
+        return True
 
 
 class JsonFormatter(logging.Formatter):
@@ -43,8 +72,16 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(entry, ensure_ascii=False, default=str)
 
 
-def configure_logging(log_format: Literal["text", "json"], level: int = logging.INFO) -> None:
-    """Log to stderr in the given format; with `json`, uvicorn's own loggers use it too."""
+def configure_logging(
+    log_format: Literal["text", "json"],
+    level: int = logging.INFO,
+    *,
+    anonymize_ips: bool = False,
+) -> None:
+    """Log to stderr in the given format; with `json`, uvicorn's own loggers use it too.
+
+    With ``anonymize_ips``, access logs keep only the client's /24 (IPv4) or /48 (IPv6) network.
+    """
     root = logging.getLogger()
     for handler in list(root.handlers):
         if _writes_to_console(handler):
@@ -61,6 +98,12 @@ def configure_logging(log_format: Literal["text", "json"], level: int = logging.
             logger = logging.getLogger(name)
             logger.handlers.clear()
             logger.propagate = True
+    access = logging.getLogger("uvicorn.access")
+    for item in list(access.filters):
+        if isinstance(item, AnonymizeClientFilter):
+            access.removeFilter(item)
+    if anonymize_ips:
+        access.addFilter(AnonymizeClientFilter())
 
 
 def _writes_to_console(handler: logging.Handler) -> bool:

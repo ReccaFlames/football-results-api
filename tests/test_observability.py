@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 from football_results_cli import output
 
-from app.logs import JsonFormatter, configure_logging
+from app.logs import AnonymizeClientFilter, JsonFormatter, anonymize_ip, configure_logging
 from app.observability import (
     STALE_GRACE,
     SeasonState,
@@ -97,3 +97,30 @@ def test_logging_replaces_console_handlers_but_keeps_others() -> None:
     finally:
         root.handlers, level = saved
         root.setLevel(level)
+
+
+def test_anonymized_access_logs_keep_only_the_client_network() -> None:
+    assert anonymize_ip("203.0.113.57:51234") == "203.0.113.0"
+    assert anonymize_ip("[2001:db8:abcd:12::1]:443") == "2001:db8:abcd::"
+    assert anonymize_ip("2001:db8:abcd:12::1") == "2001:db8:abcd::"
+    assert anonymize_ip("testclient") == "testclient"
+
+    access = logging.getLogger("uvicorn.access")
+    saved = list(access.filters)
+    try:
+        configure_logging("json", anonymize_ips=True)
+        configure_logging("json", anonymize_ips=True)
+        assert sum(isinstance(item, AnonymizeClientFilter) for item in access.filters) == 1
+        record = logging.makeLogRecord(
+            {
+                "name": "uvicorn.access",
+                "msg": '%s - "%s %s HTTP/%s" %d',
+                "args": ("198.51.100.7:5", "GET", "/health", "1.1", 200),
+            }
+        )
+        assert access.filter(record)
+        assert json.loads(JsonFormatter().format(record))["client"] == "198.51.100.0"
+        configure_logging("json")
+        assert not any(isinstance(item, AnonymizeClientFilter) for item in access.filters)
+    finally:
+        access.filters = saved

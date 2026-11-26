@@ -157,7 +157,7 @@ def root(
             "--url",
             envvar="FOOTBALL_RESULTS_URL",
             show_envvar=True,
-            help=f"API base URL, optionally with a path prefix [default: {http.DEFAULT_URL}]",
+            help=f"API base URL, optionally with a path prefix [default: {http.default_url()}]",
             show_default=False,
         ),
     ] = None,
@@ -192,7 +192,7 @@ def root(
         ),
     ] = False,
 ) -> None:
-    ctx.obj = http.Config(url=http.normalize_url(url), api_key=api_key or None, timeout=timeout)
+    ctx.obj = http.config_from_options(url, api_key or None, timeout)
 
 
 def _api(ctx: typer.Context) -> http.ApiClient:

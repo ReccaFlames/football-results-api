@@ -255,6 +255,7 @@ async def test_season_check_discovers_fallback_sources() -> None:
 
 def test_scheduler_enforces_demo_mode_before_seeding(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(scheduler_module.settings, "demo_mode", True)
+    monkeypatch.setattr(scheduler_module.settings, "operator_contact", "demo@example.com")
     monkeypatch.setattr(scheduler_module.settings, "api_keys", "")
     monkeypatch.setattr(scheduler_module.settings, "api_keys_file", None)
     root = Path(__file__).parents[1]

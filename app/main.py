@@ -243,7 +243,7 @@ def _freshness_cache_control(freshness: list[Freshness]) -> dict[str, str]:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    configure_logging(settings.log_format)
+    configure_logging(settings.log_format, anonymize_ips=settings.log_ips_anonymized)
     config = load_config()
     global file_keys, keys_watcher
     check_private_instance()
@@ -1363,6 +1363,53 @@ async def skill_file(request: Request) -> Response:
         _skill_file(),
         media_type=agent_docs.MARKDOWN_MEDIA_TYPE,
         headers=_page_headers(base_url, derived),
+    )
+
+
+@app.get("/robots.txt", include_in_schema=False)
+async def robots_txt(request: Request) -> Response:
+    base_url, derived = _public_base_url(request)
+    return Response(
+        agent_docs.robots_txt(base_url, crawlable=settings.anonymous_access),
+        media_type="text/plain; charset=utf-8",
+        headers=_page_headers(base_url, derived),
+    )
+
+
+def _privacy_blocks(base_url: str) -> list[agent_docs.Block]:
+    return agent_docs.privacy_blocks(
+        agent_docs.PrivacyInfo(
+            operator_contact=settings.operator_contact,
+            log_retention_days=settings.log_retention_days,
+            ips_anonymized=settings.log_ips_anonymized,
+            rate_limited=settings.rate_limit_enabled,
+            keys_enabled=bool(settings.api_keys or settings.api_keys_file),
+            oauth_enabled=settings.oauth_issuer is not None,
+        ),
+        base_url,
+    )
+
+
+@app.get("/privacy.md", include_in_schema=False)
+async def privacy_markdown(request: Request) -> Response:
+    base_url, derived = _public_base_url(request)
+    return _markdown(
+        agent_docs.render_markdown(_privacy_blocks(base_url)), _page_headers(base_url, derived)
+    )
+
+
+@app.get("/privacy", include_in_schema=False)
+async def privacy_page(request: Request) -> Response:
+    base_url, derived = _public_base_url(request)
+    html = agent_docs.render_html(
+        _privacy_blocks(base_url),
+        title="Privacy",
+        links={"alternate": f"{base_url}/privacy.md", "describedby": f"{base_url}/llms.txt"},
+    )
+    return Response(
+        html,
+        media_type=agent_docs.HTML_MEDIA_TYPE,
+        headers=_page_headers(base_url, derived, alternate="/privacy.md"),
     )
 
 

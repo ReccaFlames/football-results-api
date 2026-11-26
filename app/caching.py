@@ -12,6 +12,9 @@ CACHEABLE_OPERATIONS = frozenset(
 CACHEABLE_PAGES = frozenset(
     {
         "/llms.txt",
+        "/robots.txt",
+        "/privacy",
+        "/privacy.md",
         "/llms-full.txt",
         "/agents",
         "/agents.md",

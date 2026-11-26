@@ -60,7 +60,7 @@ A quiet demo can meet those conditions, so keep backups off the VM (section 5).
 ## 2. The application
 
 ```bash
-git clone <this repository> football-results && cd football-results
+git clone https://github.com/ReccaFlames/football-results-api.git football-results && cd football-results
 cp .env.example .env
 ```
 
@@ -77,7 +77,27 @@ FOOTBALL_RESULTS_USER_AGENT="FootballResultsAPI demo (contact: you@example.com)"
 FOOTBALL_RESULTS_TRUSTED_PROXIES=172.16.0.0/12,<Cloudflare ranges>
 # Leave admin keys empty; compose.demo.yaml forces FOOTBALL_RESULTS_API_KEYS empty anyway.
 FOOTBALL_RESULTS_API_KEYS=
+# Required in demo mode: shown on /privacy as the operator contact.
+FOOTBALL_RESULTS_OPERATOR_CONTACT=you@example.com
+# Days you keep access logs (shown on /privacy); match the journald retention in section 1.
+FOOTBALL_RESULTS_LOG_RETENTION_DAYS=14
 ```
+
+Demo mode serves `/privacy` (what is logged, why, and for how long) and shortens client IP
+addresses in access logs to their network (`/24` for IPv4, `/48` for IPv6). `compose.demo.yaml`
+sends container logs to journald
+([journald driver](https://docs.docker.com/engine/logging/drivers/journald/)), which deletes
+them by age. Keep the retention equal to `FOOTBALL_RESULTS_LOG_RETENTION_DAYS`
+([journald.conf](https://www.freedesktop.org/software/systemd/man/latest/journald.conf.html)):
+
+```bash
+sudo mkdir -p /etc/systemd/journald.conf.d
+printf '[Journal]\nMaxRetentionSec=14day\n' | sudo tee /etc/systemd/journald.conf.d/retention.conf
+sudo systemctl restart systemd-journald
+```
+
+Read the logs with `docker compose logs` or `journalctl CONTAINER_NAME=<container>`. Caddy writes
+no access log unless you add a `log` directive; if you do, keep the same retention.
 
 `FOOTBALL_RESULTS_PUBLIC_BASE_URL` makes the links in `/llms.txt`, `/agents`, and the MCP
 metadata absolute and independent of the request `Host`, so Cloudflare can cache them.
@@ -180,10 +200,26 @@ the Cloudflare address ([reverse_proxy defaults](https://caddyserver.com/docs/ca
    This stops floods at the edge, including of cached pages; the API's own quota (30 reads per
    minute per visitor) stays the precise limit for requests that reach the origin.
 
+5. **Let agents in.** The demo exists for AI agents, so do not challenge or block them; the
+   two rate limits above are the protection. Under **Security > Settings**, filtered by **Bot
+   traffic**:
+   - Turn **Bot fight mode** off. It challenges requests that look automated, which includes
+     API, CLI, and MCP clients, and it cannot be relaxed with rules
+     ([Bot Fight Mode](https://developers.cloudflare.com/bots/get-started/bot-fight-mode/)).
+   - Leave **Block AI bots** off
+     ([Block AI bots](https://developers.cloudflare.com/bots/additional-configurations/block-ai-bots/)).
+   - Set the AI crawler **Search** and **Agent** policies to allow. A **Block** policy, or
+     **Disallow** for **Training**, makes Cloudflare prepend its own directives to the API's
+     `/robots.txt`
+     ([robots.txt setting](https://developers.cloudflare.com/bots/additional-configurations/managed-robots-txt/));
+     whether to allow training is your choice, and OpenLigaDB's ODbL terms apply either way.
+
 Check from outside:
 
 ```bash
 curl -s https://demo.example.com/llms.txt | head -20          # demo notice near the top
+curl -s https://demo.example.com/robots.txt                   # Allow: / and the llms.txt pointer
+curl -s https://demo.example.com/privacy.md | head -5         # your operator contact
 curl -sI "https://demo.example.com/api/v1/matches?competition=3-liga" | grep -i "cf-cache-status\|cache-control"
 curl -s -X POST https://demo.example.com/api/v1/results/refresh \
   -H 'Content-Type: application/json' -d '{"competition":"3-liga"}'   # 503 writes-disabled

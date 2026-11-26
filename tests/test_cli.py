@@ -458,12 +458,38 @@ def test_url_and_timeout_come_from_the_environment(monkeypatch: pytest.MonkeyPat
     assert str(sent[1].url) == "http://other.example:9000/api/v1/competitions"
 
     assert invoke("competitions").exit_code == 0
-    assert configs[-1].url == http.DEFAULT_URL
+    assert configs[-1] == http.Config(http.LOCAL_URL, None, 30.0, url_is_default=True)
 
     for bad in ("ftp://api.example", "http://user:pw@api.example", "https://api.example/?a=1"):
         result = invoke("--url", bad, "competitions")
         assert result.exit_code == 2
         assert problem(result)["parameter"] == "url"
+
+
+def test_default_url_is_local_until_a_demo_host_is_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    refused = mock_api(
+        monkeypatch, lambda request: (_ for _ in ()).throw(httpx.ConnectError("refused"))
+    )
+    unset = invoke("health")
+    assert unset.exit_code == 4
+    assert "FOOTBALL_RESULTS_URL is not set" in problem(unset)["hint"]
+    explicit = invoke("--url", "http://localhost:8000", "health")
+    assert "FOOTBALL_RESULTS_URL is not set" not in problem(explicit)["hint"]
+
+    monkeypatch.setattr(http, "DEMO_URL", "https://demo.example")
+    assert invoke("health").exit_code == 4
+    assert str(refused[-1].url) == "https://demo.example/health"
+    assert "FOOTBALL_RESULTS_URL is not set" not in problem(invoke("health"))["hint"]
+
+    # ADR 0009: a key is never sent to the demo default.
+    keyed = invoke("health", env={"FOOTBALL_RESULTS_API_KEY": "secret"})
+    assert keyed.exit_code == 2
+    assert problem(keyed)["type"] == "urn:football-results:cli:usage-error"
+    assert "secret" not in keyed.stderr
+    count = len(refused)
+    env = {"FOOTBALL_RESULTS_API_KEY": "secret", "FOOTBALL_RESULTS_URL": "https://demo.example"}
+    assert invoke("health", env=env).exit_code == 4
+    assert refused[count].headers["X-API-Key"] == "secret"
 
 
 def test_http_client_identifies_itself_and_does_not_follow_redirects() -> None:
