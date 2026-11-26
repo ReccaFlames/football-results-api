@@ -1,0 +1,42 @@
+# Weekly version updates, grouped per ecosystem; security updates still open immediately.
+# A new release waits 7 days (cooldown) before Dependabot proposes it, as a supply-chain buffer.
+# Each PR runs CI; merging is manual. https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference
+version: 2
+
+updates:
+  # uv.lock covers the API and the cli/ workspace member.
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      python:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Dockerfile base images (python, uv).
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+
+  # Compose images (PostgreSQL, Prometheus, Grafana, Keycloak).
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
