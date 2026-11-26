@@ -24,6 +24,7 @@ API.
 | `app/access.py` | Named API keys (ADR 0005, 0008): keys-file models with required expiry, SHA-256 hashing, constant-time key resolution to an `Identity` (name, role, quotas, expiry), `KeysFileWatcher` (reload on change), `issue_key`/`extend_key`/`revoke_key` |
 | `app/agent_docs.py` | Pure generator of `/llms.txt`, `/agents`, `/agents.md`, `/llms-full.txt`, `/problems/<slug>`, `/robots.txt`, `/privacy` from the OpenAPI spec and competitions; `SKILL_PATH`/`SKILL_FILE` for the served skill; `MCP_TOOLS` (tool → operation) |
 | `app/oauth.py` | Optional OAuth for `/mcp` (ADR 0006): `OAuthConfig` (RFC 9728 metadata, `WWW-Authenticate` challenge), `JwksCache`, `JwtVerifier`; `create_http_client` is the test seam |
+| `app/notify.py` | Telegram notification of new access requests (ADR 0010): pure HTML-escaped message (never the email or message), background send with a short timeout, token redacted from httpx logs; `create_http_client` is the test seam (`tests/conftest.py` blocks it by default) |
 | `app/mcp_server.py` | Curated MCP server (`mcp` SDK `MCPServer`) at `/mcp`: 5 tools calling the API in-process, output models, Host/Origin checks, `McpRoute` |
 | `app/caching.py` | Weak body-hash `ETag`, `If-None-Match`, and `Cache-Control` rules for read endpoints |
 | `app/observability.py` | Stale-season and stalled-scheduler rules (`STALE_GRACE`, `stall_window`), Prometheus rendering for `/metrics`, HTTP request metrics |

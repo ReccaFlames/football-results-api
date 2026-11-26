@@ -373,7 +373,7 @@ go through Alembic.
 | GET | `/api/v1/jobs/{job_id}` | `get_job` | Get queued, running, completed, or failed scrape-job status (admin `X-API-Key` required) |
 | GET | `/api/v1/admin/scrape-runs` | `list_scrape_runs` | Import jobs, newest first, with source URL, worker, error, and `matches_skipped` (fallback matches skipped for unknown teams); filters: `competition`, `season`, `status`; cursor pagination (admin `X-API-Key` required) |
 | GET | `/api/v1/admin/scheduler` | `get_scheduler_status` | Scheduler workers and heartbeats plus every scheduled season's next update, overdue time, staleness, and failure count (admin `X-API-Key` required) |
-| POST | `/api/v1/access-requests` | `create_access_request` | Ask the operator for an API key ([ADR 0010](docs/adr/0010-access-requests-are-owned-by-the-api-and-never-auto-approved.md)): `name`, `contact_email`, `intended_use`, `client_type` (`human`/`agent`), optional `competitions` and `message`. `201` with a one-time `claim_secret`; one pending request per email (`409 access-request-pending`); 3 valid requests per hour per client IP; `503 writes-disabled` on the demo. No key needed, even on a private instance |
+| POST | `/api/v1/access-requests` | `create_access_request` | Ask the operator for an API key ([ADR 0010](docs/adr/0010-access-requests-are-owned-by-the-api-and-never-auto-approved.md)): `name`, `contact_email`, `intended_use`, `client_type` (`human`/`agent`), optional `competitions` and `message`. `201` with a one-time `claim_secret`; one pending request per email (`409 access-request-pending`); 3 valid requests per hour per client IP; `503 writes-disabled` on the demo. No key needed, even on a private instance. The operator gets a Telegram message (ID, name, client type, intended use, competitions; never the email or message) when `FOOTBALL_RESULTS_TELEGRAM_*` is set |
 | GET | `/api/v1/access-requests/{access_request_id}` | `get_access_request` | Status of an access request; needs the `Claim-Secret` header (wrong secret or ID: `404 unknown-access-request`). Once approved, the first call returns the key in `api_key` and the status becomes `claimed`. No key needed |
 | GET | `/api/v1/admin/access-requests` | `list_access_requests` | Access requests, newest first, with name, contact email, intended use, competitions, and message (erased once the key is claimed or the claim expires); filter: `status`; cursor pagination (admin `X-API-Key` required) |
 | POST | `/api/v1/admin/access-requests/{access_request_id}/reject` | `reject_access_request` | Reject a pending access request; returns it with status `rejected` (unknown ID: `404 unknown-access-request`; already decided: `409 access-request-decided`; admin `X-API-Key` required) |
@@ -1091,6 +1091,9 @@ about 200 MB of RAM. Terms such as *stale season* and *stalled scheduler* are de
     name (`env` for `FOOTBALL_RESULTS_API_KEYS`, `anonymous` without a valid key) and policy
   - `football_results_api_key_expires_in_seconds{key}`: time until each keys-file key expires
     (negative once expired)
+  - `football_results_access_requests_total{outcome}`: created access requests by operator
+    notification outcome (`notified`, `not_configured`, `failed`; a failed Telegram send never
+    fails the request)
 - Admin endpoints (admin `X-API-Key`): `list_scrape_runs`, `get_scheduler_status`,
   `list_access_requests`, and `reject_access_request`, also available as `football-results
   scrape-runs`, `scheduler`, `list-access-requests`, and `reject-access-request`. They are not MCP
@@ -1317,6 +1320,8 @@ Application variables:
 | FOOTBALL_RESULTS_OPERATOR_CONTACT | empty | Who runs the instance (an email or URL), shown on `/privacy`; required in demo mode |
 | FOOTBALL_RESULTS_LOG_RETENTION_DAYS | `14` | How long logs are kept, as stated on `/privacy`; keep the log driver's retention equal |
 | FOOTBALL_RESULTS_ANONYMIZE_LOG_IPS | `false` | Shorten client IPs in access logs (`/24` IPv4, `/48` IPv6); always on in demo mode |
+| FOOTBALL_RESULTS_TELEGRAM_BOT_TOKEN | empty | Telegram bot token for a message to the operator on each new access request (ID, name, client type, intended use, competitions; never the contact email or message). Set both or neither (`config check` fails otherwise); without them a new request is only logged (ID and client type) and counted. Never logged. Docker Compose falls back to `TELEGRAM_BOT_TOKEN` |
+| FOOTBALL_RESULTS_TELEGRAM_CHAT_ID | empty | Chat for those messages: a numeric chat ID or an `@channel` name. Docker Compose falls back to `TELEGRAM_CHAT_ID` (the Grafana alert chat); set it when others can read that chat |
 | FOOTBALL_RESULTS_FOOTBALL_DATA_API_TOKEN | empty | football-data.org token (needed only for football-data competitions) |
 | FOOTBALL_RESULTS_FOOTBALL_DATA_MIN_REQUEST_INTERVAL_SECONDS | `6` (from YAML) | Optional environment override for the football-data.org throttle (free tier: 10 req/min) |
 | FOOTBALL_RESULTS_ESPN_MIN_REQUEST_INTERVAL_SECONDS | `2` (from YAML) | Optional environment override for the minimum delay between ESPN requests |
@@ -1349,7 +1354,8 @@ Deployment variables (Docker Compose):
 - API_PORT
 - Observability profile: PROMETHEUS_API_KEY, PROMETHEUS_RETENTION (`15d`), GRAFANA_ADMIN_USER,
   GRAFANA_ADMIN_PASSWORD, GRAFANA_BIND_ADDRESS (`127.0.0.1`), GRAFANA_PORT (`3000`),
-  TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID (see [Observability](#observability))
+  TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID (see [Observability](#observability); also the default
+  for the API's access-request notifications)
 - OAuth example profile: KEYCLOAK_ADMIN_USER (`admin`), KEYCLOAK_ADMIN_PASSWORD, KEYCLOAK_PORT
   (`8080`; bound to `127.0.0.1`) (see [OAuth for the MCP server](#oauth-for-the-mcp-server))
 

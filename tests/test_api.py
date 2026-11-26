@@ -1,14 +1,19 @@
+import json
+import logging
 import re
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import httpx
 import pytest
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
 import app.main as main_module
-from app import access
+from app import access, notify, observability
 from app.competitions import competition_summary, source_from_url
 from app.config import load_config
 from app.main import app
@@ -1926,3 +1931,138 @@ def test_admins_reject_only_pending_access_requests(tmp_path: Path) -> None:
     # A rejected request frees the email for a new one.
     assert client.post("/api/v1/access-requests", json=ACCESS_REQUEST).status_code == 201
     assert repository.access_requests[created["id"]].status == "rejected"
+
+
+TELEGRAM_TOKEN = "123456:secret-bot-token"
+
+
+def access_request_outcomes() -> dict[str, float]:
+    return {
+        outcome: observability.HTTP_REGISTRY.get_sample_value(
+            "football_results_access_requests_total", {"outcome": outcome}
+        )
+        or 0.0
+        for outcome in observability.ACCESS_REQUEST_OUTCOMES
+    }
+
+
+def outcome_changes(before: dict[str, float]) -> dict[str, float]:
+    after = access_request_outcomes()
+    return {key: after[key] - before[key] for key in after if after[key] != before[key]}
+
+
+def use_telegram(
+    monkeypatch: pytest.MonkeyPatch, respond: Callable[[httpx.Request], httpx.Response]
+) -> list[httpx.Request]:
+    sent: list[httpx.Request] = []
+
+    def record(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return respond(request)
+
+    monkeypatch.setattr(
+        notify,
+        "create_http_client",
+        lambda: httpx.AsyncClient(transport=httpx.MockTransport(record)),
+    )
+    monkeypatch.setattr(main_module.settings, "telegram_bot_token", SecretStr(TELEGRAM_TOKEN))
+    monkeypatch.setattr(main_module.settings, "telegram_chat_id", "-100123")
+    monkeypatch.setattr(main_module.settings, "public_base_url", "https://football.example")
+    return sent
+
+
+def test_new_access_requests_notify_the_operator_without_the_email_or_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    sent = use_telegram(monkeypatch, lambda _: httpx.Response(200, json={"ok": True}))
+    client, _ = client_with_empty_store(tmp_path)
+    before = access_request_outcomes()
+    request = ACCESS_REQUEST | {
+        "name": "Ada <b>&</b> Co",
+        "intended_use": "Tables </b><a href='x'>",
+        "competitions": ["ekstraklasa", "premier-league"],
+        "message": "Call me on +48 600 000 000",
+    }
+
+    created = client.post("/api/v1/access-requests", json=request)
+
+    assert created.status_code == 201
+    assert outcome_changes(before) == {"notified": 1}
+    [message] = sent
+    assert message.url == f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = json.loads(message.content)
+    assert payload["chat_id"] == "-100123" and payload["parse_mode"] == "HTML"
+    assert payload["link_preview_options"] == {"is_disabled": True}
+    assert payload["text"] == (
+        f"<b>New access request #{created.json()['id']}</b>\n"
+        "<b>Name:</b> Ada &lt;b&gt;&amp;&lt;/b&gt; Co\n"
+        "<b>Client type:</b> agent\n"
+        "<b>Intended use:</b> Tables &lt;/b&gt;&lt;a href='x'&gt;\n"
+        "<b>Competitions:</b> ekstraklasa, premier-league\n"
+        "<b>Instance:</b> https://football.example"
+    )
+    for private in ("ada@example.com", "Ada@Example.com", "600 000 000"):
+        assert private not in message.content.decode()
+        assert private not in caplog.text
+    assert TELEGRAM_TOKEN not in caplog.text
+    assert "https://api.telegram.org/bot***/sendMessage" in caplog.text
+
+
+def fail_with_500(_: httpx.Request) -> httpx.Response:
+    return httpx.Response(500, json={"ok": False, "description": "Internal Server Error"})
+
+
+def fail_to_connect(request: httpx.Request) -> httpx.Response:
+    raise httpx.ConnectError(f"cannot reach {request.url}", request=request)
+
+
+@pytest.mark.parametrize(
+    ("respond", "reason"),
+    [(fail_with_500, "HTTP 500 (Internal Server Error)"), (fail_to_connect, "ConnectError")],
+)
+def test_a_failed_notification_keeps_the_created_access_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    respond: Callable[[httpx.Request], httpx.Response],
+    reason: str,
+) -> None:
+    caplog.set_level(logging.INFO)
+    use_telegram(monkeypatch, respond)
+    client, repository = client_with_empty_store(tmp_path)
+    before = access_request_outcomes()
+
+    created = client.post("/api/v1/access-requests", json=ACCESS_REQUEST)
+
+    assert created.status_code == 201
+    assert set(created.json()) == {"id", "status", "claim_secret", "status_url", "created_at"}
+    assert repository.access_requests[created.json()["id"]].status == "pending"
+    assert outcome_changes(before) == {"failed": 1}
+    assert (
+        f"Access request {created.json()['id']} created (client type agent); "
+        f"Telegram notification failed: {reason}"
+    ) in caplog.text
+    assert TELEGRAM_TOKEN not in caplog.text and "example.com" not in caplog.text.lower()
+
+
+def test_without_telegram_a_new_access_request_is_only_logged_and_counted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(main_module.settings, "telegram_bot_token", None)
+    monkeypatch.setattr(main_module.settings, "telegram_chat_id", None)
+    client, _ = client_with_empty_store(tmp_path)
+    before = access_request_outcomes()
+
+    created = client.post("/api/v1/access-requests", json=ACCESS_REQUEST)
+
+    assert created.status_code == 201
+    assert outcome_changes(before) == {"not_configured": 1}
+    assert (
+        f"Access request {created.json()['id']} created (client type agent); "
+        "Telegram notifications are not configured"
+    ) in caplog.text
+    assert "Ada" not in caplog.text and "example.com" not in caplog.text.lower()
+    metrics = client.get("/metrics", headers=AUTH_HEADERS).text
+    assert 'football_results_access_requests_total{outcome="failed"}' in metrics

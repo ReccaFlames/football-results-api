@@ -7,14 +7,14 @@ from functools import lru_cache
 from importlib.metadata import version
 from typing import Annotated, Literal
 
-from fastapi import Depends, FastAPI, Header, Path, Query, Request, Response
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
 from prometheus_client import CONTENT_TYPE_LATEST
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.routing import Match as RouteMatch
 
-from app import access, agent_docs, oauth, observability
+from app import access, agent_docs, notify, oauth, observability
 from app import api_docs as docs
 from app.caching import (
     CACHEABLE_OPERATIONS,
@@ -32,6 +32,7 @@ from app.config import (
     load_config,
     parse_networks,
     settings,
+    telegram_errors,
 )
 from app.contract import (
     DEFAULT_LIMIT,
@@ -272,6 +273,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         settings.football_data_api_token, settings.thesportsdb_api_key.get_secret_value()
     ):
         logger.warning(warning)
+    for error in telegram_errors(settings):
+        logger.warning("Telegram notifications of access requests are off: %s", error)
     await store.seed_competitions(config.to_competitions(), config.auto_rollover_slugs())
     try:
         async with mcp_endpoint.lifespan():
@@ -1176,7 +1179,10 @@ def _access_request_status(
     },
 )
 async def create_access_request(
-    body: AccessRequestCreate, request: Request, response: Response
+    body: AccessRequestCreate,
+    request: Request,
+    response: Response,
+    background_tasks: BackgroundTasks,
 ) -> AccessRequestCreated:
     if settings.demo_mode:
         raise ProblemError(
@@ -1226,6 +1232,13 @@ async def create_access_request(
             parameter="contact_email",
             hint="Wait for the operator, and poll the pending request with its claim secret.",
         ) from error
+    # After the response is sent: a slow or failing Telegram never affects the request.
+    background_tasks.add_task(
+        notify.notify_access_request,
+        stored,
+        notify.TelegramConfig.from_settings(settings),
+        settings.public_base_url,
+    )
     status_url = f"{ACCESS_REQUEST_PATH}/{stored.id}"
     response.headers["Location"] = status_url
     return AccessRequestCreated(

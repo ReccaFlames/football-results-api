@@ -55,6 +55,13 @@ FOOTBALL_RESULTS_TRUSTED_PROXIES=172.16.0.0/12
 Run the API with **one worker** (the image default). Quotas and the reloaded keys are kept in
 the process's memory, so more workers would multiply every quota.
 
+Optional: to get a Telegram message for each new access request (ID, name, client type, intended
+use, competitions; never the contact email or message), set `FOOTBALL_RESULTS_TELEGRAM_BOT_TOKEN`
+and `FOOTBALL_RESULTS_TELEGRAM_CHAT_ID` (both or neither). Docker Compose falls back to the
+Grafana alert settings `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`; set the
+`FOOTBALL_RESULTS_` names when others can read the alert chat. Without them, new requests are
+only logged (ID and client type) and counted in `football_results_access_requests_total`.
+
 ## 2. HTTPS with Caddy
 
 Install Caddy ([Install](https://caddyserver.com/docs/install)). It gets and renews a certificate

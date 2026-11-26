@@ -739,3 +739,51 @@ def test_private_instances_need_file_keys_and_https(
     assert len(errors) == 1 and message in errors[0]
     assert "env-key" not in errors[0]
     assert "football@" not in errors[0]
+
+
+@pytest.mark.parametrize(
+    ("token", "chat_id", "message"),
+    [
+        (
+            "123:bot-secret",
+            None,
+            "FOOTBALL_RESULTS_TELEGRAM_BOT_TOKEN is set without FOOTBALL_RESULTS_TELEGRAM_CHAT_ID",
+        ),
+        (
+            None,
+            "-100123",
+            "FOOTBALL_RESULTS_TELEGRAM_CHAT_ID is set without FOOTBALL_RESULTS_TELEGRAM_BOT_TOKEN",
+        ),
+        ("bot-secret/../x", "-100123", "is not a Telegram bot token"),
+        ("123:bot-secret", "my chat", "must be a numeric chat ID or an @channel name"),
+    ],
+)
+def test_config_check_requires_both_telegram_settings_without_printing_the_token(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    token: str | None,
+    chat_id: str | None,
+    message: str,
+) -> None:
+    monkeypatch.setattr(
+        config_module.settings, "telegram_bot_token", SecretStr(token) if token else None
+    )
+    monkeypatch.setattr(config_module.settings, "telegram_chat_id", chat_id)
+
+    error = check_fails(capsys, "--config-file", str(DEFAULT_CONFIG))
+
+    assert "Telegram notifications of access requests" in error and message in error
+    assert "bot-secret" not in error
+
+
+def test_config_check_accepts_a_complete_telegram_pair(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(config_module.settings, "telegram_bot_token", SecretStr("123:bot-secret"))
+    monkeypatch.setattr(config_module.settings, "telegram_chat_id", "@football_ops")
+
+    assert cli(["check", "--config-file", str(DEFAULT_CONFIG)]) == 0
+
+    output = capsys.readouterr()
+    assert "the operator is notified via Telegram" in output.out
+    assert "bot-secret" not in output.out + output.err

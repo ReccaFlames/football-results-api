@@ -1,5 +1,6 @@
 import argparse
 import hashlib
+import re
 import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
@@ -101,6 +102,9 @@ class Settings(BaseSettings):
     log_retention_days: int = Field(default=14, ge=1)
     # Shorten client IPs in access logs (always on in demo mode).
     anonymize_log_ips: bool = False
+    # Optional Telegram notification of new access requests (ADR 0010); both or neither.
+    telegram_bot_token: SecretStr | None = None
+    telegram_chat_id: str | None = None
 
     @field_validator("oauth_issuer", "oauth_jwks_url")
     @classmethod
@@ -696,6 +700,35 @@ def private_instance_errors(current: Settings) -> list[str]:
     return errors
 
 
+TELEGRAM_BOT_TOKEN_PATTERN = re.compile(r"\d+:[A-Za-z0-9_-]+")
+TELEGRAM_CHAT_ID_PATTERN = re.compile(r"-?\d+|@[A-Za-z][A-Za-z0-9_]{3,}")
+
+
+def telegram_errors(current: Settings) -> list[str]:
+    """Why the access-request notification settings are unusable; empty when they are complete
+    or both unset. Never includes the token."""
+    token = current.telegram_bot_token.get_secret_value() if current.telegram_bot_token else ""
+    chat_id = current.telegram_chat_id or ""
+    if not token and not chat_id:
+        return []
+    if not token or not chat_id:
+        missing, present = ("BOT_TOKEN", "CHAT_ID") if not token else ("CHAT_ID", "BOT_TOKEN")
+        return [
+            f"FOOTBALL_RESULTS_TELEGRAM_{present} is set without FOOTBALL_RESULTS_TELEGRAM_"
+            + f"{missing}; set both or neither"
+        ]
+    errors: list[str] = []
+    if not TELEGRAM_BOT_TOKEN_PATTERN.fullmatch(token):
+        errors.append(
+            "FOOTBALL_RESULTS_TELEGRAM_BOT_TOKEN is not a Telegram bot token (<id>:<key>)"
+        )
+    if not TELEGRAM_CHAT_ID_PATTERN.fullmatch(chat_id):
+        errors.append(
+            "FOOTBALL_RESULTS_TELEGRAM_CHAT_ID must be a numeric chat ID or an @channel name"
+        )
+    return errors
+
+
 def check_private_instance() -> None:
     """Raise when ``FOOTBALL_RESULTS_ANONYMOUS_ACCESS`` is off and the setup breaks ADR 0008."""
     errors = private_instance_errors(settings)
@@ -774,6 +807,11 @@ def cli(argv: list[str] | None = None) -> int:
         check_private_instance()
     except ValueError as error:
         parser.error(str(error))
+    if errors := telegram_errors(settings):
+        parser.error(
+            "Telegram notifications of access requests:\n"
+            + "\n".join(f"  - {item}" for item in errors)
+        )
     warnings = [
         *config.fallback_warnings(
             settings.football_data_api_token, settings.thesportsdb_api_key.get_secret_value()
@@ -802,6 +840,8 @@ def cli(argv: list[str] | None = None) -> int:
         )
     if not settings.anonymous_access:
         print("Private instance: every data operation needs an API key")
+    if settings.telegram_bot_token:
+        print("Access requests: the operator is notified via Telegram (never the contact email)")
     return 0
 
 

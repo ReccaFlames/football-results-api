@@ -479,9 +479,13 @@ the maintainer runs `scripts/publish-wizard.sh`.
     - [x] Admin operations `list_access_requests` (`GET /api/v1/admin/access-requests`) and
           `reject_access_request` (`POST /api/v1/admin/access-requests/{access_request_id}/reject`,
           `409 access-request-decided` unless pending) (+ CLI commands)
-  - [ ] 21b. Telegram notification on each new request (ID, name, client type, intended use,
+  - [x] 21b. Telegram notification on each new request (ID, name, client type, intended use,
         competitions; never the email): optional `FOOTBALL_RESULTS_TELEGRAM_BOT_TOKEN` and
-        `FOOTBALL_RESULTS_TELEGRAM_CHAT_ID`; without them only a log line and a metric
+        `FOOTBALL_RESULTS_TELEGRAM_CHAT_ID`; without them only a log line and a metric. Sent in
+        the background after the request is stored (`app/notify.py`, 5 s timeout, never fails
+        the `201`); counted in `football_results_access_requests_total{outcome}`
+        (`notified`/`not_configured`/`failed`); `config check` requires both or neither;
+        Compose falls back to Grafana's `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`
   - [ ] 21c. Server command `python -m app.config access-requests approve <id>` (role `client`
         only, default quotas, 365-day expiry, name `req-<id>-<slug of name>`, flags override)
         using the existing keys-file helpers; plus `list` and `reject`. The key must be claimed

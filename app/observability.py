@@ -170,6 +170,26 @@ def record_quota_use(key: str, policy: str, allowed: bool) -> None:
         RATE_LIMITED.labels(key, policy).inc()
 
 
+AccessRequestOutcome = Literal["notified", "not_configured", "failed"]
+ACCESS_REQUEST_OUTCOMES: tuple[AccessRequestOutcome, ...] = (
+    "notified",
+    "not_configured",
+    "failed",
+)
+ACCESS_REQUESTS = Counter(
+    f"{PREFIX}_access_requests",
+    "Created access requests by outcome of the operator notification",
+    ("outcome",),
+    registry=HTTP_REGISTRY,
+)
+for _outcome in ACCESS_REQUEST_OUTCOMES:
+    ACCESS_REQUESTS.labels(_outcome)
+
+
+def record_access_request(outcome: AccessRequestOutcome) -> None:
+    ACCESS_REQUESTS.labels(outcome).inc()
+
+
 def record_request(operation: str, method: str, status: int, seconds: float) -> None:
     HTTP_REQUESTS.labels(operation, method, str(status)).inc()
     HTTP_DURATION.labels(operation).observe(seconds)
