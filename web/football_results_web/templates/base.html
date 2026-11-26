@@ -7,23 +7,30 @@
   <meta name="description" content="Football fixtures, results, and league tables for developers and AI agents.">
   <title>{% block title %}Whistleprint{% endblock %}</title>
   <link rel="icon" href="favicon.ico">
+  <link rel="preload" href="static/inter-variable.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="static/style.css">
 </head>
 <body>
-  <header>
+  <header class="site-header wrap">
     <a class="logo" href="./">{{ logo }}</a>
-    <p class="pitch">Football fixtures, results, and league tables as an API, for developers and AI agents.</p>
+    <nav aria-label="Main">
+      <a href="./#competitions">Competitions</a>
+      <a href="./#resources">Resources</a>
+      {% if not demo %}<a class="button button-outline" href="./#request-access">Request an API key</a>{% endif %}
+    </nav>
   </header>
   <main>
 {% block main %}{% endblock %}
   </main>
   <footer>
-    {% for attribution, names in attributions %}
-    <p>{{ names | join(", ") }}: data from <a href="{{ attribution.source_url }}">{{ attribution.source }}</a>, licensed under the <a rel="license" href="{{ attribution.license_url }}">{{ attribution.license }}</a>.</p>
-    {% endfor %}
-    <nav aria-label="Legal">
-      <a href="privacy">Privacy and operator contact</a>
-    </nav>
+    <div class="wrap">
+      {% for attribution, names in attributions %}
+      <p>{{ names | join(", ") }}: data from <a href="{{ attribution.source_url }}">{{ attribution.source }}</a>, licensed under the <a rel="license" href="{{ attribution.license_url }}">{{ attribution.license }}</a>.</p>
+      {% endfor %}
+      <nav aria-label="Legal">
+        <a href="privacy">Privacy and operator contact</a>
+      </nav>
+    </div>
   </footer>
 </body>
 </html>

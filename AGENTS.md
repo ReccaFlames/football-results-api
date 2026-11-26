@@ -54,7 +54,7 @@ API.
 | `web/` | Separate uv workspace package `football-results-web` (Starlette + Jinja2 + httpx): the Whistleprint landing page |
 | `web/football_results_web/main.py` | `create_app`: `/` (competitions, developer and agent links, access request form or "no key needed" on a demo), `POST /request-access` (`AccessForm`, honeypot, `form_errors` maps problem slugs to field messages, `no-store`), `/static/*`, `/favicon.ico`, security headers; footer with `footer_attributions` (each source once) and the `privacy` link (operator contact) |
 | `web/football_results_web/api.py` | `create_http_client` (test seam), `TimedCache` (5-minute cache, last good value kept): `CompetitionCache` (with `data_attributions`, http(s) URLs only), `DemoModeCache` (demo notice in `/llms.txt`); `create_access_request` (problem parsing), `forwarded_for`; `FOOTBALL_RESULTS_WEB_API_URL` |
-| `web/football_results_web/templates/`, `static/` | Jinja2 templates; stylesheet, logo, mark, and favicon (package data) |
+| `web/football_results_web/templates/`, `static/` | Jinja2 templates (with the inline `pitch.svg` hero); stylesheet (light and dark palettes), logo, mark, favicon, and self-hosted Inter font with its `inter-OFL.txt` (package data) |
 | `web/Dockerfile` | Landing image (build context: repository root): only `football-results-web` from `uv.lock`, UID 10001, port 8001; Compose service `web` |
 | `.dockerignore` | Keeps `.env`, `secrets/`, `.venv`, and build artefacts out of both image build contexts |
 | `skills/football-results/SKILL.md` | Consumer Agent Skill for API users (teaches the CLI), served unchanged at `/skills/football-results/SKILL.md` |

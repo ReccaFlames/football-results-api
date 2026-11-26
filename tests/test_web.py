@@ -118,12 +118,23 @@ def test_page_lists_competitions_and_links_without_scripts_or_absolute_urls(
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
     assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
+    assert "font-src 'self'" in response.headers["content-security-policy"]
     page = response.text
     assert "<title>Whistleprint</title>" in page
     assert "<td>3. Liga</td><td>Germany</td><td>2026-2027</td>" in page
     assert "<td>&lt;b&gt;Cup&lt;/b&gt;</td><td>–</td><td>–</td>" in page
     links = re.findall(r'(?:href|src)="([^"]*)"', page)
-    for target in ("docs", "openapi.json", "llms.txt", "agents#cli", "agents#mcp", "privacy"):
+    for target in (
+        "docs",
+        "openapi.json",
+        "llms.txt",
+        "agents#cli",
+        "agents#mcp",
+        "privacy",
+        "./#competitions",
+        "./#resources",
+        "./#request-access",
+    ):
         assert target in links
     assert not [link for link in links if re.match(r"[a-z]+:|//|/", link)]
     assert "<script" not in page
@@ -289,6 +300,7 @@ def test_demo_instance_shows_no_key_needed_instead_of_the_form(
     page = landing().get("/").text
 
     assert "No key needed" in page and "<form" not in page
+    assert 'href="./#request-access"' not in page
 
 
 def test_unknown_demo_mode_shows_the_form(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -617,6 +629,7 @@ def test_static_assets_and_favicon_are_served() -> None:
     assert client.get("/favicon.ico").headers["content-type"] == "image/x-icon"
     assert client.get("/static/whistleprint-mark.svg").status_code == 200
     assert client.get("/static/style.css").headers["content-type"].startswith("text/css")
+    assert client.get("/static/inter-variable.woff2").headers["content-type"] == "font/woff2"
 
 
 def test_http_client_identifies_itself_and_does_not_follow_redirects() -> None:

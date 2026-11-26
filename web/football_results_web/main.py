@@ -25,7 +25,7 @@ TEMPLATES = PACKAGE / "templates"
 
 SECURITY_HEADERS = {
     "Content-Security-Policy": (
-        "default-src 'none'; img-src 'self'; style-src 'self'; form-action 'self'; "
+        "default-src 'none'; img-src 'self'; style-src 'self'; font-src 'self'; form-action 'self'; "
         "base-uri 'none'; frame-ancestors 'none'"
     ),
     "X-Content-Type-Options": "nosniff",

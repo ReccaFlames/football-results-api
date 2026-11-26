@@ -1,61 +1,76 @@
 {#- The access request section: a demo needs no key, anything else gets the form. -#}
-    <section aria-labelledby="request-access">
-      <h2 id="request-access">{% if demo %}No key needed{% else %}Request an API key{% endif %}</h2>
-      {% if demo %}
-      <p>This is a public, read-only demo instance: read the data without a key, within the anonymous rate limits. It takes no access requests. The <a href="llms.txt">API overview</a> describes its limits and data licences.</p>
-      {% else %}
-      <p>Ask the operator for a key. Every request is reviewed by hand; nothing is granted automatically. Agents can send the same request through the API (<code>create_access_request</code>, see the <a href="llms.txt">API overview</a>).</p>
-      {% if errors.general %}
-      <div class="problem" role="alert" id="form-problem">
-        {% for message in errors.general %}
-        <p>{{ message }}</p>
-        {% endfor %}
-      </div>
-      {% endif %}
-      <form method="post" action="request-access"{% if errors.general %} aria-describedby="form-problem"{% endif %}>
-        <p>
-          <label for="name">Name or organisation</label>
-          <input id="name" name="name" type="text" required maxlength="{{ max_lengths.name }}" autocomplete="name" value="{{ form.name }}"{% if errors.fields.name %} aria-invalid="true" aria-describedby="name-error"{% endif %}>
-          {% if errors.fields.name %}<span class="field-error" id="name-error">{{ errors.fields.name }}</span>{% endif %}
-        </p>
-        <p>
-          <label for="contact_email">Contact email</label>
-          <input id="contact_email" name="contact_email" type="email" required maxlength="{{ max_lengths.contact_email }}" autocomplete="email" value="{{ form.contact_email }}" aria-describedby="contact_email-hint{% if errors.fields.contact_email %} contact_email-error{% endif %}"{% if errors.fields.contact_email %} aria-invalid="true"{% endif %}>
-          <span class="hint" id="contact_email-hint">Only the operator sees it.</span>
-          {% if errors.fields.contact_email %}<span class="field-error" id="contact_email-error">{{ errors.fields.contact_email }}</span>{% endif %}
-        </p>
-        <p>
-          <label for="intended_use">What will you use the API for?</label>
-          <textarea id="intended_use" name="intended_use" rows="4" required maxlength="{{ max_lengths.intended_use }}" aria-describedby="intended_use-hint{% if errors.fields.intended_use %} intended_use-error{% endif %}"{% if errors.fields.intended_use %} aria-invalid="true"{% endif %}>{{ form.intended_use }}</textarea>
-          <span class="hint" id="intended_use-hint">Up to {{ max_lengths.intended_use }} characters.</span>
-          {% if errors.fields.intended_use %}<span class="field-error" id="intended_use-error">{{ errors.fields.intended_use }}</span>{% endif %}
-        </p>
-        <fieldset{% if errors.fields.client_type %} aria-describedby="client_type-error"{% endif %}>
-          <legend>Who will use the key?</legend>
-          <label><input type="radio" name="client_type" value="human" required{% if form.client_type == "human" %} checked{% endif %}> A person</label>
-          <label><input type="radio" name="client_type" value="agent"{% if form.client_type == "agent" %} checked{% endif %}> An AI agent or automated client</label>
-          {% if errors.fields.client_type %}<span class="field-error" id="client_type-error">{{ errors.fields.client_type }}</span>{% endif %}
-        </fieldset>
-        {% if competitions %}
-        <fieldset{% if errors.fields.competitions %} aria-describedby="competitions-error"{% endif %}>
-          <legend>Competitions you need (optional)</legend>
-          {% for competition in competitions %}
-          <label><input type="checkbox" name="competitions" value="{{ competition.slug }}"{% if competition.slug in form.competitions %} checked{% endif %}> {{ competition.name }}</label>
-          {% endfor %}
-          {% if errors.fields.competitions %}<span class="field-error" id="competitions-error">{{ errors.fields.competitions }}</span>{% endif %}
-        </fieldset>
+    <section class="request" aria-labelledby="request-access">
+      <div class="request-inner wrap">
+        <div class="request-intro">
+          <h2 id="request-access">{% if demo %}No key needed{% else %}Request an API key{% endif %}</h2>
+          {% if not demo %}
+          <p class="lede">Requests are reviewed by hand.</p>
+          <p class="hint">Nothing is granted automatically. Agents can send the same request through the API (<code>create_access_request</code>, see the <a href="llms.txt">API overview</a>).</p>
+          {% endif %}
+        </div>
+        {% if demo %}
+        <div class="request-body">
+          <p>This is a public, read-only demo instance: read the data without a key, within the anonymous rate limits. It takes no access requests. The <a href="llms.txt">API overview</a> describes its limits and data licences.</p>
+        </div>
+        {% else %}
+        <div class="request-body">
+          {% if errors.general %}
+          <div class="problem" role="alert" id="form-problem">
+            {% for message in errors.general %}
+            <p>{{ message }}</p>
+            {% endfor %}
+          </div>
+          {% endif %}
+          <form method="post" action="request-access"{% if errors.general %} aria-describedby="form-problem"{% endif %}>
+            <p class="field">
+              <label for="name">Name or organisation</label>
+              <input id="name" name="name" type="text" required maxlength="{{ max_lengths.name }}" autocomplete="name" value="{{ form.name }}"{% if errors.fields.name %} aria-invalid="true" aria-describedby="name-error"{% endif %}>
+              {% if errors.fields.name %}<span class="field-error" id="name-error">{{ errors.fields.name }}</span>{% endif %}
+            </p>
+            <p class="field">
+              <label for="contact_email">Contact email</label>
+              <input id="contact_email" name="contact_email" type="email" required maxlength="{{ max_lengths.contact_email }}" autocomplete="email" value="{{ form.contact_email }}" aria-describedby="contact_email-hint{% if errors.fields.contact_email %} contact_email-error{% endif %}"{% if errors.fields.contact_email %} aria-invalid="true"{% endif %}>
+              <span class="hint" id="contact_email-hint">Only the operator sees it.</span>
+              {% if errors.fields.contact_email %}<span class="field-error" id="contact_email-error">{{ errors.fields.contact_email }}</span>{% endif %}
+            </p>
+            <p class="field wide">
+              <label for="intended_use">What will you use the API for?</label>
+              <textarea id="intended_use" name="intended_use" rows="4" required maxlength="{{ max_lengths.intended_use }}" aria-describedby="intended_use-hint{% if errors.fields.intended_use %} intended_use-error{% endif %}"{% if errors.fields.intended_use %} aria-invalid="true"{% endif %}>{{ form.intended_use }}</textarea>
+              <span class="hint" id="intended_use-hint">Up to {{ max_lengths.intended_use }} characters.</span>
+              {% if errors.fields.intended_use %}<span class="field-error" id="intended_use-error">{{ errors.fields.intended_use }}</span>{% endif %}
+            </p>
+            <fieldset class="wide"{% if errors.fields.client_type %} aria-describedby="client_type-error"{% endif %}>
+              <legend>Who will use the key?</legend>
+              <div class="choices inline">
+                <label><input type="radio" name="client_type" value="human" required{% if form.client_type == "human" %} checked{% endif %}> A person</label>
+                <label><input type="radio" name="client_type" value="agent"{% if form.client_type == "agent" %} checked{% endif %}> An AI agent or automated client</label>
+              </div>
+              {% if errors.fields.client_type %}<span class="field-error" id="client_type-error">{{ errors.fields.client_type }}</span>{% endif %}
+            </fieldset>
+            {% if competitions %}
+            <fieldset class="wide"{% if errors.fields.competitions %} aria-describedby="competitions-error"{% endif %}>
+              <legend>Competitions you need (optional)</legend>
+              <div class="choices grid">
+                {% for competition in competitions %}
+                <label><input type="checkbox" name="competitions" value="{{ competition.slug }}"{% if competition.slug in form.competitions %} checked{% endif %}> {{ competition.name }}</label>
+                {% endfor %}
+              </div>
+              {% if errors.fields.competitions %}<span class="field-error" id="competitions-error">{{ errors.fields.competitions }}</span>{% endif %}
+            </fieldset>
+            {% endif %}
+            <p class="field wide">
+              <label for="message">Anything else for the operator (optional)</label>
+              <textarea id="message" name="message" rows="3" maxlength="{{ max_lengths.message }}" aria-describedby="message-hint{% if errors.fields.message %} message-error{% endif %}"{% if errors.fields.message %} aria-invalid="true"{% endif %}>{{ form.message }}</textarea>
+              <span class="hint" id="message-hint">Up to {{ max_lengths.message }} characters.</span>
+              {% if errors.fields.message %}<span class="field-error" id="message-error">{{ errors.fields.message }}</span>{% endif %}
+            </p>
+            <p class="trap">
+              <label for="{{ honeypot }}">Leave this field empty</label>
+              <input id="{{ honeypot }}" name="{{ honeypot }}" type="text" tabindex="-1" autocomplete="off">
+            </p>
+            <p class="wide"><button class="button" type="submit">Send request</button></p>
+          </form>
+        </div>
         {% endif %}
-        <p>
-          <label for="message">Anything else for the operator (optional)</label>
-          <textarea id="message" name="message" rows="3" maxlength="{{ max_lengths.message }}" aria-describedby="message-hint{% if errors.fields.message %} message-error{% endif %}"{% if errors.fields.message %} aria-invalid="true"{% endif %}>{{ form.message }}</textarea>
-          <span class="hint" id="message-hint">Up to {{ max_lengths.message }} characters.</span>
-          {% if errors.fields.message %}<span class="field-error" id="message-error">{{ errors.fields.message }}</span>{% endif %}
-        </p>
-        <p class="trap">
-          <label for="{{ honeypot }}">Leave this field empty</label>
-          <input id="{{ honeypot }}" name="{{ honeypot }}" type="text" tabindex="-1" autocomplete="off">
-        </p>
-        <p><button type="submit">Send request</button></p>
-      </form>
-      {% endif %}
+      </div>
     </section>

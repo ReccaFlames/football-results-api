@@ -289,7 +289,10 @@ separate, stateless app that talks to the API over HTTP only. It shows the compe
 an access request form (on a demo instance, "no key needed" instead; it reads this from the demo
 notice in `/llms.txt`). Its footer attributes each data source once, from the competitions'
 `data_attributions` (the only external links on the page), and links to `/privacy`, which names
-the operator contact (`FOOTBALL_RESULTS_OPERATOR_CONTACT`). With the API running on port 8000:
+the operator contact (`FOOTBALL_RESULTS_OPERATOR_CONTACT`). It follows the browser's light or dark
+preference, has no JavaScript, and loads nothing from other origins: the pitch artwork is inline
+SVG and the Inter typeface (SIL Open Font License, `static/inter-OFL.txt`) is self-hosted, subset
+to Latin and Latin Extended. With the API running on port 8000:
 
 ~~~bash
 uv run uvicorn football_results_web.main:app --reload --port 8001
