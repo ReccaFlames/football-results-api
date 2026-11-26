@@ -141,7 +141,7 @@ correct the request from `valid_values` or `hint` and retry once.
 | 2 | Usage error: invalid option or value | Fix `parameter` using `valid_values` or `hint`. |
 | 3 | Not found: competition, season, or job | Re-check slugs with `competitions` and seasons with `fetched_seasons`. |
 | 4 | Upstream or stale: unreachable API, timeout, server error, job conflict, rate limit, failed job, stale data | `connection-failed`: check `FOOTBALL_RESULTS_URL`; `stale-data`: answer with a caveat; otherwise retry later. |
-| 5 | Auth: missing or invalid API key, a client key on an admin operation, or writes disabled | Reads need no key; skip the write. |
+| 5 | Auth: missing or invalid API key, a client key on an admin operation, or writes disabled | Skip the write. A read with `unauthorized` needs a key: `$FOOTBALL_RESULTS_URL/llms.txt` (Auth) explains requesting one with `create-access-request` and `get-access-request`. |
 
 Server problem types are `/problems/<slug>` (for example `/problems/unknown-competition` or
 `/problems/invalid-parameter`); the CLI's own are `urn:football-results:cli:<slug>`. The API

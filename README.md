@@ -836,9 +836,9 @@ but existing ones are never renamed or renumbered.
 [Agent Skill](https://agentskills.io/specification) for people and coding agents that *use* the
 API. It teaches the `football-results` CLI: resolving competition and team slugs, recipes for the
 common questions, `null` as unknown, freshness and `--fail-if-stale`, when (not) to queue refresh
-jobs, and branching on exit codes and problem types, with curl and `/llms.txt` as a fallback. The
-contributor skills in `.github/skills/` are a different thing: they are playbooks for working on
-this repository.
+jobs, and branching on exit codes and problem types (including where to request a key), with curl
+and `/llms.txt` as a fallback. The contributor skills in `.github/skills/` are a different thing:
+they are playbooks for working on this repository.
 
 The skill is one static file; it reads the API URL from `FOOTBALL_RESULTS_URL` and works offline
 once installed. The API serves it unchanged at `/skills/football-results/SKILL.md` (read rate

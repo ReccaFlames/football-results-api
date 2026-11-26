@@ -493,7 +493,7 @@ the maintainer runs `scripts/publish-wizard.sh`.
         data are deleted. Unapproved (pending/rejected) requests are deleted after 30 days
         (the scheduler purges hourly). Keys file first, database second: a failed approval
         revokes the new entry. Refused in demo mode. `/privacy` retention text stays for 21g
-  - [ ] 21d. CLI commands `create-access-request` and `get-access-request` (and, because every
+  - [x] 21d. CLI commands `create-access-request` and `get-access-request` (and, because every
         operation needs a command, `list-access-requests` and `reject-access-request`); one line
         in the consumer skill pointing to `/llms.txt` for requesting access (no instance facts);
         no MCP tool
