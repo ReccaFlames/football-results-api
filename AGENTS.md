@@ -21,7 +21,7 @@ API.
 | `app/contract.py` | API v1.1 request rules: opaque cursors, `fields=`, status and date parsing, limits |
 | `app/problems.py` | RFC 9457 problem details: `ProblemError`, exception handlers for every error |
 | `app/ratelimit.py` | In-process fixed-window rate limiter, `RateLimit` headers, trusted-proxy client IP |
-| `app/access.py` | Named API keys (ADR 0005, 0008): keys-file models with required expiry, SHA-256 hashing, constant-time key resolution to an `Identity` (name, role, quotas, expiry), `KeysFileWatcher` (reload on change), `issue_key`/`extend_key`/`revoke_key` |
+| `app/access.py` | Named API keys (ADR 0005, 0008): keys-file models with required expiry, SHA-256 hashing, constant-time key resolution to an `Identity` (name, role, quotas, expiry), `KeysFileWatcher` (reload on change), `issue_key`/`extend_key`/`revoke_key`; `PUBLIC_OPERATIONS`; access-request claim secrets (`generate_claim_secret`, `claim_secret_matches`) |
 | `app/agent_docs.py` | Pure generator of `/llms.txt`, `/agents`, `/agents.md`, `/llms-full.txt`, `/problems/<slug>`, `/robots.txt`, `/privacy` from the OpenAPI spec and competitions; `SKILL_PATH`/`SKILL_FILE` for the served skill; `MCP_TOOLS` (tool → operation) |
 | `app/oauth.py` | Optional OAuth for `/mcp` (ADR 0006): `OAuthConfig` (RFC 9728 metadata, `WWW-Authenticate` challenge), `JwksCache`, `JwtVerifier`; `create_http_client` is the test seam |
 | `app/notify.py` | Telegram notification of new access requests (ADR 0010): pure HTML-escaped message (never the email or message), background send with a short timeout, token redacted from httpx logs; `create_http_client` is the test seam (`tests/conftest.py` blocks it by default) |
@@ -35,16 +35,15 @@ API.
 | `app/scraper.py` | Provider adapters (`NinetyMinutScraper`, `FootballDataScraper`), parsers, `ScraperRegistry` |
 | `app/seasons.py` | Season formats (`2026-2027`, `2026`) and season/date mapping |
 | `app/competitions.py` | Competition summary helpers, `source_from_url` validation, `PROVIDER_ATTRIBUTIONS` and `with_data_attributions` (`data_attributions` in `list_competitions`) |
-| `app/config.py` | Environment settings, validated competition configuration, and `python -m app.config` (`check`, `keys`, `access-requests`) |
+| `app/config.py` | `Settings` from env vars (prefix `FOOTBALL_RESULTS_`), validated competition configuration, and `python -m app.config` (`check`, `keys`, `access-requests`) |
 | `config/competitions.yaml` | Competition, provider, and schedule defaults |
 | `config/demo-competitions.yaml` | Demo instance competitions: only redistributable providers (the 3. Liga) |
 | `compose.demo.yaml` | Compose override for the public read-only demo (ADR 0007); guide in `docs/DEMO.md` |
 | `docs/PRIVATE.md` | Private instance guide (ADR 0008): invited users, expiring keys, `keys` commands |
 | `docs/DEPLOYMENT.md` | First-deployment checklist; services, Caddy path routes, and the trusted-proxy chain |
-| `app/repository.py` | `PostgresResultRepository`: seeding, queries, atomic season replace, scheduler claims |
+| `app/repository.py` | `PostgresResultRepository`: seeding, queries, atomic season replace, scheduler claims; access requests (create, list, approve, reject, claim, purge; `CLAIM_WINDOW`, `UNAPPROVED_RETENTION`) |
 | `app/models.py` | Pydantic API/domain models (`Competition`, `SeasonSource`, `ScrapedMatch`, `MatchResult`, ...) |
 | `app/db_models.py` | SQLAlchemy ORM tables |
-| `app/config.py` | `Settings` from env vars with prefix `FOOTBALL_RESULTS_` |
 | `migrations/` | Alembic migrations (schema changes go here only; no `create_all`) |
 | `docs/PROVIDERS.md` | Provider contract: `scrape`, `discover_seasons`, capabilities, URL rules |
 | `cli/` | Separate uv workspace package `football-results-cli` (httpx + typer only): the `football-results` CLI |
@@ -68,8 +67,8 @@ API.
 | `keycloak/` | Realm import for the `oauth-example` Compose profile (no users, no secrets) |
 | `observability/` | Prometheus scrape config and Grafana provisioning (data source, dashboard, alert rules, policy; the Telegram contact point is in `compose.yaml`) for the `observability` Compose profile |
 | `GLOSSARY.md` | Domain terms (stale season, stalled scheduler, grace period) |
-| `tests/` | pytest; API tests use `FakeRepository` and need no database; `test_cli.py` runs the CLI against the app in-process |
-| `tests/integration/` | Repository and migration tests against real PostgreSQL (skipped without `FOOTBALL_RESULTS_TEST_DATABASE_URL`) |
+| `tests/` | pytest; API tests use `FakeRepository` and need no database; `test_cli.py` runs the CLI against the app in-process; `test_web.py` runs the landing app against a fake API (and the app in-process) |
+| `tests/integration/` | Repository and migration tests against real PostgreSQL, plus the access request flow through the API and `python -m app.config` (skipped without `FOOTBALL_RESULTS_TEST_DATABASE_URL`) |
 
 ## Commands
 

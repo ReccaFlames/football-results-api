@@ -7,7 +7,7 @@ scheduler, and serves them over a REST API.
 The repository started as an Ekstraklasa-only scraper and is evolving into a **generic, configurable
 league-data API**. This README describes both:
 
-- **[Current state](#current-state)** – what is implemented and works today (version 0.25.0).
+- **[Current state](#current-state)** – what is implemented and works today (version 0.26.0).
 - **[Target state](#target-state-and-roadmap)** – where the project is heading and what is still
   missing.
 
@@ -23,7 +23,7 @@ league-data API**. This README describes both:
 | Scheduling | Adaptive per-season scheduler driven by fixture times; thresholds from `defaults.schedule` with per-competition overrides | Plus cron-style overrides and global provider quotas |
 | Configuration | Environment variables plus validated YAML for leagues, sources, providers, and schedule defaults | Env vars for infrastructure + one validated config file for leagues, sources, and schedules |
 | Observability | `/health`; authenticated admin endpoints for import jobs and scheduler state; Prometheus `/metrics`; optional Prometheus + Grafana stack with Telegram alerts on stale seasons; JSON logs | Same, plus per-provider quotas and fallback alerts |
-| API | Matches of every status with filters, cursor pagination, `fields=` and per-season freshness; computed standings; teams with aliases; manual refresh and historical fetch; RFC 9457 errors, rate limits, and `ETag` caching; generated `/llms.txt` and `/agents` guide; `football-results` CLI, Agent Skill, and curated MCP server at `/mcp`; authenticated admin endpoints | Plus admin writes (enable/disable competitions) |
+| API | Matches of every status with filters, cursor pagination, `fields=` and per-season freshness; computed standings; teams with aliases; manual refresh and historical fetch; RFC 9457 errors, rate limits, and `ETag` caching; generated `/llms.txt` and `/agents` guide; `football-results` CLI, Agent Skill, and curated MCP server at `/mcp`; authenticated admin endpoints; access requests for private instances and a landing page | Plus admin writes (enable/disable competitions) |
 
 ## Current state
 
@@ -31,11 +31,15 @@ league-data API**. This README describes both:
 
 ~~~text
 HTTP clients ──▶ FastAPI (app.main) ───────────────▶ PostgresResultRepository ──▶ PostgreSQL
+Browsers ──▶ landing page (web/) ──HTTP──▶ FastAPI
 Scheduler (app.scheduler) ──┬──▶ ScraperRegistry ──▶ sources
                             └─────────────────────▶ PostgresResultRepository
 ~~~
 
 - FastAPI provides the HTTP API (`app/main.py`).
+- The Whistleprint landing page (`web/`) is a separate, stateless app on the same origin that
+  calls the API over HTTP only; its access request form goes to the API, which stores the
+  requests ([Access requests](#access-requests)).
 - Provider-specific adapters (`app/scraper.py`) parse 90minut pages, football-data.org JSON, ESPN
   scoreboard JSON, TheSportsDB JSON, and OpenLigaDB JSON.
   They implement the `CompetitionScraper` provider contract (`scrape`, `discover_seasons`, and
@@ -1416,6 +1420,10 @@ Application variables:
 | FOOTBALL_RESULTS_OAUTH_AUDIENCE | public `/mcp` URL | Required `aud` of access tokens, when the issuer cannot put the `/mcp` URL there |
 | FOOTBALL_RESULTS_OAUTH_SCOPES | empty | Comma-separated scopes advertised in the metadata and the `401` challenge (not enforced) |
 | FOOTBALL_RESULTS_OAUTH_JWKS_URL | discovered | JWKS URL when the issuer URL is not reachable from the API (for example `http://keycloak:8080/...` in Compose) |
+
+The landing app reads only `FOOTBALL_RESULTS_WEB_API_URL` (see
+[Run the landing page locally](#run-the-landing-page-locally)); the CLI's variables are listed
+under [Command-line client](#command-line-client-football-results).
 
 Deployment variables (Docker Compose):
 

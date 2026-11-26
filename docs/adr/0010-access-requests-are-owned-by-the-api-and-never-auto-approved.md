@@ -22,8 +22,28 @@ and, after approval, the key exactly once. Requests not approved are deleted aft
 
 ## Consequences
 
-- `create_access_request` and `list_competitions` are public operations even on a private
-  instance; the landing page needs no key of its own.
+- `create_access_request`, `get_access_request`, and `list_competitions` are public operations
+  even on a private instance; the landing page needs no key of its own.
 - The landing app forwards the client IP and is a trusted proxy, so the per-IP request limit
   counts visitors, not the landing app.
 - A lost claim secret cannot be recovered; the requester creates a new request.
+
+Amended after implementation (roadmap item 21):
+
+- The claim secret travels in the `Claim-Secret` header, never in the URL, which access logs
+  record.
+- The honeypot field is in the landing app's form only: the app drops a filled one without
+  calling the API. The API has none (it would only confuse agents); it accepts 3 requests per
+  hour per client IP and one pending request per contact email.
+- Telegram is optional. Without a bot token and chat ID, a new request is only logged (ID and
+  client type) and counted. The message carries neither the contact email nor the free-text
+  message.
+- Listing and rejecting are also admin API operations (`list_access_requests`,
+  `reject_access_request`): they do not touch the keys file. Approval stays on the server.
+- An approved key must be claimed within 14 days. Claiming it, or missing that window, erases
+  the stored key and the request's personal data (an hourly purge in the scheduler, which also
+  deletes unapproved requests after 30 days). An unclaimed key stays in the keys file until the
+  operator revokes it.
+- `/privacy` states the stored fields, the retention, and Telegram when it is configured. A demo
+  instance takes no requests: `create_access_request` returns `writes-disabled`, and the landing
+  page says no key is needed.

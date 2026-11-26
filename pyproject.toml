@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "football-results-api"
-version = "0.25.0"
+version = "0.26.0"
 description = "Cached multi-competition REST API for football match results"
 license = "MIT"
 license-files = ["LICENSE"]

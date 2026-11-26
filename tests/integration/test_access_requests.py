@@ -195,6 +195,31 @@ async def test_the_operator_approves_and_the_requester_claims_the_key_once(
     assert again["api_key"] is None
 
 
+async def test_the_requester_sees_an_expired_claim_and_a_purged_request_as_unknown(
+    api: httpx.AsyncClient,
+    repository: PostgresResultRepository,
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    late = (await api.post("/api/v1/access-requests", json=ACCESS_REQUEST)).json()
+    old = (
+        await api.post(
+            "/api/v1/access-requests", json=ACCESS_REQUEST | {"contact_email": "old@example.com"}
+        )
+    ).json()
+    await repository.approve_access_request(late["id"], "req-1-ada", "fr_secret")
+    await age(sessions, late["id"], decided_at=CLAIM_WINDOW)
+    await age(sessions, old["id"], created_at=UNAPPROVED_RETENTION)
+
+    expired = await api.get(late["status_url"], headers={"Claim-Secret": late["claim_secret"]})
+    assert expired.status_code == 200
+    assert (expired.json()["status"], expired.json()["api_key"]) == ("expired", None)
+
+    assert await repository.purge_access_requests() == (1, 0)
+    purged = await api.get(old["status_url"], headers={"Claim-Secret": old["claim_secret"]})
+    assert purged.status_code == 404
+    assert purged.json()["type"].endswith("/problems/unknown-access-request")
+
+
 async def test_the_operator_rejects_and_a_decided_request_gets_no_key(
     api: httpx.AsyncClient, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

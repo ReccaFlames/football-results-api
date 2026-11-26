@@ -566,6 +566,30 @@ def test_access_request_reaches_the_real_api_and_counts_visitors(
     assert 'id="client_type-error">Choose whether' in invalid.text
 
 
+def test_on_a_private_instance_the_shown_claim_secret_claims_the_approved_key_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A visitor without a key (ADR 0008, 0010); the confirmation page is the only copy of
+    # the claim secret.
+    repository = real_api(monkeypatch, anonymous_access=False)
+    client = landing()
+    assert "3. Liga" in client.get("/").text
+
+    page = client.post("/request-access", data=FORM).text
+    [stored] = repository.access_requests.values()
+    shown = re.search(r'<code class="secret">([^<]+)</code>', page)
+    assert shown is not None
+    api = TestClient(main_module.app)
+    status_url = f"/api/v1/access-requests/{stored.id}"
+    secret = {"Claim-Secret": shown.group(1)}
+
+    assert api.get(status_url, headers=secret).json()["status"] == "pending"
+    repository.approve_access_request(stored.id, "req-1-ada", "frk_issued")
+    assert api.get(status_url, headers=secret).json()["api_key"] == "frk_issued"
+    again = api.get(status_url, headers=secret).json()
+    assert (again["status"], again["api_key"]) == ("claimed", None)
+
+
 def test_demo_mode_is_read_from_the_real_api(monkeypatch: pytest.MonkeyPatch) -> None:
     real_api(monkeypatch)
     assert "<form" in landing().get("/").text

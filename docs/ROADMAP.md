@@ -109,8 +109,10 @@ How to use this list:
   reflects the change.
 - If scope changes, edit this list in the same PR.
 
-**Next up: item 21 (landing page and access requests).** It blocks the server push; everything
-else for the push is ready. Work on it before any other unchecked item, then remove this note.
+**Next up: item 15 (MCP Registry), through the server push.** Its only open sub-task is
+published from the release tag after the first deployment ([DEPLOYMENT.md](DEPLOYMENT.md);
+operator steps, no code blockers). The next unchecked code items are 17d (a further primary
+provider; name the competition first) and 20.
 
 ### Phase 0: Foundations
 
@@ -453,7 +455,7 @@ the maintainer runs `scripts/publish-wizard.sh`.
         time, 3 runs each, a task passes at 2 of 3; manual checklist for claude.ai and ChatGPT
   - [x] 19f. Docs (README, AGENTS.md, DEMO.md); version 0.25.0. Tag 1.0.0 at the real publish
         (it declares the public contract stable)
-- [ ] **21. Whistleprint landing page and access requests** (decided 2026-11-26, do before the
+- [x] **21. Whistleprint landing page and access requests** (decided 2026-11-26, do before the
       server push; [ADR 0010](adr/0010-access-requests-are-owned-by-the-api-and-never-auto-approved.md),
       glossary: *Landing page*, *Access request*)
   - [x] 21a. API: `access_request` table (Alembic, `database-migration` skill); public operations
@@ -557,9 +559,12 @@ the maintainer runs `scripts/publish-wizard.sh`.
         bullet now names both windows (one minute; one hour for access requests), and the
         limiter drops ended windows so that holds. A landing page bullet: no cookies, no
         storage, its access logs show the proxy's address, and it forwards the visitor's IP
-  - [ ] 21h. Tests (API, CLI, landing app with a fake API; no network), docs (README, AGENTS.md
+  - [x] 21h. Tests (API, CLI, landing app with a fake API; no network), docs (README, AGENTS.md
         layout table, ADR 0010), bump version in `pyproject.toml`, `cli/pyproject.toml`,
-        `web/pyproject.toml`, `server.json`, `uv lock`
+        `web/pyproject.toml`, `server.json`, `uv lock`. The audit added two cases: expiry and
+        purge as the requester sees them through the API (PostgreSQL), and the claim secret
+        shown by the landing page claiming the key on a private instance; ADR 0010's
+        Consequences amended with what was built; version 0.26.0
 - [ ] **20. OAuth for chat clients on private instances**: claude.ai and ChatGPT connectors cannot
       send `X-API-Key`, so a private instance needs a production authorization server (ADR 0006)
       before they can connect. Until then, chat clients are supported on the demo only.
