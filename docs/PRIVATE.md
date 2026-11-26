@@ -7,8 +7,11 @@ channel. Use it when your sources allow sharing data with named people but not w
 for a public deployment, see the [demo instance](DEMO.md).
 
 ```text
-invited client ──HTTPS + X-API-Key──▶ Caddy :443 ──▶ API 127.0.0.1:8000 (one worker)
-                                                     scheduler, PostgreSQL
+invited client ──HTTPS + X-API-Key──┐               ┌─ /, /request-access, ───▶ landing page 127.0.0.1:8001
+visitor ──HTTPS, no key─────────────┴─▶ Caddy :443 ─┤  /static/*, /favicon.ico  │ public operations only
+                                                    │                           ▼
+                                                    └─ everything else ───────▶ API 127.0.0.1:8000 (one worker)
+                                                                                scheduler, PostgreSQL
 ```
 
 ## What changes with `FOOTBALL_RESULTS_ANONYMOUS_ACCESS=false`
@@ -20,6 +23,9 @@ invited client ──HTTPS + X-API-Key──▶ Caddy :443 ──▶ API 127.0.0
 - These stay public, so people and agents can learn how to ask for access: `/health`,
   `/llms.txt`, `/llms-full.txt`, `/agents`, `/agents.md`, `/problems/*`, `/skills/...`,
   `/openapi.json`, `/docs`, and the OAuth metadata. The agent docs say that a key is required.
+- The landing page (`/`, the `web` service) stays public too, and has no key of its own: it
+  calls only `list_competitions` (the competition list) and `create_access_request` (its form),
+  and links to the public doc pages.
 - Every `401` counts against the caller's IP read quota, so guessing keys is slow.
 - Cacheable reads send `Cache-Control: private, ...` (`ETag` and `304` still work), so a shared
   cache never serves keyed data to someone without a key.
@@ -44,13 +50,20 @@ Follow the [Ubuntu deployment](../README.md#ubuntu-deployment) steps, then set i
 
 ```bash
 API_BIND_ADDRESS=127.0.0.1
+WEB_BIND_ADDRESS=127.0.0.1
 FOOTBALL_RESULTS_ANONYMOUS_ACCESS=false
 FOOTBALL_RESULTS_API_KEYS=
 FOOTBALL_RESULTS_API_KEYS_FILE=/app/secrets/api-keys.yaml
 FOOTBALL_RESULTS_PUBLIC_BASE_URL=https://football.example.com
-# The Docker bridge: Caddy on the host connects from it.
+# Docker's bridge networks: Caddy on the host (via the Compose gateway) and the landing app.
 FOOTBALL_RESULTS_TRUSTED_PROXIES=172.16.0.0/12
 ```
+
+`172.16.0.0/12` lets the API count requests per visitor, both for direct API calls through Caddy
+and for form submissions through the landing app; without it, all form submissions share one
+limit of 3 accepted access requests per hour. See
+[Client addresses and trusted proxies](DEPLOYMENT.md#client-addresses-and-trusted-proxies) for
+the chain and how to check the Docker subnet.
 
 Run the API with **one worker** (the image default). Quotas and the reloaded keys are kept in
 the process's memory, so more workers would multiply every quota.
@@ -70,8 +83,25 @@ automatically ([Automatic HTTPS](https://caddyserver.com/docs/automatic-https)).
 
 ```caddyfile
 football.example.com {
-	reverse_proxy 127.0.0.1:8000
+	# The landing page; everything else goes to the API (it has no / route).
+	@landing path / /request-access /static/* /favicon.ico
+	handle @landing {
+		reverse_proxy 127.0.0.1:8001
+	}
+	handle {
+		reverse_proxy 127.0.0.1:8000
+	}
 }
+```
+
+Reload with `sudo systemctl reload caddy`. `reverse_proxy` sets `X-Forwarded-For` to the
+visitor's address ([reverse_proxy defaults](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy#defaults));
+the landing app appends Caddy's address before it calls the API. Check from outside:
+
+```bash
+curl -s https://football.example.com/ | grep -c 'action="request-access"'   # 1: the form
+curl -s -o /dev/null -w '%{http_code}\n' https://football.example.com/api/v1/matches   # 401
+curl -s https://football.example.com/llms.txt | head -20                     # key required
 ```
 
 Keys travel in a header, so never serve a private instance over plain HTTP. If you put a CDN in
@@ -107,7 +137,20 @@ uv run python -m app.config keys --file secrets/api-keys.yaml list
 ## 4. Access requests
 
 People and agents ask for a key with `create_access_request` ([ADR 0010](adr/0010-access-requests-are-owned-by-the-api-and-never-auto-approved.md));
-they get a request ID and a one-time claim secret. A request never grants access by itself:
+they get a request ID and a one-time claim secret. To invite someone, send them the instance URL:
+
+- **People** fill in the form on the landing page (`https://football.example.com/`). The
+  confirmation page shows the request ID and the claim secret once (`Cache-Control: no-store`)
+  and explains how to claim the key. A lost claim secret cannot be recovered; they send a new
+  request once the old one is decided.
+- **Agents and scripts** call `create_access_request` directly (`/llms.txt` explains it), or use
+  `football-results create-access-request`.
+- Either way, they check the status and claim the key with `get_access_request`:
+  `FOOTBALL_RESULTS_CLAIM_SECRET=<claim secret> football-results get-access-request <id>` (with
+  `FOOTBALL_RESULTS_URL` set to the instance), or `GET /api/v1/access-requests/<id>` with the
+  header `Claim-Secret: <claim secret>`.
+
+A request never grants access by itself:
 
 1. You get a Telegram message with the request ID, name, client type, intended use, and
    competitions (see [Settings](#1-settings); without Telegram, watch the API log or the

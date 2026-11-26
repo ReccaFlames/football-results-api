@@ -529,7 +529,7 @@ the maintainer runs `scripts/publish-wizard.sh`.
           to `app/competitions.py`, the agent docs render from it). The footer shows each
           source once with its competitions (the only external links: source and licence) and
           links to `privacy` for the operator contact instead of duplicating it
-  - [ ] 21f. Deployment: own Docker image and Compose service; Caddy routes `/`,
+  - [x] 21f. Deployment: own Docker image and Compose service; Caddy routes `/`,
         `/request-access`, `/static/*`, `/favicon.ico` to the landing app and everything else to
         the API (the API keeps no `/` route); `docs/DEPLOYMENT.md`, `docs/PRIVATE.md`,
         `docs/DEMO.md`. Decided 2026-11-26: Caddy stays on the host; `172.16.0.0/12` stays the
@@ -542,11 +542,13 @@ the maintainer runs `scripts/publish-wizard.sh`.
           (`FOOTBALL_RESULTS_WEB_API_URL=http://api:8000`, `WEB_BIND_ADDRESS`/`WEB_PORT`,
           default `127.0.0.1:8001`; the demo override pins `127.0.0.1` and journald); tests
           with `ComposeLoader`; README, AGENTS.md, `.env.example`
-    - [ ] 21f-2. Caddy and guides: Caddyfile path routes to `127.0.0.1:8001` and
+    - [x] 21f-2. Caddy and guides: Caddyfile path routes to `127.0.0.1:8001` and
           `127.0.0.1:8000`; `FOOTBALL_RESULTS_TRUSTED_PROXIES` explained for Caddy → landing →
           API; `docs/DEPLOYMENT.md` (new service, checklist), `docs/PRIVATE.md` (landing page
           stays public, access request flow for invited users), `docs/DEMO.md` ("no key
-          needed")
+          needed"). Both Caddyfiles pass `caddy validate` (Caddy 2.11, `caddy:2` image) and a
+          routing check with stand-in upstreams; the landing page sends no `Cache-Control`, so
+          the demo's Cloudflare cache rule passes it to the origin
   - [ ] 21g. `/privacy`: access request data (name, email, use, message), Telegram as a
         processor, 30-day / claim-window retention (`privacy_blocks` in `app/agent_docs.py`)
   - [ ] 21h. Tests (API, CLI, landing app with a fake API; no network), docs (README, AGENTS.md

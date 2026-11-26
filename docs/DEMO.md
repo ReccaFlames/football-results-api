@@ -8,8 +8,13 @@ for caching and flood protection. Everything here is free; running a public inst
 operator's decision and responsibility.
 
 ```text
-client ──HTTPS──▶ Cloudflare (cache, IP rate limit) ──HTTPS──▶ Caddy :443 ──▶ API 127.0.0.1:8000
-                                                                             scheduler, PostgreSQL
+client ──HTTPS──▶ Cloudflare (cache, IP rate limit) ──HTTPS──▶ Caddy :443
+                                                                 │
+   ┌─────────────────────────────────────────────────────────────┤
+   │ /, /request-access, /static/*, /favicon.ico                 │ everything else
+   ▼                                                             ▼
+landing page 127.0.0.1:8001 ─ /llms.txt, list_competitions ──▶ API 127.0.0.1:8000
+                                                               scheduler, PostgreSQL
 ```
 
 What the repository provides:
@@ -24,6 +29,11 @@ In demo mode, writes, jobs, admin operations, and `/metrics` return `503` `write
 `/llms.txt` and `/agents` show a demo notice: read-only, no SLA, the anonymous read quota, and
 the OpenLigaDB attribution. `/mcp` works anonymously, without OAuth. `client` keys from the keys
 file stay allowed (for example, a higher quota for a partner).
+
+The landing page (`/`, the `web` service) detects the demo from that notice in `/llms.txt` and
+shows "No key needed" instead of the access request form; `create_access_request` is a write, so
+the API would refuse it anyway. Services and routes are summarised in
+[DEPLOYMENT.md](DEPLOYMENT.md#services-and-routes).
 
 ## 1. Oracle Cloud VM
 
@@ -73,11 +83,13 @@ Set these in `.env` (leave everything else at its default):
 POSTGRES_PASSWORD=<output of: openssl rand -hex 32>
 # Only Caddy on the same host may reach the API: Docker-published ports bypass the host firewall
 # (https://docs.docker.com/engine/network/packet-filtering-firewalls/). compose.demo.yaml binds
-# the API to 127.0.0.1 regardless; this keeps the base file consistent.
+# the API and the landing page to 127.0.0.1 regardless; this keeps the base file consistent.
 API_BIND_ADDRESS=127.0.0.1
+WEB_BIND_ADDRESS=127.0.0.1
 FOOTBALL_RESULTS_PUBLIC_BASE_URL=https://demo.example.com
 FOOTBALL_RESULTS_USER_AGENT="FootballResultsAPI demo (contact: you@example.com)"
-# The Docker bridge (Caddy's connections arrive from it) plus Cloudflare's ranges; see below.
+# Docker's bridge networks (Caddy via the Compose gateway, and the landing app) plus
+# Cloudflare's ranges; see below.
 FOOTBALL_RESULTS_TRUSTED_PROXIES=172.16.0.0/12,<Cloudflare ranges>
 # Leave admin keys empty; compose.demo.yaml forces FOOTBALL_RESULTS_API_KEYS empty anyway.
 FOOTBALL_RESULTS_API_KEYS=
@@ -115,9 +127,12 @@ echo "FOOTBALL_RESULTS_TRUSTED_PROXIES=172.16.0.0/12,$ranges"
 ```
 
 The API takes the client address from `X-Forwarded-For` only when the connecting peer is
-trusted, and then uses the rightmost address that is not a trusted proxy. With Caddy (the Docker
-bridge) and Cloudflare both trusted, that is the visitor's address, so the per-IP quota applies
-to visitors, not to Cloudflare. Cloudflare changes its ranges rarely and announces additions
+trusted, and then uses the rightmost address that is not a trusted proxy. The chain is visitor →
+Cloudflare → Caddy → API, or → Caddy → landing app → API for the landing page; Caddy and the
+landing app both reach the API from `172.16.0.0/12`
+([Client addresses and trusted proxies](DEPLOYMENT.md#client-addresses-and-trusted-proxies)).
+With them and Cloudflare trusted, that is the visitor's address, so the per-IP quota applies to
+visitors, not to Cloudflare. Cloudflare changes its ranges rarely and announces additions
 first (same page); repeat this step when it does.
 
 Validate and start:
@@ -127,10 +142,12 @@ docker compose -f compose.yaml -f compose.demo.yaml run --rm --no-deps --entrypo
   "python -m app.config check" api
 docker compose -f compose.yaml -f compose.demo.yaml up -d --build
 curl -s http://127.0.0.1:8000/health
+curl -s http://127.0.0.1:8001/ | grep "No key needed"   # the landing page found the demo notice
 ```
 
 `config check` must print `Demo mode: read-only (no admin keys), providers limited to
-openligadb`. Change the anonymous quota with `DEMO_READ_PER_MINUTE` in `.env` (default 30). Do not
+openligadb`. If the landing page was requested while the API was still starting, it shows the
+form until it reads `/llms.txt` again (30 seconds after a failure); repeat the last check. Change the anonymous quota with `DEMO_READ_PER_MINUTE` in `.env` (default 30). Do not
 start the `observability` profile: Prometheus needs an admin key, which the demo does not have.
 
 The scheduler refreshes the current season automatically. Older configured seasons need an admin
@@ -160,9 +177,19 @@ notifications for origin certificates (same page).
 
 demo.example.com {
 	tls /etc/caddy/origin.pem /etc/caddy/origin-key.pem
-	reverse_proxy 127.0.0.1:8000
+	# The landing page; everything else goes to the API (it has no / route).
+	@landing path / /request-access /static/* /favicon.ico
+	handle @landing {
+		reverse_proxy 127.0.0.1:8001
+	}
+	handle {
+		reverse_proxy 127.0.0.1:8000
+	}
 }
 ```
+
+The named matcher sends the landing page's paths to the `web` service and everything else to the
+API ([handle](https://caddyserver.com/docs/caddyfile/directives/handle)).
 
 By default `reverse_proxy` ignores incoming `X-Forwarded-*` values and sets them itself; with
 `trusted_proxies`, requests from Cloudflare keep Cloudflare's `X-Forwarded-For` and Caddy appends
@@ -192,6 +219,11 @@ the Cloudflare address ([reverse_proxy defaults](https://caddyserver.com/docs/ca
    not cache; `/mcp` uses `POST`, which Cloudflare never caches (same page). A cached response
    carries the `RateLimit` headers of the request that filled the cache, and cache hits do not
    count against the API's per-IP quota.
+
+   The landing page (`/`, `/static/*`, `/favicon.ico`) sends no `Cache-Control`, so this rule
+   passes it to the origin (browsers still revalidate the static files with `ETag`). That is
+   cheap: the landing app reads the competitions and the demo notice from the API at most every
+   5 minutes, and the rate limiting rule below covers it.
 4. **Rate limiting rule** (Security rules > Create rule > Rate limiting rules;
    [dashboard steps](https://developers.cloudflare.com/waf/rate-limiting-rules/create-zone-dashboard/)).
    The free plan allows one rule that matches on the URI path, counts per IP, and uses a
@@ -221,6 +253,7 @@ the Cloudflare address ([reverse_proxy defaults](https://caddyserver.com/docs/ca
 Check from outside:
 
 ```bash
+curl -s https://demo.example.com/ | grep "No key needed"       # the landing page, demo detected
 curl -s https://demo.example.com/llms.txt | head -20          # demo notice near the top
 curl -s https://demo.example.com/robots.txt                   # Allow: / and the llms.txt pointer
 curl -s https://demo.example.com/privacy.md | head -5         # your operator contact

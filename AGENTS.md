@@ -40,6 +40,7 @@ API.
 | `config/demo-competitions.yaml` | Demo instance competitions: only redistributable providers (the 3. Liga) |
 | `compose.demo.yaml` | Compose override for the public read-only demo (ADR 0007); guide in `docs/DEMO.md` |
 | `docs/PRIVATE.md` | Private instance guide (ADR 0008): invited users, expiring keys, `keys` commands |
+| `docs/DEPLOYMENT.md` | First-deployment checklist; services, Caddy path routes, and the trusted-proxy chain |
 | `app/repository.py` | `PostgresResultRepository`: seeding, queries, atomic season replace, scheduler claims |
 | `app/models.py` | Pydantic API/domain models (`Competition`, `SeasonSource`, `ScrapedMatch`, `MatchResult`, ...) |
 | `app/db_models.py` | SQLAlchemy ORM tables |
@@ -206,7 +207,12 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
   --no-editable`) and runs Uvicorn with `--no-proxy-headers`, so it appends the real peer (the
   reverse proxy) to `X-Forwarded-For`. The Compose `web` service is bound like the API
   (`WEB_BIND_ADDRESS`, `127.0.0.1`; `ports: !override` in `compose.demo.yaml`); tests read both
-  Compose files with `ComposeLoader`.
+  Compose files with `ComposeLoader`. Caddy on the host routes `/`, `/request-access`,
+  `/static/*`, and `/favicon.ico` to the landing app and everything else to the API (Caddyfiles
+  in `docs/DEMO.md` and `docs/PRIVATE.md`, overview in `docs/DEPLOYMENT.md`): the API must keep
+  no route on those paths, and a new landing path needs the matcher updated in both guides.
+  `FOOTBALL_RESULTS_TRUSTED_PROXIES=172.16.0.0/12` covers Caddy (the Compose gateway) and the
+  landing container.
 - Observability: `/metrics` (not an OpenAPI operation, rate-limit exempt) and the `Admin`
   operations need an API key; `/metrics` also accepts `Authorization: Bearer`. Scheduler and
   season metrics are computed from PostgreSQL at scrape time with the rules in

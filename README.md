@@ -293,8 +293,8 @@ uv run uvicorn football_results_web.main:app --reload --port 8001
 `FOOTBALL_RESULTS_WEB_API_URL` sets the API base URL it calls (default `http://localhost:8000`).
 The page uses relative links because it is meant to be served on the same origin as the API, so
 its documentation links work only behind that shared origin (a reverse proxy that routes `/`,
-`/request-access`, `/static/*`, and `/favicon.ico` to it; planned in roadmap item 21f-2), not on
-port 8001.
+`/request-access`, `/static/*`, and `/favicon.ico` to it and everything else to the API; see
+[Ubuntu deployment](#ubuntu-deployment)), not on port 8001.
 
 The form posts to the landing app's `/request-access`, which calls `create_access_request` and
 shows the request ID and claim secret once (`Cache-Control: no-store`). API problems (validation,
@@ -1031,7 +1031,8 @@ feature is enabled, which is why the realm uses a scope mapper.
 
 ## Ubuntu deployment
 
-The Compose deployment runs PostgreSQL and the API on the same Ubuntu machine.
+The Compose deployment runs PostgreSQL, the API, the scheduler, and the landing page on the same
+Ubuntu machine ([services and routes](docs/DEPLOYMENT.md#services-and-routes)).
 Before the first deployment, work through the checklist in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 1. Install Docker Engine and the Docker Compose plugin.
@@ -1063,10 +1064,16 @@ volume. Port 5432 remains bound to localhost.
 API_BIND_ADDRESS and WEB_BIND_ADDRESS (the landing page) default to 127.0.0.1: Docker-published
 ports bypass the Ubuntu firewall, so set
 `0.0.0.0` only on a trusted network. Put Caddy or nginx in front, and expose only the reverse proxy's
-HTTP/HTTPS ports through the Ubuntu firewall. Also set `FOOTBALL_RESULTS_TRUSTED_PROXIES` to the address the
-proxy connects from as seen by the API container (for a proxy on the host, the Docker network
-gateway, for example `172.16.0.0/12`), and make the proxy set `X-Forwarded-For`. Otherwise every
-client shares one rate-limit quota. Set `FOOTBALL_RESULTS_PUBLIC_BASE_URL` to the public HTTPS URL
+HTTP/HTTPS ports through the Ubuntu firewall. The proxy serves both apps on one origin: `/`,
+`/request-access`, `/static/*`, and `/favicon.ico` go to the landing page (`127.0.0.1:8001`),
+everything else to the API (`127.0.0.1:8000`), which has no `/` route; the Caddyfiles are in
+[docs/DEMO.md](docs/DEMO.md#3-caddy) and [docs/PRIVATE.md](docs/PRIVATE.md#2-https-with-caddy).
+Also set `FOOTBALL_RESULTS_TRUSTED_PROXIES` to the addresses the API container sees the proxy and
+the landing app connect from (for a proxy on the host, the Docker network gateway; the landing
+container is on the same network: `172.16.0.0/12` covers both), and make the proxy set
+`X-Forwarded-For`. Otherwise every client shares one rate-limit quota, and all landing-page
+form submissions share one access-request limit
+([details](docs/DEPLOYMENT.md#client-addresses-and-trusted-proxies)). Set `FOOTBALL_RESULTS_PUBLIC_BASE_URL` to the public HTTPS URL
 so that `/llms.txt` and `/agents` show the right base URL and `/mcp` accepts its host.
 
 ### Private instance
