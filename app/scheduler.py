@@ -10,7 +10,13 @@ from app.config import CompetitionFile, ConfigFileWatcher, check_demo_mode, sett
 from app.database import session_factory
 from app.logs import configure_logging
 from app.models import Competition, SeasonSource
-from app.repository import PostgresResultRepository, RefreshTarget, ScheduledRefresh
+from app.repository import (
+    CLAIM_WINDOW,
+    UNAPPROVED_RETENTION,
+    PostgresResultRepository,
+    RefreshTarget,
+    ScheduledRefresh,
+)
 from app.scheduling import SchedulePolicy
 from app.scraper import (
     OPENLIGADB_MIN_REQUEST_INTERVAL_SECONDS,
@@ -23,6 +29,9 @@ from app.scraper import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Retention deletes by age in days, so an hourly pass is precise enough and cheap.
+ACCESS_REQUEST_PURGE_INTERVAL = timedelta(hours=1)
 
 
 def _create_scraper(config: CompetitionFile) -> ScraperRegistry:
@@ -266,6 +275,30 @@ async def recover_abandoned_runs(repository: PostgresResultRepository) -> None:
         )
 
 
+async def purge_access_requests(
+    repository: PostgresResultRepository, last_purged_at: datetime | None, now: datetime
+) -> datetime | None:
+    """Apply the access-request retention (ADR 0010) at most every `ACCESS_REQUEST_PURGE_INTERVAL`;
+    returns when it last succeeded. Logs only counts, never personal data."""
+    if last_purged_at is not None and now - last_purged_at < ACCESS_REQUEST_PURGE_INTERVAL:
+        return last_purged_at
+    try:
+        deleted, expired = await repository.purge_access_requests()
+    except Exception:
+        logger.exception("access request purge failed; will retry")
+        return last_purged_at
+    if deleted or expired:
+        logger.info(
+            "access requests: deleted %d not approved within %d days, expired %d keys not "
+            "claimed within %d days",
+            deleted,
+            UNAPPROVED_RETENTION.days,
+            expired,
+            CLAIM_WINDOW.days,
+        )
+    return now
+
+
 def describe_idle(next_refresh: ScheduledRefresh | None, now: datetime) -> str:
     if next_refresh is None:
         return "idle; no current season has automatic refresh enabled"
@@ -307,6 +340,7 @@ async def run() -> None:
         settings.scheduler_worker_timeout_seconds,
     )
     last_idle_message = None
+    last_purged_at: datetime | None = None
     while True:
         try:
             config, changed = config_watcher.load_if_changed()
@@ -321,6 +355,9 @@ async def run() -> None:
                 scraper = _create_scraper(config)
                 schedules = config.schedules()
             await recover_abandoned_runs(repository)
+            last_purged_at = await purge_access_requests(
+                repository, last_purged_at, datetime.now(UTC)
+            )
             for competition in await repository.claim_season_checks(settings.scheduler_claim_limit):
                 try:
                     await check_seasons(repository, scraper, config, competition)

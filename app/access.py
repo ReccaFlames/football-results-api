@@ -58,7 +58,9 @@ RELOAD_INTERVAL_SECONDS = 5.0
 # Validation context of the `keys` commands: they may leave older entries without expiry.
 ALLOW_MISSING_EXPIRY = "allow_missing_expiry"
 
-KeyName = Annotated[str, Field(pattern=r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")]
+KEY_NAME_PATTERN = r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"
+MAX_KEY_NAME_LENGTH = 64
+KeyName = Annotated[str, Field(pattern=KEY_NAME_PATTERN)]
 KeyHash = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
 Subject = Annotated[str, Field(min_length=1, max_length=255)]
 

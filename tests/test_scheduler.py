@@ -268,3 +268,45 @@ def test_scheduler_enforces_demo_mode_before_seeding(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(scheduler_module.settings, "api_keys", "env-admin-key")
     with pytest.raises(ValueError, match="FOOTBALL_RESULTS_API_KEYS is set"):
         scheduler_module.check_demo(load_config(root / "config/demo-competitions.yaml"))
+
+
+class FakePurgeRepository:
+    def __init__(self, *results: tuple[int, int] | Exception) -> None:
+        self.results = list(results)
+        self.calls = 0
+
+    async def purge_access_requests(self) -> tuple[int, int]:
+        self.calls += 1
+        result = self.results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+async def test_access_requests_are_purged_hourly_and_retried_after_a_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repository = FakePurgeRepository((2, 1), (0, 0), RuntimeError("database down"), (0, 3))
+    start = datetime(2026, 11, 26, 12, tzinfo=UTC)
+    interval = scheduler_module.ACCESS_REQUEST_PURGE_INTERVAL
+
+    caplog.set_level("INFO", logger="app.scheduler")
+    purged = await scheduler_module.purge_access_requests(repository, None, start)
+    assert purged == start and repository.calls == 1
+    assert "deleted 2 not approved within 30 days, expired 1 keys" in caplog.text
+
+    soon = start + interval - timedelta(seconds=1)
+    assert await scheduler_module.purge_access_requests(repository, purged, soon) == start
+    assert repository.calls == 1
+
+    caplog.clear()
+    later = start + interval
+    assert await scheduler_module.purge_access_requests(repository, purged, later) == later
+    assert repository.calls == 2 and "access requests" not in caplog.text
+
+    failed_at = later + interval
+    assert await scheduler_module.purge_access_requests(repository, later, failed_at) == later
+    assert "access request purge failed" in caplog.text
+    retry = failed_at + timedelta(minutes=1)
+    assert await scheduler_module.purge_access_requests(repository, later, retry) == retry
+    assert repository.calls == 4 and "expired 3 keys" in caplog.text

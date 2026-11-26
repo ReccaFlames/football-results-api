@@ -486,11 +486,13 @@ the maintainer runs `scripts/publish-wizard.sh`.
         the `201`); counted in `football_results_access_requests_total{outcome}`
         (`notified`/`not_configured`/`failed`); `config check` requires both or neither;
         Compose falls back to Grafana's `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`
-  - [ ] 21c. Server command `python -m app.config access-requests approve <id>` (role `client`
+  - [x] 21c. Server command `python -m app.config access-requests approve <id>` (role `client`
         only, default quotas, 365-day expiry, name `req-<id>-<slug of name>`, flags override)
         using the existing keys-file helpers; plus `list` and `reject`. The key must be claimed
         within 14 days; after claim or claim expiry the plaintext key and the request's personal
         data are deleted. Unapproved (pending/rejected) requests are deleted after 30 days
+        (the scheduler purges hourly). Keys file first, database second: a failed approval
+        revokes the new entry. Refused in demo mode. `/privacy` retention text stays for 21g
   - [ ] 21d. CLI commands `create-access-request` and `get-access-request` (and, because every
         operation needs a command, `list-access-requests` and `reject-access-request`); one line
         in the consumer skill pointing to `/llms.txt` for requesting access (no instance facts);

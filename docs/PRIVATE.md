@@ -104,7 +104,49 @@ uv run python -m app.config keys --file secrets/api-keys.yaml list
 - The recipient sets `FOOTBALL_RESULTS_URL` and `FOOTBALL_RESULTS_API_KEY` for the CLI, or sends
   `X-API-Key` directly.
 
-## 4. Expiry, extension, rotation, and revocation
+## 4. Access requests
+
+People and agents ask for a key with `create_access_request` ([ADR 0010](adr/0010-access-requests-are-owned-by-the-api-and-never-auto-approved.md));
+they get a request ID and a one-time claim secret. A request never grants access by itself:
+
+1. You get a Telegram message with the request ID, name, client type, intended use, and
+   competitions (see [Settings](#1-settings); without Telegram, watch the API log or the
+   `football_results_access_requests_total` metric).
+2. Review the requests, including the contact email, on the host:
+
+   ```bash
+   uv run python -m app.config access-requests list --status pending
+   ```
+
+3. Approve or reject one:
+
+   ```bash
+   # A client key for 365 days named req-<id>-<slug of the name>, default quotas
+   uv run python -m app.config access-requests approve 7 --file secrets/api-keys.yaml
+   # Overrides: --name, --days (1-365), --read-per-minute
+   uv run python -m app.config access-requests approve 7 --file secrets/api-keys.yaml \
+     --name ada-fan-site --days 90 --read-per-minute 120
+   uv run python -m app.config access-requests reject 8
+   ```
+
+4. The requester polls `get_access_request` with the claim secret and gets the key exactly once,
+   within 14 days of the approval. You never see or send the key: `approve` prints only the key
+   name, its expiry, and the claim deadline.
+
+- `approve` writes the keys file first and the database second; if the approval fails (for
+  example, the request was rejected meanwhile), it removes the new entry again. Only a pending
+  request can be approved or rejected; anything else exits with code 2.
+- Retention: the scheduler erases the key and the personal data of approved requests that are
+  not claimed within 14 days (claiming erases them at once), and deletes pending and rejected
+  requests 30 days after they were created. An unclaimed key stays in the keys file until you
+  revoke it (`keys revoke --name req-...`); nobody else knows it.
+- The commands use `FOOTBALL_RESULTS_DATABASE_URL`. On the host, point it at the PostgreSQL port
+  that Compose publishes on `127.0.0.1` (`POSTGRES_PORT`, default 5432), for example
+  `postgresql+psycopg_async://football:<password>@localhost:5432/football`. `list` and `reject`
+  also run in the API container (`docker compose exec api python -m app.config access-requests
+  list`); approve from the host, because the container mounts the keys file read-only.
+
+## 5. Expiry, extension, rotation, and revocation
 
 Every key has `issued_at` and `expires_at`. An expired key gets `401`, just like a wrong key.
 
@@ -127,14 +169,14 @@ uv run python -m app.config keys --file secrets/api-keys.yaml revoke --name alic
 - If the file becomes invalid while the API runs, the API logs an error and keeps the last valid
   keys. Each reload logs the names added, removed, or changed, never keys or hashes.
 
-## 5. Prometheus
+## 6. Prometheus
 
 With the `observability` profile, `PROMETHEUS_API_KEY` must be an admin key from the keys file
 (`issue --name prometheus --role admin --days 365`). Rotate it before it expires, as above: update `.env`
 and run `docker compose --profile observability up -d prometheus`. The expiry alert covers it
 too.
 
-## 6. Provider permissions
+## 7. Provider permissions
 
 A private instance does not change what your sources allow. Serve a provider's data to your
 invited people only if its terms or written permission cover them, and keep each key tied to a

@@ -211,6 +211,33 @@ keys:
   and have no `issued_at`/`expires_at` (the token issuer controls expiry).
 - To require a key for reads too, run a [private instance](#private-instance).
 
+#### Access requests
+
+People and agents ask for a key with `create_access_request` and poll `get_access_request` with
+the one-time claim secret ([ADR 0010](docs/adr/0010-access-requests-are-owned-by-the-api-and-never-auto-approved.md)).
+Nothing is approved automatically; the operator decides on the server (guide:
+[docs/PRIVATE.md](docs/PRIVATE.md#4-access-requests)):
+
+~~~bash
+uv run python -m app.config access-requests list [--status pending]   # ID, status, client, name, email, created, use
+uv run python -m app.config access-requests approve 7 --file secrets/api-keys.yaml
+uv run python -m app.config access-requests approve 7 --name ada-site --days 90 --read-per-minute 120
+uv run python -m app.config access-requests reject 8
+~~~
+
+- `approve` issues a `client` key (365 days, default quotas, name `req-<id>-<slug of the name>`;
+  `--name`, `--days`, and `--read-per-minute` override) into the keys file (`--file`, default
+  `FOOTBALL_RESULTS_API_KEYS_FILE`) and stores it for the claim. It prints the key name, expiry,
+  and claim deadline, never the key: the requester claims it exactly once, within 14 days.
+  If the database approval fails, the new keys-file entry is removed again.
+- Only pending requests can be approved or rejected; an unknown ID or a decided request exits
+  with code 2. The commands read `FOOTBALL_RESULTS_DATABASE_URL` and refuse to run in demo mode.
+- `list` is the operator's view and shows the contact email; nothing else prints or logs it.
+- Retention: the scheduler runs an hourly purge. It erases the key and personal data of approved
+  requests not claimed within 14 days (a claim erases them at once) and deletes pending and
+  rejected requests 30 days after they were created; it logs only counts. An unclaimed key stays
+  in the keys file until you revoke it.
+
 ### Run PostgreSQL in Docker and FastAPI locally
 
 This is the recommended development workflow because code reload is immediate:
@@ -1015,7 +1042,8 @@ A private instance serves only invited people
 - Every API operation except `get_health`, `list_competitions`, `create_access_request`, and
   `get_access_request` needs a valid, unexpired key (`401 unauthorized` with
   `WWW-Authenticate: ApiKey`), and so does `/mcp`. People and agents ask for a key with
-  `create_access_request` ([ADR 0010](docs/adr/0010-access-requests-are-owned-by-the-api-and-never-auto-approved.md)). Agent docs, `/problems/*`, the skill,
+  `create_access_request` ([ADR 0010](docs/adr/0010-access-requests-are-owned-by-the-api-and-never-auto-approved.md)); the operator approves or rejects with
+  [`python -m app.config access-requests`](#access-requests). Agent docs, `/problems/*`, the skill,
   `/openapi.json`, `/docs`, and OAuth metadata stay public, and the agent docs say a key is needed.
 - Every `401` counts against the IP read quota. Cacheable reads send `Cache-Control: private`.
 - The API and `config check` refuse to start with `FOOTBALL_RESULTS_API_KEYS`, without

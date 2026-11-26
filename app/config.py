@@ -1,13 +1,16 @@
 import argparse
+import asyncio
 import hashlib
 import re
 import sys
-from collections.abc import Sequence
+import unicodedata
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
 from ipaddress import IPv4Network, IPv6Network, ip_network
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, get_args
 from urllib.parse import urlsplit
 
 import yaml
@@ -22,11 +25,19 @@ from pydantic import (
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import ArgumentError
+from sqlalchemy.exc import ArgumentError, SQLAlchemyError
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app import access
 from app.competitions import provider_competition_code, source_from_url
-from app.models import Competition, SeasonSource
+from app.models import AccessRequestState, Competition, SeasonSource
+from app.repository import (
+    CLAIM_WINDOW,
+    UNAPPROVED_RETENTION,
+    PostgresResultRepository,
+    StoredAccessRequest,
+)
 from app.scheduling import (
     DURATION_PATTERN,
     SchedulePolicy,
@@ -772,7 +783,8 @@ class ConfigFileWatcher:
 
 def cli(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Validate the football competition config, or manage API keys."
+        description="Validate the football competition config, manage API keys, or decide "
+        "access requests."
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     check_parser = subparsers.add_parser(
@@ -787,11 +799,14 @@ def cli(argv: list[str] | None = None) -> int:
     hash_parser.add_argument("--role", choices=access.ROLES, default="client")
     hash_parser.add_argument("--days", type=int, default=access.DEFAULT_KEY_DAYS)
     _add_keys_parser(subparsers)
+    _add_access_requests_parser(subparsers)
     args = parser.parse_args(argv)
     if args.command == "hash-key":
         return _hash_key(parser, args.name, args.role, args.days)
     if args.command == "keys":
         return _keys_command(parser, args)
+    if args.command == "access-requests":
+        return _access_requests_command(parser, args)
     try:
         config = load_config(args.config_file)
     except (TypeError, ValueError) as error:
@@ -927,6 +942,12 @@ def _keys_command(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
     return 0
 
 
+def _print_table(rows: Sequence[tuple[str, ...]]) -> None:
+    widths = [max(len(row[column]) for row in rows) for column in range(len(rows[0]))]
+    for row in rows:
+        print("  ".join(value.ljust(width) for value, width in zip(row, widths)).rstrip())
+
+
 def _print_key_list(entries: Sequence[access.KeyEntry], now: datetime) -> None:
     rows = [("NAME", "ROLE", "KIND", "ISSUED", "EXPIRES", "STATUS")]
     for item in entries:
@@ -950,9 +971,235 @@ def _print_key_list(entries: Sequence[access.KeyEntry], now: datetime) -> None:
                 status,
             )
         )
-    widths = [max(len(row[column]) for row in rows) for column in range(len(rows[0]))]
-    for row in rows:
-        print("  ".join(value.ljust(width) for value, width in zip(row, widths)).rstrip())
+    _print_table(rows)
+
+
+# Access requests (ADR 0010): `python -m app.config access-requests ...`.
+
+ACCESS_REQUEST_KEY_DAYS = access.MAX_KEY_LIFETIME.days
+ACCESS_REQUEST_STATUSES: tuple[str, ...] = get_args(AccessRequestState)
+NAME_COLUMN_WIDTH = 30
+EMAIL_COLUMN_WIDTH = 40
+INTENDED_USE_COLUMN_WIDTH = 40
+# Letters that Unicode decomposition does not reduce to an ASCII letter.
+_ASCII_LETTERS = str.maketrans(
+    {"ł": "l", "Ł": "L", "đ": "d", "Đ": "D", "ø": "o", "Ø": "O", "ß": "ss", "æ": "ae", "œ": "oe"}
+)
+
+
+class AccessRequestCommandError(ValueError):
+    pass
+
+
+def access_request_key_name(request_id: int, name: str | None) -> str:
+    """`req-<id>-<slug of name>`, cut to a valid key name; `req-<id>` if no letter is left."""
+    prefix = f"req-{request_id}"
+    folded = unicodedata.normalize("NFKD", (name or "").translate(_ASCII_LETTERS))
+    ascii_name = folded.encode("ascii", "ignore").decode().lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", ascii_name).strip("-")
+    slug = slug[: access.MAX_KEY_NAME_LENGTH - len(prefix) - 1].rstrip("-")
+    return f"{prefix}-{slug}" if slug else prefix
+
+
+@asynccontextmanager
+async def access_request_repository() -> AsyncIterator[PostgresResultRepository]:
+    """A repository on a short-lived engine for one command (the config CLI is sync)."""
+    engine = create_async_engine(settings.database_url, poolclass=NullPool)
+    try:
+        yield PostgresResultRepository(async_sessionmaker(engine, expire_on_commit=False))
+    finally:
+        await engine.dispose()
+
+
+async def approve_access_request(
+    repository: PostgresResultRepository,
+    keys_file: Path,
+    request_id: int,
+    now: datetime,
+    *,
+    key_name: str | None = None,
+    days: int = ACCESS_REQUEST_KEY_DAYS,
+    read_per_minute: int | None = None,
+) -> tuple[StoredAccessRequest, access.KeyEntry]:
+    """Issue a client key for a pending request and store it for the requester's claim."""
+    stored = await repository.get_access_request(request_id)
+    if stored is None:
+        raise AccessRequestCommandError(f"no access request with ID {request_id}")
+    if stored.status != "pending":
+        raise AccessRequestCommandError(
+            f"access request {request_id} is {stored.status}; only a pending request can be "
+            "approved"
+        )
+    name = key_name or access_request_key_name(request_id, stored.name)
+    key, entry = access.issue_key(
+        keys_file, name, "client", days, now, read_per_minute=read_per_minute
+    )
+    # Keys file first, database second: once approved, the requester can claim the key, so it
+    # must already work. If the approval fails (the request was decided meanwhile, or the
+    # database is unreachable), the entry is removed again: no key stays that nobody can claim.
+    try:
+        approved = await repository.approve_access_request(request_id, name, key)
+        if approved is None:
+            raise AccessRequestCommandError(f"no access request with ID {request_id}")
+    except BaseException as error:
+        _remove_unclaimable_key(keys_file, name, error)
+        raise
+    return approved, entry
+
+
+def _remove_unclaimable_key(path: Path, name: str, error: BaseException) -> None:
+    try:
+        access.revoke_key(path, name)
+    except (OSError, ValueError) as revoke_error:
+        raise AccessRequestCommandError(
+            f"the approval failed ({_first_line(error)}), and the new entry {name!r} could not "
+            f"be removed ({revoke_error}); run `python -m app.config keys --file {path} revoke "
+            f"--name {name}`"
+        ) from error
+
+
+def _first_line(error: BaseException) -> str:
+    return (str(error).splitlines() or [type(error).__name__])[0]
+
+
+def _positive_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        number = 0
+    if number < 1:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}")
+    return number
+
+
+def _key_name(value: str) -> str:
+    if not re.fullmatch(access.KEY_NAME_PATTERN, value) or value in access.RESERVED_NAMES:
+        raise argparse.ArgumentTypeError(
+            f"invalid key name {value!r}: use 1-{access.MAX_KEY_NAME_LENGTH} characters "
+            "[a-z0-9-], starting and ending with a letter or digit, not a reserved name"
+        )
+    return value
+
+
+def _add_access_requests_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    parser = subparsers.add_parser(
+        "access-requests", help="list, approve, or reject access requests (ADR 0010)"
+    )
+    actions = parser.add_subparsers(dest="action", required=True)
+    listing = actions.add_parser(
+        "list", help="requests, newest first, with name and contact email (never keys)"
+    )
+    listing.add_argument("--status", choices=ACCESS_REQUEST_STATUSES)
+    approve = actions.add_parser(
+        "approve",
+        help="issue a client key; the requester claims it with the claim secret "
+        f"within {CLAIM_WINDOW.days} days",
+    )
+    approve.add_argument("request_id", metavar="ID", type=_positive_int, help="access request ID")
+    approve.add_argument(
+        "--file",
+        type=Path,
+        default=settings.api_keys_file,
+        help="API keys file (default: FOOTBALL_RESULTS_API_KEYS_FILE)",
+    )
+    approve.add_argument(
+        "--name", type=_key_name, help="key name (default: req-<id>-<slug of the name>)"
+    )
+    approve.add_argument(
+        "--days",
+        type=int,
+        default=ACCESS_REQUEST_KEY_DAYS,
+        help=f"days until the key expires (1-{access.MAX_KEY_LIFETIME.days})",
+    )
+    approve.add_argument(
+        "--read-per-minute",
+        type=_positive_int,
+        help="read quota (default: FOOTBALL_RESULTS_RATE_LIMIT_READ_PER_MINUTE)",
+    )
+    reject = actions.add_parser("reject", help="reject a pending request")
+    reject.add_argument("request_id", metavar="ID", type=_positive_int, help="access request ID")
+
+
+def _access_requests_command(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    if settings.demo_mode:
+        parser.error(
+            "FOOTBALL_RESULTS_DEMO_MODE is on; a demo instance takes no access requests "
+            "(writes are disabled, ADR 0007)"
+        )
+    if args.action == "approve":
+        if args.file is None:
+            parser.error("set --file or FOOTBALL_RESULTS_API_KEYS_FILE")
+        if not 1 <= args.days <= access.MAX_KEY_LIFETIME.days:
+            parser.error(f"--days must be between 1 and {access.MAX_KEY_LIFETIME.days}")
+    try:
+        asyncio.run(_run_access_requests_command(args, datetime.now(UTC)))
+    except ValueError as error:
+        parser.error(str(error))
+    except (OSError, SQLAlchemyError) as error:
+        parser.error(
+            f"cannot use the database (FOOTBALL_RESULTS_DATABASE_URL): {_first_line(error)}"
+        )
+    return 0
+
+
+async def _run_access_requests_command(args: argparse.Namespace, now: datetime) -> None:
+    async with access_request_repository() as repository:
+        if args.action == "list":
+            statuses = () if args.status is None else (args.status,)
+            _print_access_requests(await repository.list_access_requests(statuses))
+        elif args.action == "approve":
+            approved, entry = await approve_access_request(
+                repository,
+                args.file,
+                args.request_id,
+                now,
+                key_name=args.name,
+                days=args.days,
+                read_per_minute=args.read_per_minute,
+            )
+            assert entry.expires_at is not None and approved.claim_expires_at is not None
+            # Never the key: the requester claims it with the claim secret.
+            print(
+                f"Approved access request {approved.id}: client key {entry.name!r}, valid until "
+                f"{access.format_time(entry.expires_at)}. The requester claims it with the claim "
+                f"secret (get_access_request) by {access.format_time(approved.claim_expires_at)}; "
+                "if it is not claimed by then, revoke the entry"
+            )
+        else:
+            rejected = await repository.reject_access_request(args.request_id)
+            if rejected is None:
+                raise AccessRequestCommandError(f"no access request with ID {args.request_id}")
+            deleted_at = rejected.created_at + UNAPPROVED_RETENTION
+            print(
+                f"Rejected access request {rejected.id}; it is deleted at "
+                f"{access.format_time(deleted_at)} ({UNAPPROVED_RETENTION.days} days after it was "
+                "created)"
+            )
+
+
+def _cell(value: str | None, width: int) -> str:
+    """Requester text on one line, without control characters, at most ``width`` long."""
+    if not value:
+        return "-"
+    text = " ".join("".join(c if c.isprintable() else " " for c in value).split()) or "-"
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
+def _print_access_requests(requests: Sequence[StoredAccessRequest]) -> None:
+    rows = [("ID", "STATUS", "CLIENT", "NAME", "EMAIL", "CREATED", "INTENDED USE")]
+    for item in requests:
+        rows.append(
+            (
+                str(item.id),
+                item.status,
+                item.client_type,
+                _cell(item.name, NAME_COLUMN_WIDTH),
+                _cell(item.contact_email, EMAIL_COLUMN_WIDTH),
+                access.format_time(item.created_at),
+                _cell(item.intended_use, INTENDED_USE_COLUMN_WIDTH),
+            )
+        )
+    _print_table(rows)
 
 
 if __name__ == "__main__":

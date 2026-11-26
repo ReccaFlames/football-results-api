@@ -1,14 +1,24 @@
+import re
+from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 import yaml
 from pydantic import SecretStr, ValidationError
+from sqlalchemy.exc import OperationalError
 
 from app import access
 from app import config as config_module
 from app.competitions import source_from_url
 from app.config import ConfigFileWatcher, cli, load_config
+from app.repository import (
+    CLAIM_WINDOW,
+    UNAPPROVED_RETENTION,
+    AccessRequestStateConflict,
+    StoredAccessRequest,
+)
 from app.scheduling import SchedulePolicy
 
 NOW = datetime.now(UTC).replace(microsecond=0)
@@ -787,3 +797,256 @@ def test_config_check_accepts_a_complete_telegram_pair(
     output = capsys.readouterr()
     assert "the operator is notified via Telegram" in output.out
     assert "bot-secret" not in output.out + output.err
+
+
+def stored_request(request_id: int = 7, status: str = "pending", **values: object):
+    defaults: dict[str, object] = {
+        "client_type": "human",
+        "name": "Ada Lovelace",
+        "contact_email": "ada@example.com",
+        "intended_use": "Weekly tables on a fan site",
+        "competitions": ("ekstraklasa",),
+        "message": None,
+        "claim_secret_hash": access.hash_key("claim-secret"),
+        "key_name": None,
+        "created_at": NOW - timedelta(days=1),
+        "decided_at": None,
+        "claimed_at": None,
+    }
+    return StoredAccessRequest(id=request_id, status=status, **{**defaults, **values})
+
+
+class FakeAccessRequests:
+    """The repository's access-request methods, in memory."""
+
+    def __init__(self, *requests: StoredAccessRequest, approve_error: Exception | None = None):
+        self.requests = {item.id: item for item in requests}
+        self.approve_error = approve_error
+        self.keys: dict[int, str] = {}
+
+    async def get_access_request(self, request_id: int) -> StoredAccessRequest | None:
+        return self.requests.get(request_id)
+
+    async def list_access_requests(self, statuses: tuple[str, ...] = ()):
+        return [
+            item
+            for _, item in sorted(self.requests.items(), reverse=True)
+            if not statuses or item.status in statuses
+        ]
+
+    async def _decide(self, request_id: int, status: str, **values: object):
+        stored = self.requests.get(request_id)
+        if stored is None:
+            return None
+        if stored.status != "pending":
+            raise AccessRequestStateConflict(request_id, stored.status)
+        self.requests[request_id] = replace(stored, status=status, decided_at=NOW, **values)
+        return self.requests[request_id]
+
+    async def approve_access_request(self, request_id: int, key_name: str, api_key: str):
+        if self.approve_error is not None:
+            raise self.approve_error
+        self.keys[request_id] = api_key
+        return await self._decide(request_id, "approved", key_name=key_name)
+
+    async def reject_access_request(self, request_id: int):
+        return await self._decide(request_id, "rejected")
+
+
+def use_access_requests(
+    monkeypatch: pytest.MonkeyPatch, repository: FakeAccessRequests
+) -> FakeAccessRequests:
+    @asynccontextmanager
+    async def open_repository():
+        yield repository
+
+    monkeypatch.setattr(config_module, "access_request_repository", open_repository)
+    monkeypatch.setattr(config_module.settings, "demo_mode", False)
+    monkeypatch.setattr(config_module.settings, "api_keys_file", None)
+    return repository
+
+
+def command_fails(capsys: pytest.CaptureFixture[str], *argv: str) -> str:
+    with pytest.raises(SystemExit) as exit_info:
+        cli(["access-requests", *argv])
+    assert exit_info.value.code == 2
+    return capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("request_id", "name", "expected"),
+    [
+        (7, "Ada Lovelace", "req-7-ada-lovelace"),
+        (12, "Paweł Jóźwik", "req-12-pawel-jozwik"),
+        (3, "  --Ada!! (agent)  ", "req-3-ada-agent"),
+        (3, "名前", "req-3"),
+        (3, None, "req-3"),
+        (5, "x" * 57 + " yz", "req-5-" + "x" * 57),
+    ],
+)
+def test_access_request_key_names_are_valid_key_names(
+    request_id: int, name: str | None, expected: str
+) -> None:
+    key_name = config_module.access_request_key_name(request_id, name)
+
+    assert key_name == expected
+    assert len(key_name) <= access.MAX_KEY_NAME_LENGTH
+    assert re.fullmatch(access.KEY_NAME_PATTERN, key_name)
+
+
+@pytest.mark.parametrize(
+    ("argv", "message"),
+    [
+        (["approve", "7", "--file", "keys.yaml", "--name", "Ada"], "invalid key name 'Ada'"),
+        (["approve", "7", "--file", "keys.yaml", "--name", "env"], "invalid key name 'env'"),
+        (["approve", "7", "--file", "keys.yaml", "--role", "admin"], "unrecognized arguments"),
+        (["approve", "7", "--file", "keys.yaml", "--days", "366"], "between 1 and 365"),
+        (["approve", "0", "--file", "keys.yaml"], "expected a positive integer"),
+        (["approve", "7"], "set --file or FOOTBALL_RESULTS_API_KEYS_FILE"),
+        (["list", "--status", "lost"], "invalid choice"),
+    ],
+)
+def test_access_request_commands_check_arguments_before_any_change(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    argv: list[str],
+    message: str,
+) -> None:
+    repository = use_access_requests(monkeypatch, FakeAccessRequests(stored_request()))
+
+    assert message in command_fails(capsys, *argv)
+    assert repository.requests[7].status == "pending"
+
+
+def test_access_request_commands_refuse_demo_mode(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    use_access_requests(monkeypatch, FakeAccessRequests(stored_request()))
+    monkeypatch.setattr(config_module.settings, "demo_mode", True)
+
+    assert "demo instance takes no access requests" in command_fails(capsys, "list")
+
+
+def test_approve_issues_a_client_key_and_prints_only_its_name_and_deadlines(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    repository = use_access_requests(monkeypatch, FakeAccessRequests(stored_request()))
+    keys = tmp_path / "keys.yaml"
+
+    assert cli(["access-requests", "approve", "7", "--file", str(keys)]) == 0
+
+    (entry,) = access.load_keys(keys)
+    assert (entry.name, entry.role, entry.read_per_minute) == ("req-7-ada-lovelace", "client", None)
+    assert entry.expires_at - entry.issued_at == timedelta(days=365)
+    assert access.resolve(repository.keys[7], (), (entry,)).name == "req-7-ada-lovelace"
+    output = capsys.readouterr()
+    claim_by = access.format_time(NOW + CLAIM_WINDOW)
+    assert "'req-7-ada-lovelace'" in output.out and claim_by in output.out
+    assert repository.keys[7] not in output.out + output.err
+    assert "ada@example.com" not in output.out + output.err
+
+
+def test_approve_flags_override_the_name_days_and_read_quota(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    use_access_requests(monkeypatch, FakeAccessRequests(stored_request()))
+    keys = tmp_path / "keys.yaml"
+    argv = ["--name", "ada-site", "--days", "90", "--read-per-minute", "120"]
+
+    assert cli(["access-requests", "approve", "7", "--file", str(keys), *argv]) == 0
+
+    (entry,) = access.load_keys(keys)
+    assert (entry.name, entry.read_per_minute) == ("ada-site", 120)
+    assert entry.expires_at - entry.issued_at == timedelta(days=90)
+
+
+@pytest.mark.parametrize(
+    ("requests", "message"),
+    [
+        ((), "no access request with ID 7"),
+        ((stored_request(status="rejected"),), "access request 7 is rejected"),
+    ],
+)
+def test_approve_adds_no_key_unless_the_request_is_pending(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    requests: tuple[StoredAccessRequest, ...],
+    message: str,
+) -> None:
+    use_access_requests(monkeypatch, FakeAccessRequests(*requests))
+    keys = tmp_path / "keys.yaml"
+
+    assert message in command_fails(capsys, "approve", "7", "--file", str(keys))
+    assert not keys.exists()
+
+
+@pytest.mark.parametrize(
+    ("error", "message"),
+    [
+        (AccessRequestStateConflict(7, "rejected"), "Access request 7 is rejected"),
+        (
+            OperationalError("UPDATE access_request", {}, Exception("connection lost")),
+            "cannot use the database",
+        ),
+    ],
+)
+def test_a_failed_approval_removes_the_issued_key_again(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    error: Exception,
+    message: str,
+) -> None:
+    # The request is decided elsewhere, or the database fails, after the key was issued.
+    use_access_requests(monkeypatch, FakeAccessRequests(stored_request(), approve_error=error))
+    keys = tmp_path / "keys.yaml"
+    access.issue_key(keys, "ops", "admin", 30, NOW)
+
+    assert message in command_fails(capsys, "approve", "7", "--file", str(keys))
+    assert [entry.name for entry in access.load_keys(keys)] == ["ops"]
+
+
+def test_reject_decides_only_known_pending_requests(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repository = use_access_requests(monkeypatch, FakeAccessRequests(stored_request()))
+
+    assert cli(["access-requests", "reject", "7"]) == 0
+    assert repository.requests[7].status == "rejected"
+    deleted_at = access.format_time(NOW - timedelta(days=1) + UNAPPROVED_RETENTION)
+    assert deleted_at in capsys.readouterr().out
+    assert "Access request 7 is rejected" in command_fails(capsys, "reject", "7")
+    assert "no access request with ID 8" in command_fails(capsys, "reject", "8")
+
+
+def test_list_shows_requests_on_one_line_each_without_control_characters(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    use_access_requests(
+        monkeypatch,
+        FakeAccessRequests(
+            stored_request(1, "claimed", name=None, contact_email=None, intended_use=None),
+            stored_request(2, name="Eve\x1b[2J", intended_use="Line one\nline two " + "x" * 50),
+        ),
+    )
+
+    assert cli(["access-requests", "list"]) == 0
+    header, newest, claimed = capsys.readouterr().out.splitlines()
+    assert header.split() == [
+        "ID",
+        "STATUS",
+        "CLIENT",
+        "NAME",
+        "EMAIL",
+        "CREATED",
+        "INTENDED",
+        "USE",
+    ]
+    assert newest.split()[:5] == ["2", "pending", "human", "Eve", "[2J"]
+    assert "\x1b" not in newest and "ada@example.com" in newest
+    assert newest.endswith("Line one line two " + "x" * 21 + "…")
+    assert claimed.split()[:5] == ["1", "claimed", "human", "-", "-"]
+
+    assert cli(["access-requests", "list", "--status", "claimed"]) == 0
+    assert [line.split()[0] for line in capsys.readouterr().out.splitlines()] == ["ID", "1"]

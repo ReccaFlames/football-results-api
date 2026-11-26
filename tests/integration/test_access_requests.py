@@ -1,10 +1,18 @@
+import asyncio
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
+import httpx
 import pytest
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app import access
+from app import config as config_module
+from app import main as main_module
 from app.db_models import AccessRequestRow
+from app.ratelimit import FixedWindowRateLimiter
 from app.repository import (
     CLAIM_WINDOW,
     UNAPPROVED_RETENTION,
@@ -132,3 +140,77 @@ async def test_list_filters_by_status_newest_first_with_a_keyset(
     assert [item.id for item in pending] == [ids[2], ids[0]]
     page = await repository.list_access_requests(limit=1, before_id=ids[2])
     assert [item.id for item in page] == [ids[1]]
+
+
+ACCESS_REQUEST = {
+    "name": "Ada Lovelace",
+    "contact_email": "ada@example.com",
+    "intended_use": "Weekly tables on a fan site",
+    "client_type": "human",
+}
+
+
+@pytest.fixture
+async def api(
+    repository: PostgresResultRepository,
+    migrated_database: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncIterator[httpx.AsyncClient]:
+    """The API and `python -m app.config` on the test database."""
+    monkeypatch.setattr(main_module, "store", repository)
+    monkeypatch.setattr(main_module, "rate_limiter", FixedWindowRateLimiter())
+    monkeypatch.setattr(config_module.settings, "database_url", migrated_database)
+    monkeypatch.setattr(config_module.settings, "demo_mode", False)
+    transport = httpx.ASGITransport(app=main_module.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        yield client
+
+
+async def config_cli(*argv: str) -> int:
+    # The config CLI runs its own event loop, so it needs a thread of its own here.
+    return await asyncio.to_thread(config_module.cli, ["access-requests", *argv])
+
+
+async def test_the_operator_approves_and_the_requester_claims_the_key_once(
+    api: httpx.AsyncClient, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    created = (await api.post("/api/v1/access-requests", json=ACCESS_REQUEST)).json()
+    keys = tmp_path / "keys.yaml"
+
+    assert await config_cli("list", "--status", "pending") == 0
+    _, row = capsys.readouterr().out.splitlines()
+    assert row.split()[:4] == [str(created["id"]), "pending", "human", "Ada"]
+    assert "ada@example.com" in row
+
+    assert await config_cli("approve", str(created["id"]), "--file", str(keys)) == 0
+    key_name = f"req-{created['id']}-ada-lovelace"
+    assert f"'{key_name}'" in capsys.readouterr().out
+
+    secret = {"Claim-Secret": created["claim_secret"]}
+    claimed = (await api.get(created["status_url"], headers=secret)).json()
+    assert (claimed["status"], claimed["key_name"]) == ("claimed", key_name)
+    identity = access.resolve(claimed["api_key"], (), access.load_keys(keys))
+    assert identity is not None and (identity.name, identity.role) == (key_name, "client")
+    again = (await api.get(created["status_url"], headers=secret)).json()
+    assert again["api_key"] is None
+
+
+async def test_the_operator_rejects_and_a_decided_request_gets_no_key(
+    api: httpx.AsyncClient, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    created = (await api.post("/api/v1/access-requests", json=ACCESS_REQUEST)).json()
+    keys = tmp_path / "keys.yaml"
+
+    assert await config_cli("reject", str(created["id"])) == 0
+    for argv in (
+        ("reject", str(created["id"])),
+        ("approve", str(created["id"]), "--file", str(keys)),
+    ):
+        with pytest.raises(SystemExit) as exit_info:
+            await config_cli(*argv)
+        assert exit_info.value.code == 2
+    assert "is rejected" in capsys.readouterr().err
+    assert not keys.exists()
+
+    status = await api.get(created["status_url"], headers={"Claim-Secret": created["claim_secret"]})
+    assert (status.json()["status"], status.json()["api_key"]) == ("rejected", None)

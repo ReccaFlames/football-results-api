@@ -30,12 +30,12 @@ API.
 | `app/observability.py` | Stale-season and stalled-scheduler rules (`STALE_GRACE`, `stall_window`), Prometheus rendering for `/metrics`, HTTP request metrics |
 | `app/logs.py` | `configure_logging` (`FOOTBALL_RESULTS_LOG_FORMAT`: `text` or `json`) for the API and scheduler; access-log IP anonymisation |
 | `app/standings.py` | Pure league-table calculation and tie-breakers from finished matches |
-| `app/scheduler.py` | Scheduler loop (`python -m app.scheduler`): seed → heartbeat → season checks (discovery/rollover) → claim due seasons → scrape → persist |
+| `app/scheduler.py` | Scheduler loop (`python -m app.scheduler`): seed → heartbeat → hourly access-request purge (ADR 0010) → season checks (discovery/rollover) → claim due seasons → scrape → persist |
 | `app/scheduling.py` | Pure rules driven by `SchedulePolicy`: `calculate_next_check`, `failure_backoff`, `rollover_target` |
 | `app/scraper.py` | Provider adapters (`NinetyMinutScraper`, `FootballDataScraper`), parsers, `ScraperRegistry` |
 | `app/seasons.py` | Season formats (`2026-2027`, `2026`) and season/date mapping |
 | `app/competitions.py` | Competition summary helpers and `source_from_url` validation |
-| `app/config.py` | Environment settings, validated competition configuration, and `python -m app.config check` |
+| `app/config.py` | Environment settings, validated competition configuration, and `python -m app.config` (`check`, `keys`, `access-requests`) |
 | `config/competitions.yaml` | Competition, provider, and schedule defaults |
 | `config/demo-competitions.yaml` | Demo instance competitions: only redistributable providers (the 3. Liga) |
 | `compose.demo.yaml` | Compose override for the public read-only demo (ADR 0007); guide in `docs/DEMO.md` |
@@ -226,6 +226,12 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
   tests patch `main.file_keys` (the watcher is `None` outside the lifespan). Keyed responses get
   `API-Key-Expires`; cacheable reads get `Cache-Control: private`. Edit the file only through
   `python -m app.config keys ...` helpers (atomic replace, validated).
+- Access requests (ADR 0010) are decided only on the server with `python -m app.config
+  access-requests list|approve|reject` (short-lived engine, refused in demo mode). `approve`
+  issues a `client` key into the keys file *before* the database approval and revokes the entry
+  if that fails, so no key exists that nobody can claim; it never prints the key or the email
+  (only `list` shows emails). The scheduler applies `CLAIM_WINDOW`/`UNAPPROVED_RETENTION` via
+  `purge_access_requests` hourly and logs only counts.
 - Demo mode (`FOOTBALL_RESULTS_DEMO_MODE`, ADR 0007): `check_demo_mode` in `app/config.py` runs
   at API startup (before seeding), in the scheduler before every (re)seed, and in `config check`.
   It rejects admin keys, providers not in `REDISTRIBUTABLE_PROVIDERS` (code, not config;
