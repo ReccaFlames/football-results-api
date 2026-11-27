@@ -1056,6 +1056,8 @@ feature is enabled, which is why the realm uses a scope mapper.
 The Compose deployment runs PostgreSQL, the API, the scheduler, and the landing page on the same
 Ubuntu machine ([services and routes](docs/DEPLOYMENT.md#services-and-routes)).
 Before the first deployment, work through the checklist in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+For a home server running k3s (Flux, Cloudflare Tunnel, Tailscale), see the plan in
+[docs/SELF-HOSTED.md](docs/SELF-HOSTED.md).
 
 1. Install Docker Engine and the Docker Compose plugin.
 2. Copy the project to the server.

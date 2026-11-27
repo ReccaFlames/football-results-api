@@ -109,9 +109,10 @@ How to use this list:
   reflects the change.
 - If scope changes, edit this list in the same PR.
 
-**Next up: item 15 (MCP Registry), through the server push.** Its only open sub-task is
-published from the release tag after the first deployment ([DEPLOYMENT.md](DEPLOYMENT.md);
-operator steps, no code blockers). The next unchecked code items are 17d (a further primary
+**Next up: item 22 (home server deployment), from 22a.** Plan in
+[SELF-HOSTED.md](SELF-HOSTED.md), decided 2026-11-27 ([ADR 0011](adr/0011-home-server-runs-single-node-k3s-with-flux.md)).
+Item 15 (MCP Registry) waits: its only open sub-task is published by hand from the release tag
+after the first deployment. The next unchecked code items after 22 are 17d (a further primary
 provider; name the competition first) and 20.
 
 ### Phase 0: Foundations
@@ -568,3 +569,24 @@ the maintainer runs `scripts/publish-wizard.sh`.
 - [ ] **20. OAuth for chat clients on private instances**: claude.ai and ChatGPT connectors cannot
       send `X-API-Key`, so a private instance needs a production authorization server (ADR 0006)
       before they can connect. Until then, chat clients are supported on the demo only.
+- [ ] **22. Home server deployment** (decided 2026-11-27, [SELF-HOSTED.md](SELF-HOSTED.md),
+      [ADR 0011](adr/0011-home-server-runs-single-node-k3s-with-flux.md)): a private instance on a
+      single-node k3s cluster at home, delivered by Flux from GHCR images, public through a
+      Cloudflare Tunnel, administered over Tailscale. Nothing is published (no `v*` tag)
+  - [x] 22-0. Plan, ADR 0011, roadmap item
+  - [ ] 22a. GitHub: public repository, `main` pushed and protected, CI green (operator step)
+  - [ ] 22b. Image workflow: on green `main`, build `api` and `web` for `linux/amd64` to public
+        GHCR, tagged `main-<run_number>-<short sha>`
+  - [ ] 22c. `deploy/k8s/` Kustomize base (Deployments with `Recreate`, Services, path routes,
+        keys PVC, `toolbox`, CloudNativePG `Cluster`, NetworkPolicies, ServiceMonitor, Grafana
+        dashboard and rules without diverging copies); CI step with `kubeconform -strict`;
+        README and AGENTS.md
+  - [ ] 22d. `homelab` repository: Ansible host playbook (hardening, ufw, Tailscale, pinned k3s,
+        kubelet log limits, log retention timer) (operator step)
+  - [ ] 22e. Platform through Flux: SOPS/age, Traefik forwarded headers, cloudflared, Tailscale
+        operator, CloudNativePG with B2 backups, kube-prometheus-stack, restic, namespace
+        template (operator step)
+  - [ ] 22f. App overlay and first deploy: secrets, image automation, keys file via `toolbox`,
+        external checks including the forwarded-address check (operator step)
+  - [ ] 22g. Go-live: restore test, UptimeRobot, evals once by hand; tick DEPLOYMENT.md's
+        GitHub blocker

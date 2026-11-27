@@ -6,6 +6,11 @@ Checklist for the first deployment to a real server. Readiness was reviewed on 2
 what remains is setup and operator steps. The step-by-step guides are [DEMO.md](DEMO.md) (public)
 and [PRIVATE.md](PRIVATE.md) (invited people).
 
+This checklist covers the Compose deployment (an Oracle VM with Caddy). The planned home server
+runs a private instance on k3s instead: see [SELF-HOSTED.md](SELF-HOSTED.md)
+([ADR 0011](adr/0011-home-server-runs-single-node-k3s-with-flux.md)). The blockers below apply to
+both.
+
 ## Blockers
 
 ### 1. Put the repository on GitHub

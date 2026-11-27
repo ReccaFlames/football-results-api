@@ -41,6 +41,7 @@ API.
 | `compose.demo.yaml` | Compose override for the public read-only demo (ADR 0007); guide in `docs/DEMO.md` |
 | `docs/PRIVATE.md` | Private instance guide (ADR 0008): invited users, expiring keys, `keys` commands |
 | `docs/DEPLOYMENT.md` | First-deployment checklist; services, Caddy path routes, and the trusted-proxy chain |
+| `docs/SELF-HOSTED.md` | Home server plan (ADR 0011): private instance on single-node k3s, Flux from GHCR, Cloudflare Tunnel, Tailscale; roadmap item 22 |
 | `app/repository.py` | `PostgresResultRepository`: seeding, queries, atomic season replace, scheduler claims; access requests (create, list, approve, reject, claim, purge; `CLAIM_WINDOW`, `UNAPPROVED_RETENTION`) |
 | `app/models.py` | Pydantic API/domain models (`Competition`, `SeasonSource`, `ScrapedMatch`, `MatchResult`, ...) |
 | `app/db_models.py` | SQLAlchemy ORM tables |
