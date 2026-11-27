@@ -211,6 +211,48 @@ example realm; the exact discovery requests, registration choice, redirect port,
 values each client sends; whether VS Code and Copilot CLI offer sign-in after an anonymous
 success; refresh and stale-token behaviour.
 
+## 8. Chat clients and self-hosted authorization servers (item 20, 2026-11-28)
+
+claude.ai and ChatGPT connectors cannot send headers, so a private instance needs OAuth for them.
+
+**What the clients need:**
+
+- **ChatGPT** ([Apps SDK auth guide](https://developers.openai.com/apps-sdk/build/auth)) supports
+  CIMD, DCR, and predefined clients, and prefers CIMD when the authorization server advertises
+  `client_id_metadata_document_supported`. Its document
+  ([chatgpt.com/oauth/client.json](https://chatgpt.com/oauth/client.json)) lists the redirect
+  `https://chatgpt.com/connector_platform_oauth_redirect`, the singular
+  `token_endpoint_auth_method: private_key_jwt`, and the plural
+  `token_endpoint_auth_methods_supported: ["none", "private_key_jwt"]`; ChatGPT picks a method
+  from the intersection with the server's metadata, so a server that advertises only `none` gets
+  a public client. It needs S256 PKCE, sends `resource` in both requests, and requests every
+  advertised scope. When the server sets `authorization_response_iss_parameter_supported` and
+  returns `iss` (RFC 9207) in every authorization response, ChatGPT uses the stable redirect and
+  client ID above; otherwise per-connector URLs under `https://chatgpt.com/connector/oauth/`.
+- **Claude** (claude.ai and Claude Desktop; per the [Keycloak MCP guide](https://github.com/keycloak/keycloak/blob/26.8.2/docs/guides/securing-apps/mcp-authz-server.adoc#L404-L475),
+  Anthropic's help pages were unreachable here) uses CIMD with the client ID
+  `https://claude.ai/oauth/mcp-oauth-client-metadata` and the redirect
+  `https://claude.ai/api/mcp/auth_callback`, as a public client with PKCE, and sends `resource`
+  in both requests. **Unverified:** the full document and whether claude.ai still falls back to
+  DCR.
+
+**Self-hosted authorization servers** (released versions, November 2026):
+
+| Server | Fit for both clients |
+| --- | --- |
+| Keycloak 26.8.2 | DCR works; CIMD and resource indicators are experimental features; about 1.25 GB per pod in its sizing guide |
+| Logto 1.46.0 | CIMD and resource indicators; refresh for ChatGPT needs an experimental setting; recommends an 8 GiB host; untested end to end |
+| Pocket ID 2.19.3 | CIMD validator rejects ChatGPT's singular `private_key_jwt` |
+| ZITADEL 4.20.6 | Ignores `resource`; DCR clients get project audiences |
+| authentik 2026.8.7 | DCR needs a bearer token with a DCR scope; 2 GB host minimum |
+| Authelia 4.39.28 | No DCR or CIMD |
+| Cloudflare Managed OAuth | Opaque tokens for Cloudflare, not for this server |
+
+**Conclusion:** CIMD with public clients (`none`), PKCE S256, `resource`, and RFC 9207 `iss`
+covers both chat clients; DCR is not needed. None of the servers above is a small, proven fit for
+an 8 GB home server, which led to the built-in authorization server of
+[ADR 0012](../adr/0012-built-in-authorization-server-signs-in-with-api-keys.md).
+
 ## Sources
 
 - MCP specification 2026-07-28: <https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization>
@@ -221,4 +263,6 @@ success; refresh and stale-token behaviour.
 - Client docs: GitHub Copilot CLI, VS Code MCP configuration (links above)
 - Client changelogs and source: [Copilot CLI](https://github.com/github/copilot-cli/blob/main/changelog.md), [Claude Code](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md), [VS Code](https://github.com/microsoft/vscode)
 - Keycloak MCP guide: <https://www.keycloak.org/securing-apps/mcp-authz-server>
+- ChatGPT Apps SDK authentication: <https://developers.openai.com/apps-sdk/build/auth>
+- Release sources for §8: [Pocket ID](https://github.com/pocket-id/pocket-id/blob/v2.19.3/backend/internal/oidc/cimd.go), [Logto](https://github.com/logto-io/logto/blob/v1.46.0/packages/core/src/oidc/cimd/index.ts), [ZITADEL](https://github.com/zitadel/zitadel/blob/v4.20.6/apps/docs/content/guides/integrate/dynamic-client-registration.mdx), [authentik](https://github.com/goauthentik/authentik/blob/version/2026.8.7/authentik/providers/oauth2/views/dcr.py), [Authelia](https://github.com/authelia/authelia/blob/v4.39.28/docs/content/integration/openid-connect/introduction.md), [Cloudflare Managed OAuth](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/managed-oauth/)
 - Provider terms and hosting pages (links in the tables)

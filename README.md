@@ -7,7 +7,7 @@ scheduler, and serves them over a REST API.
 The repository started as an Ekstraklasa-only scraper and is evolving into a **generic, configurable
 league-data API**. This README describes both:
 
-- **[Current state](#current-state)** – what is implemented and works today (version 0.26.0).
+- **[Current state](#current-state)** – what is implemented and works today (version 0.27.0).
 - **[Target state](#target-state-and-roadmap)** – where the project is heading and what is still
   missing.
 
@@ -66,8 +66,9 @@ Scheduler (app.scheduler) ──┬──▶ ScraperRegistry ──▶ sources
   scheduler.
 
 Database tables: competition, competition_season, team, team_alias, match_result, scrape_run,
-scheduler_heartbeat, access_request (key requests for a private instance, ADR 0010), and
-alembic_version.
+scheduler_heartbeat, access_request (key requests for a private instance, ADR 0010),
+oauth_authorization_code, oauth_grant, and oauth_token (built-in sign-in for chat clients, hashes
+only, ADR 0012), and alembic_version.
 
 ### Supported competitions
 
@@ -982,9 +983,11 @@ optional secret `X-API-Key` header. It is validated against the vendored schema 
 
 ### OAuth for the MCP server
 
-OAuth on `/mcp` is optional and off by default (ADR 0006). The API is only an OAuth *resource
-server*: it validates JWT access tokens from an authorization server you run (Keycloak, Entra ID,
-Auth0, ...) and never issues tokens. The REST API keeps `X-API-Key`.
+OAuth on `/mcp` is optional and off by default (ADR 0006). There are two ways to turn it on:
+validate JWT access tokens from an external authorization server you run (Keycloak, Entra ID,
+Auth0, ...; this section), or let the API act as its own minimal authorization server whose
+sign-in is an API key ([built-in sign-in for chat clients](#built-in-sign-in-for-chat-clients),
+ADR 0012). The two are mutually exclusive. The REST API keeps `X-API-Key` either way.
 
 - Set `FOOTBALL_RESULTS_OAUTH_ISSUER` (requires `FOOTBALL_RESULTS_PUBLIC_BASE_URL`). The API then
   serves RFC 9728 metadata at `/.well-known/oauth-protected-resource/mcp` (cacheable, not rate
@@ -1050,6 +1053,41 @@ For another issuer or public URL, change the audience mapper's `included.custom.
 public `/mcp` URL (or set `FOOTBALL_RESULTS_OAUTH_AUDIENCE` to the audience your issuer puts in
 tokens). Keycloak ignores the `resource` parameter unless its experimental `resource-indicators`
 feature is enabled, which is why the realm uses a scope mapper.
+
+#### Built-in sign-in for chat clients
+
+claude.ai and ChatGPT connect to remote MCP servers only with OAuth; they cannot send
+`X-API-Key`. With `FOOTBALL_RESULTS_OAUTH_BUILTIN=true` the API is its own authorization server
+(ADR 0012): the "login" is an API key from the keys file, so there are no accounts or passwords
+and no identity provider to run. It is meant for [private instances](docs/PRIVATE.md).
+
+- Requires `FOOTBALL_RESULTS_PUBLIC_BASE_URL` (https, no path; it is the issuer) and at least one
+  API key; refused with `FOOTBALL_RESULTS_OAUTH_ISSUER` (and its audience, JWKS, and scope
+  settings) and in demo mode. `python -m app.config check` reports these problems.
+- Endpoints (not in `/openapi.json`): RFC 8414 metadata at
+  `/.well-known/oauth-authorization-server`, `/oauth/authorize` (a sign-in page without
+  JavaScript), `/oauth/token`, and `/oauth/revoke` (RFC 7009). The RFC 9728 resource metadata
+  names the API itself as the authorization server.
+- Clients identify themselves with a Client ID Metadata Document: an `https` `client_id` URL that
+  the API fetches (5 s timeout, 64 KB, no redirects, cached for an hour) only from hosts in
+  `FOOTBALL_RESULTS_OAUTH_CLIENT_HOSTS` (default `claude.ai,chatgpt.com`). The document must
+  describe a public client (`token_endpoint_auth_method` `none`, or `none` among
+  `token_endpoint_auth_methods_supported`), and the redirect URI must be one it lists (loopback
+  redirects may use any port). There is no dynamic client registration.
+- Authorization code with PKCE (S256 only), `resource` (RFC 8707; defaults to the `/mcp` URL),
+  and `iss` on every redirect (RFC 9207). Scopes are ignored. Codes last 5 minutes, access tokens
+  an hour; refresh tokens rotate on every use, and reusing an old one revokes the sign-in. A
+  sign-in not refreshed for 30 days expires; the scheduler deletes expired records hourly.
+- Codes and tokens are random strings stored only as SHA-256 hashes, bound to the hash of the
+  key that signed in. Every use re-checks that key, so the client gets the key's name, role, and
+  quotas, and loses access as soon as the key expires or is revoked
+  (`python -m app.config keys ... revoke`). Any valid key works, client or admin.
+- The OAuth endpoints are public on a private instance; sign-in and token requests count
+  against the per-IP write quota. Each sign-in is logged with the client host and key name.
+
+To connect claude.ai (**Settings → Connectors → Add custom connector**) or ChatGPT (developer
+mode, **Settings → Apps & Connectors → Create**), enter `https://<your host>/mcp` and sign in
+with your API key on the page that opens. See [docs/PRIVATE.md](docs/PRIVATE.md#8-chat-clients-claudeai-chatgpt).
 
 ## Ubuntu deployment
 
@@ -1438,6 +1476,8 @@ Application variables:
 | FOOTBALL_RESULTS_OAUTH_MODE | `optional` | `optional` keeps anonymous and `X-API-Key` access on `/mcp`; `required` answers other requests with `401` and `resource_metadata` |
 | FOOTBALL_RESULTS_OAUTH_AUDIENCE | public `/mcp` URL | Required `aud` of access tokens, when the issuer cannot put the `/mcp` URL there |
 | FOOTBALL_RESULTS_OAUTH_SCOPES | empty | Comma-separated scopes advertised in the metadata and the `401` challenge (not enforced) |
+| FOOTBALL_RESULTS_OAUTH_BUILTIN | `false` | Built-in authorization server for chat clients whose sign-in is an API key (see [built-in sign-in](#built-in-sign-in-for-chat-clients)); excludes `FOOTBALL_RESULTS_OAUTH_ISSUER` |
+| FOOTBALL_RESULTS_OAUTH_CLIENT_HOSTS | `claude.ai,chatgpt.com` | Comma-separated hosts whose Client ID Metadata Documents the built-in server accepts |
 | FOOTBALL_RESULTS_OAUTH_JWKS_URL | discovered | JWKS URL when the issuer URL is not reachable from the API (for example `http://keycloak:8080/...` in Compose) |
 
 The landing app reads only `FOOTBALL_RESULTS_WEB_API_URL` (see

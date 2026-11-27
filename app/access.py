@@ -270,11 +270,36 @@ def resolve(
     compared in constant time."""
     if not supplied:
         return None
+    return _resolve(_digest(supplied), environment, file_keys, now)
+
+
+def resolve_digest(
+    stored: str,
+    environment: Sequence[str],
+    file_keys: Sequence[FileKey],
+    now: datetime | None = None,
+) -> Identity | None:
+    """Like `resolve`, for a key known only by its `hash_key` (a built-in OAuth grant, ADR 0012):
+    None once the key is revoked, removed, or expired."""
+    if not stored.startswith(HASH_PREFIX):
+        return None
+    try:
+        digest = bytes.fromhex(stored.removeprefix(HASH_PREFIX))
+    except ValueError:
+        return None
+    return _resolve(digest, environment, file_keys, now)
+
+
+def _resolve(
+    digest: bytes,
+    environment: Sequence[str],
+    file_keys: Sequence[FileKey],
+    now: datetime | None,
+) -> Identity | None:
     found: Identity | None = None
     for key in environment:
-        if secrets.compare_digest(supplied.encode(), key.encode()) and found is None:
-            found = Identity(ENV_KEY_NAME, "admin", bucket=_env_bucket(supplied))
-    digest = _digest(supplied)
+        if secrets.compare_digest(digest, _digest(key)) and found is None:
+            found = Identity(ENV_KEY_NAME, "admin", bucket=_env_bucket(key))
     matched: FileKey | None = None
     for item in file_keys:
         if item.digest is None:

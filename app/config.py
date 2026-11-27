@@ -102,6 +102,10 @@ class Settings(BaseSettings):
     oauth_scopes: str = ""
     # JWKS location when the issuer's discovery URL is unreachable from the API (Compose).
     oauth_jwks_url: str | None = None
+    # Built-in authorization server whose sign-in is an API key (ADR 0012); excludes an issuer.
+    oauth_builtin: bool = False
+    # Hosts whose Client ID Metadata Documents the built-in server fetches (exact, lowercase).
+    oauth_client_hosts: str = "claude.ai,chatgpt.com"
     log_format: Literal["text", "json"] = "text"
     # Public read-only demo instance (ADR 0007): no admin keys, redistributable providers only.
     demo_mode: bool = False
@@ -128,13 +132,40 @@ class Settings(BaseSettings):
             raise ValueError("must be an absolute http(s) URL without a fragment")
         return value
 
+    @field_validator("oauth_client_hosts")
+    @classmethod
+    def _validate_oauth_client_hosts(cls, value: str) -> str:
+        for host in _split(value):
+            if not CLIENT_HOST_PATTERN.fullmatch(host):
+                raise ValueError(f"{host!r} is not a lowercase host name (no scheme, no port)")
+        return value
+
     @model_validator(mode="after")
     def _oauth_needs_public_base_url(self) -> "Settings":
         if self.oauth_issuer and not self.public_base_url:
             raise ValueError(
                 "FOOTBALL_RESULTS_OAUTH_ISSUER requires FOOTBALL_RESULTS_PUBLIC_BASE_URL"
             )
+        if not self.oauth_builtin:
+            return self
+        conflicting = [
+            f"FOOTBALL_RESULTS_OAUTH_{name.upper()}"
+            for name in ("issuer", "audience", "jwks_url", "scopes")
+            if getattr(self, f"oauth_{name}")
+        ]
+        if conflicting:
+            raise ValueError(
+                "FOOTBALL_RESULTS_OAUTH_BUILTIN is its own issuer; unset " + ", ".join(conflicting)
+            )
+        if not self.public_base_url:
+            raise ValueError(
+                "FOOTBALL_RESULTS_OAUTH_BUILTIN requires FOOTBALL_RESULTS_PUBLIC_BASE_URL"
+            )
         return self
+
+    @property
+    def oauth_client_host_set(self) -> frozenset[str]:
+        return frozenset(_split(self.oauth_client_hosts))
 
     @property
     def log_ips_anonymized(self) -> bool:
@@ -173,6 +204,15 @@ class Settings(BaseSettings):
                 "must be an absolute http(s) URL without credentials, query, or fragment"
             )
         return value.strip().rstrip("/")
+
+
+CLIENT_HOST_PATTERN = re.compile(
+    r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+"
+)
+
+
+def _split(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 def parse_networks(value: str) -> tuple[IPv4Network | IPv6Network, ...]:
@@ -711,6 +751,44 @@ def private_instance_errors(current: Settings) -> list[str]:
     return errors
 
 
+def oauth_server_errors(current: Settings, file_keys: Sequence[access.FileKey]) -> list[str]:
+    """Why the built-in authorization server (ADR 0012) cannot run; empty when it is off or can."""
+    if not current.oauth_builtin:
+        return []
+    errors: list[str] = []
+    if current.demo_mode:
+        errors.append("FOOTBALL_RESULTS_DEMO_MODE is on; the demo serves /mcp without sign-in")
+    if not access.env_keys(current.api_keys) and not any(key.digest for key in file_keys):
+        errors.append(
+            "no API key is configured; sign-in needs a key from FOOTBALL_RESULTS_API_KEYS_FILE "
+            "(`python -m app.config keys issue`)"
+        )
+    if not current.oauth_client_host_set:
+        errors.append("FOOTBALL_RESULTS_OAUTH_CLIENT_HOSTS is empty; no client could sign in")
+    base_url = current.public_base_url or ""
+    parts = urlsplit(base_url)
+    if parts.path:
+        errors.append(
+            f"FOOTBALL_RESULTS_PUBLIC_BASE_URL {base_url} has a path; the issuer must be an origin"
+        )
+    if parts.scheme != "https" and parts.hostname not in LOCAL_HOSTS:
+        errors.append(
+            f"FOOTBALL_RESULTS_PUBLIC_BASE_URL {base_url} is not https; keys and tokens must not "
+            "travel in plain text"
+        )
+    return errors
+
+
+def check_oauth_server(file_keys: Sequence[access.FileKey]) -> None:
+    """Raise when ``FOOTBALL_RESULTS_OAUTH_BUILTIN`` is on and the setup breaks ADR 0012."""
+    errors = oauth_server_errors(settings, file_keys)
+    if errors:
+        raise ValueError(
+            "FOOTBALL_RESULTS_OAUTH_BUILTIN is on, but:\n"
+            + "\n".join(f"  - {item}" for item in errors)
+        )
+
+
 TELEGRAM_BOT_TOKEN_PATTERN = re.compile(r"\d+:[A-Za-z0-9_-]+")
 TELEGRAM_CHAT_ID_PATTERN = re.compile(r"-?\d+|@[A-Za-z][A-Za-z0-9_]{3,}")
 
@@ -820,6 +898,7 @@ def cli(argv: list[str] | None = None) -> int:
     try:
         check_demo_mode(config, keys)
         check_private_instance()
+        check_oauth_server(keys)
     except ValueError as error:
         parser.error(str(error))
     if errors := telegram_errors(settings):
@@ -847,6 +926,12 @@ def cli(argv: list[str] | None = None) -> int:
         print(
             f"OAuth for /mcp: issuer {settings.oauth_issuer}, audience "
             f"{settings.oauth_token_audience}, mode {settings.oauth_mode}"
+        )
+    if settings.oauth_builtin:
+        print(
+            f"OAuth for /mcp: built-in authorization server at {settings.public_base_url} "
+            f"(sign-in with an API key), mode {settings.oauth_mode}, client hosts "
+            + ", ".join(sorted(settings.oauth_client_host_set))
         )
     if settings.demo_mode:
         print(

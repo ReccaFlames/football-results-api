@@ -529,7 +529,9 @@ class McpEndpoint:
     """The `/mcp` ASGI endpoint: Host/Origin checks from the current settings, the optional
     bearer check, then the SDK.
 
-    ``identify_key`` resolves an `X-API-Key`; ``identify_subject`` maps a valid token subject.
+    ``identify_key`` resolves an `X-API-Key`; ``identify_subject`` maps a valid token subject;
+    ``identify_token`` resolves a token of the built-in authorization server (ADR 0012) or raises
+    `InvalidToken` or `IssuerUnavailable`.
     """
 
     def __init__(
@@ -538,11 +540,13 @@ class McpEndpoint:
         settings: Settings,
         identify_key: Callable[[str | None], Identity | None] = lambda _: None,
         identify_subject: Callable[[str], Identity] = lambda subject: resolve_subject(subject, ()),
+        identify_token: Callable[[str], Awaitable[Identity]] | None = None,
     ) -> None:
         self.server = server
         self.settings = settings
         self.identify_key = identify_key
         self.identify_subject = identify_subject
+        self.identify_token = identify_token or _no_builtin_tokens
         self._verifiers: dict[OAuthConfig, JwtVerifier] = {}
 
     def verifier(self, config: OAuthConfig) -> JwtVerifier:
@@ -575,6 +579,10 @@ class McpEndpoint:
         if not token:
             return McpAuth(None, "invalid_token", "The bearer token is empty")
         try:
+            if config.builtin:
+                # A valid API key on the same request takes precedence over the token.
+                identity = await self.identify_token(token)
+                return McpAuth(key_identity or identity)
             access = await self.verifier(config).check(token)
         except InvalidToken as error:
             return McpAuth(None, "invalid_token", str(error))
@@ -643,6 +651,10 @@ class McpEndpoint:
             return
         scope[IDENTITY_SCOPE_KEY] = auth.identity
         await self.server.session_manager.handle_request(scope, receive, send)
+
+
+async def _no_builtin_tokens(_: str) -> Identity:
+    raise InvalidToken("The token is not valid")
 
 
 class McpRoute(Route):

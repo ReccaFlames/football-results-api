@@ -310,3 +310,34 @@ async def test_access_requests_are_purged_hourly_and_retried_after_a_failure(
     retry = failed_at + timedelta(minutes=1)
     assert await scheduler_module.purge_access_requests(repository, later, retry) == retry
     assert repository.calls == 4 and "expired 3 keys" in caplog.text
+
+
+class FakeOAuthPurgeRepository:
+    def __init__(self, *results: tuple[int, int, int] | Exception) -> None:
+        self.results = list(results)
+
+    async def purge_oauth(self) -> tuple[int, int, int]:
+        result = self.results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+async def test_oauth_records_are_purged_hourly_and_retried_after_a_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repository = FakeOAuthPurgeRepository((1, 2, 3), RuntimeError("database down"), (0, 0, 0))
+    start = datetime(2026, 11, 28, 12, tzinfo=UTC)
+    interval = scheduler_module.ACCESS_REQUEST_PURGE_INTERVAL
+
+    caplog.set_level("INFO", logger="app.scheduler")
+    assert await scheduler_module.purge_oauth(repository, None, start) == start
+    assert "1 expired codes, 2 grants not refreshed within 30 days, 3 expired tokens" in caplog.text
+    soon = start + interval - timedelta(seconds=1)
+    assert await scheduler_module.purge_oauth(repository, start, soon) == start
+
+    later = start + interval
+    assert await scheduler_module.purge_oauth(repository, start, later) == start
+    assert "OAuth purge failed" in caplog.text
+    retry = later + timedelta(minutes=1)
+    assert await scheduler_module.purge_oauth(repository, start, retry) == retry

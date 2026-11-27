@@ -30,6 +30,9 @@ from app.db_models import (
     CompetitionRow,
     CompetitionSeasonRow,
     MatchRow,
+    OAuthCodeRow,
+    OAuthGrantRow,
+    OAuthTokenRow,
     SchedulerHeartbeatRow,
     ScrapeRunRow,
     TeamAliasRow,
@@ -291,6 +294,58 @@ def _access_request(row: AccessRequestRow) -> StoredAccessRequest:
         decided_at=row.decided_at,
         claimed_at=row.claimed_at,
     )
+
+
+# Built-in authorization server lifetimes (ADR 0012). A refresh slides the grant's expiry.
+OAUTH_CODE_LIFETIME = timedelta(minutes=5)
+OAUTH_ACCESS_LIFETIME = timedelta(hours=1)
+OAUTH_REFRESH_LIFETIME = timedelta(days=30)
+
+
+@dataclass(frozen=True)
+class OAuthCode:
+    """What an authorization code stands for; the key is known only by its hash."""
+
+    client_id: str
+    client_name: str
+    redirect_uri: str
+    code_challenge: str
+    resource: str
+    key_hash: str
+
+
+@dataclass(frozen=True)
+class OAuthGrant:
+    id: int
+    client_id: str
+    client_name: str
+    key_hash: str
+    resource: str
+
+
+def _oauth_grant(row: OAuthGrantRow) -> OAuthGrant:
+    return OAuthGrant(row.id, row.client_id, row.client_name, row.key_hash, row.resource)
+
+
+def _oauth_tokens(
+    grant_id: int, access_hash: str, refresh_hash: str, now: datetime
+) -> list[OAuthTokenRow]:
+    return [
+        OAuthTokenRow(
+            token_hash=access_hash,
+            grant_id=grant_id,
+            kind="access",
+            created_at=now,
+            expires_at=now + OAUTH_ACCESS_LIFETIME,
+        ),
+        OAuthTokenRow(
+            token_hash=refresh_hash,
+            grant_id=grant_id,
+            kind="refresh",
+            created_at=now,
+            expires_at=now + OAUTH_REFRESH_LIFETIME,
+        ),
+    ]
 
 
 def _season_start(season: str) -> int:
@@ -1766,6 +1821,152 @@ class PostgresResultRepository:
                 .values(status="expired", **_ERASED_ACCESS_REQUEST_FIELDS)
             )
             return deleted.rowcount, expired.rowcount
+
+    async def create_oauth_code(self, code_hash: str, code: OAuthCode) -> None:
+        now = _now()
+        async with self.sessions.begin() as session:
+            session.add(
+                OAuthCodeRow(
+                    code_hash=code_hash,
+                    client_id=code.client_id,
+                    client_name=code.client_name,
+                    redirect_uri=code.redirect_uri,
+                    code_challenge=code.code_challenge,
+                    resource=code.resource,
+                    key_hash=code.key_hash,
+                    created_at=now,
+                    expires_at=now + OAUTH_CODE_LIFETIME,
+                )
+            )
+
+    async def consume_oauth_code(self, code_hash: str) -> OAuthCode | None:
+        """Deletes the code and returns it unless it has expired: a code works at most once."""
+        async with self.sessions.begin() as session:
+            row = (
+                await session.execute(
+                    delete(OAuthCodeRow)
+                    .where(OAuthCodeRow.code_hash == code_hash)
+                    .returning(OAuthCodeRow)
+                )
+            ).scalar_one_or_none()
+            if row is None or row.expires_at <= _now():
+                return None
+            return OAuthCode(
+                row.client_id,
+                row.client_name,
+                row.redirect_uri,
+                row.code_challenge,
+                row.resource,
+                row.key_hash,
+            )
+
+    async def create_oauth_grant(
+        self, code: OAuthCode, access_hash: str, refresh_hash: str
+    ) -> OAuthGrant:
+        now = _now()
+        async with self.sessions.begin() as session:
+            row = OAuthGrantRow(
+                client_id=code.client_id,
+                client_name=code.client_name,
+                key_hash=code.key_hash,
+                resource=code.resource,
+                created_at=now,
+                last_used_at=now,
+                expires_at=now + OAUTH_REFRESH_LIFETIME,
+            )
+            session.add(row)
+            await session.flush()
+            session.add_all(_oauth_tokens(row.id, access_hash, refresh_hash, now))
+            return _oauth_grant(row)
+
+    async def rotate_oauth_refresh_token(
+        self, refresh_hash: str, client_id: str, access_hash: str, new_refresh_hash: str
+    ) -> OAuthGrant | None:
+        """Exchanges a refresh token for new tokens; None if it is unknown, expired, or another
+        client's. A second use of a rotated token revokes the whole grant (OAuth 2.1 §4.3.1)."""
+        now = _now()
+        async with self.sessions.begin() as session:
+            found = (
+                await session.execute(
+                    select(OAuthTokenRow, OAuthGrantRow)
+                    .join(OAuthGrantRow, OAuthGrantRow.id == OAuthTokenRow.grant_id)
+                    .where(
+                        OAuthTokenRow.token_hash == refresh_hash, OAuthTokenRow.kind == "refresh"
+                    )
+                    .with_for_update()
+                )
+            ).one_or_none()
+            if found is None:
+                return None
+            token, grant = found
+            if grant.client_id != client_id or min(token.expires_at, grant.expires_at) <= now:
+                return None
+            if token.rotated_at is not None:
+                await session.delete(grant)
+                logger.warning("OAuth refresh token reused; grant %s revoked", grant.id)
+                return None
+            # Rotated refresh tokens stay until they expire, so replaying any of them is caught.
+            await session.execute(
+                delete(OAuthTokenRow).where(
+                    OAuthTokenRow.grant_id == grant.id, OAuthTokenRow.expires_at <= now
+                )
+            )
+            token.rotated_at = now
+            grant.last_used_at = now
+            grant.expires_at = now + OAUTH_REFRESH_LIFETIME
+            session.add_all(_oauth_tokens(grant.id, access_hash, new_refresh_hash, now))
+            return _oauth_grant(grant)
+
+    async def oauth_access_grant(self, access_hash: str) -> OAuthGrant | None:
+        """The grant of an unexpired access token, else None."""
+        now = _now()
+        statement = (
+            select(OAuthGrantRow)
+            .join(OAuthTokenRow, OAuthTokenRow.grant_id == OAuthGrantRow.id)
+            .where(
+                OAuthTokenRow.token_hash == access_hash,
+                OAuthTokenRow.kind == "access",
+                OAuthTokenRow.expires_at > now,
+                OAuthGrantRow.expires_at > now,
+            )
+        )
+        async with self.sessions() as session:
+            row = await session.scalar(statement)
+            return None if row is None else _oauth_grant(row)
+
+    async def delete_oauth_grant(self, grant_id: int) -> None:
+        async with self.sessions.begin() as session:
+            await session.execute(delete(OAuthGrantRow).where(OAuthGrantRow.id == grant_id))
+
+    async def revoke_oauth_token(self, token_hash: str, client_id: str) -> bool:
+        """Deletes the grant of an access or refresh token issued to ``client_id`` (RFC 7009)."""
+        async with self.sessions.begin() as session:
+            result = await session.execute(
+                delete(OAuthGrantRow).where(
+                    OAuthGrantRow.client_id == client_id,
+                    OAuthGrantRow.id
+                    == select(OAuthTokenRow.grant_id)
+                    .where(OAuthTokenRow.token_hash == token_hash)
+                    .scalar_subquery(),
+                )
+            )
+            return result.rowcount > 0
+
+    async def purge_oauth(self) -> tuple[int, int, int]:
+        """Deletes expired codes, grants (with their tokens), and tokens; returns the counts
+        (codes, grants, tokens)."""
+        now = _now()
+        async with self.sessions.begin() as session:
+            codes = await session.execute(
+                delete(OAuthCodeRow).where(OAuthCodeRow.expires_at <= now)
+            )
+            grants = await session.execute(
+                delete(OAuthGrantRow).where(OAuthGrantRow.expires_at <= now)
+            )
+            tokens = await session.execute(
+                delete(OAuthTokenRow).where(OAuthTokenRow.expires_at <= now)
+            )
+            return codes.rowcount, grants.rowcount, tokens.rowcount
 
     @staticmethod
     async def _ensure_season(

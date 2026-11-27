@@ -14,7 +14,7 @@ from prometheus_client import CONTENT_TYPE_LATEST
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.routing import Match as RouteMatch
 
-from app import access, agent_docs, notify, oauth, observability
+from app import access, agent_docs, notify, oauth, oauth_server, observability
 from app import api_docs as docs
 from app.caching import (
     CACHEABLE_OPERATIONS,
@@ -33,6 +33,7 @@ from app.competitions import (
 )
 from app.config import (
     check_demo_mode,
+    check_oauth_server,
     check_private_instance,
     load_config,
     parse_networks,
@@ -106,6 +107,9 @@ from app.ratelimit import (
 )
 from app.repository import (
     CLAIM_WINDOW,
+    OAUTH_ACCESS_LIFETIME,
+    OAUTH_CODE_LIFETIME,
+    OAUTH_REFRESH_LIFETIME,
     UNAPPROVED_RETENTION,
     AccessRequestPending,
     AccessRequestStateConflict,
@@ -156,6 +160,23 @@ def _identity(supplied: str | None) -> access.Identity | None:
 
 def _subject_identity(subject: str) -> access.Identity:
     return access.resolve_subject(subject, _current_keys())
+
+
+def _key_hash_identity(key_hash: str) -> access.Identity | None:
+    return access.resolve_digest(key_hash, access.env_keys(settings.api_keys), _current_keys())
+
+
+# The built-in authorization server (ADR 0012); its routes answer 404 unless it is enabled.
+authorization_server = oauth_server.AuthorizationServer(
+    settings, lambda: store, _identity, _key_hash_identity
+)
+
+
+async def _builtin_token_identity(token: str) -> access.Identity:
+    try:
+        return await authorization_server.identify_token(token)
+    except SQLAlchemyError as error:
+        raise oauth.IssuerUnavailable(f"token store unavailable: {error}") from error
 
 
 def _metrics_credential(request: Request) -> str:
@@ -276,6 +297,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         keys_watcher = watcher
     # Before seeding, so a demo never stores competitions it may not serve.
     check_demo_mode(config, file_keys)
+    check_oauth_server(file_keys)
     for warning in config.fallback_warnings(
         settings.football_data_api_token, settings.thesportsdb_api_key.get_secret_value()
     ):
@@ -300,7 +322,9 @@ app = FastAPI(
 install_problem_handlers(app)
 docs.install_openapi(app)
 # The MCP server is a plain Starlette route, so it stays out of the OpenAPI spec.
-mcp_endpoint = McpEndpoint(create_server(app), settings, _identity, _subject_identity)
+mcp_endpoint = McpEndpoint(
+    create_server(app), settings, _identity, _subject_identity, _builtin_token_identity
+)
 app.router.routes.append(McpRoute(mcp_endpoint))
 
 
@@ -1636,6 +1660,45 @@ async def protected_resource_metadata() -> Response:
     )
 
 
+def _require_authorization_server() -> oauth_server.AuthorizationServer:
+    if not authorization_server.enabled:
+        raise ProblemError(
+            "not-found",
+            "The built-in authorization server is not enabled on this instance",
+            hint="Use /mcp anonymously or with an X-API-Key header.",
+        )
+    return authorization_server
+
+
+@app.get(oauth_server.METADATA_PATH, include_in_schema=False)
+async def authorization_server_metadata() -> Response:
+    """RFC 8414 metadata of the built-in authorization server (ADR 0012)."""
+    server = _require_authorization_server()
+    return JSONResponse(
+        server.metadata(),
+        headers={
+            "Cache-Control": cache_control(settings.cache_max_age_seconds),
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+
+@app.api_route(oauth_server.AUTHORIZE_PATH, methods=["GET", "POST"], include_in_schema=False)
+async def oauth_authorize(request: Request) -> Response:
+    """The consent page: the user signs a chat client in with an API key (ADR 0012)."""
+    return await _require_authorization_server().authorize(request)
+
+
+@app.post(oauth_server.TOKEN_PATH, include_in_schema=False)
+async def oauth_token(request: Request) -> Response:
+    return await _require_authorization_server().token(request)
+
+
+@app.post(oauth_server.REVOKE_PATH, include_in_schema=False)
+async def oauth_revoke(request: Request) -> Response:
+    return await _require_authorization_server().revoke(request)
+
+
 def _public_base_url(request: Request) -> tuple[str, bool]:
     """The base URL for links and examples, and whether it was derived from the request."""
     if settings.public_base_url:
@@ -1715,6 +1778,8 @@ def _oauth_info() -> agent_docs.OAuthInfo | None:
         config.metadata_url,
         config.mode == "required" or not settings.anonymous_access,
         config.scopes,
+        builtin=config.builtin,
+        client_hosts=tuple(sorted(settings.oauth_client_host_set)) if config.builtin else (),
     )
 
 
@@ -1796,7 +1861,7 @@ def _privacy_blocks(base_url: str) -> list[agent_docs.Block]:
             ips_anonymized=settings.log_ips_anonymized,
             rate_limited=settings.rate_limit_enabled,
             keys_enabled=bool(settings.api_keys or settings.api_keys_file),
-            oauth_enabled=settings.oauth_issuer is not None,
+            oauth_enabled=settings.oauth_issuer is not None or settings.oauth_builtin,
             # Access requests are writes: the demo refuses them (`writes-disabled`).
             access_requests=None
             if settings.demo_mode
@@ -1805,6 +1870,13 @@ def _privacy_blocks(base_url: str) -> list[agent_docs.Block]:
                 claim_window=CLAIM_WINDOW,
                 telegram_notifications=notify.TelegramConfig.from_settings(settings) is not None,
             ),
+            oauth_server=agent_docs.OAuthServerPrivacy(
+                code_lifetime=OAUTH_CODE_LIFETIME,
+                access_lifetime=OAUTH_ACCESS_LIFETIME,
+                refresh_lifetime=OAUTH_REFRESH_LIFETIME,
+            )
+            if authorization_server.enabled
+            else None,
         ),
         base_url,
     )

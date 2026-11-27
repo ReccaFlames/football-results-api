@@ -12,7 +12,7 @@ from tests.integration.support import run_alembic
 
 TABLES = (
     "team_alias, team, competition, competition_season, match_result, scrape_run, "
-    "scheduler_heartbeat, access_request"
+    "scheduler_heartbeat, access_request, oauth_authorization_code, oauth_grant, oauth_token"
 )
 
 

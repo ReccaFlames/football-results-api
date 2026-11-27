@@ -112,8 +112,9 @@ How to use this list:
 **Next up: item 22 (home server deployment), from 22a.** Plan in
 [SELF-HOSTED.md](SELF-HOSTED.md), decided 2026-11-27 ([ADR 0011](adr/0011-home-server-runs-single-node-k3s-with-flux.md)).
 Item 15 (MCP Registry) waits: its only open sub-task is published by hand from the release tag
-after the first deployment. The next unchecked code items after 22 are 17d (a further primary
-provider; name the competition first) and 20.
+after the first deployment. Item 20 (built-in OAuth for chat clients) was taken ahead of 22 on
+request; its last sub-task (20g) needs the deployed instance. The next unchecked code item after
+22 is 17d (a further primary provider; name the competition first).
 
 ### Phase 0: Foundations
 
@@ -568,7 +569,28 @@ the maintainer runs `scripts/publish-wizard.sh`.
         Consequences amended with what was built; version 0.26.0
 - [ ] **20. OAuth for chat clients on private instances**: claude.ai and ChatGPT connectors cannot
       send `X-API-Key`, so a private instance needs a production authorization server (ADR 0006)
-      before they can connect. Until then, chat clients are supported on the demo only.
+      before they can connect. Decided 2026-11-28
+      ([ADR 0012](adr/0012-built-in-authorization-server-signs-in-with-api-keys.md)): an optional
+      built-in authorization server whose sign-in is the user's API key
+  - [x] 20a. Plan: ADR 0012, ADR 0006 amendment, research note §8 (what claude.ai and ChatGPT
+        need; self-hosted authorization servers compared)
+  - [x] 20b. Settings and checks: `FOOTBALL_RESULTS_OAUTH_BUILTIN`,
+        `FOOTBALL_RESULTS_OAUTH_CLIENT_HOSTS`; exclusive with an external issuer; needs an https
+        public base URL without a path and a key; refused in demo mode; `config check` output
+  - [x] 20c. Storage: migration `0014_oauth_server` (codes, grants, tokens; hashes only),
+        repository methods, hourly scheduler purge (counts only in logs)
+  - [x] 20d. Authorization server: RFC 8414 metadata, CIMD fetch (host allowlist, no redirects,
+        size cap, cache), consent page (API key, no JavaScript, strict CSP), authorization code
+        with PKCE S256 and `resource`, RFC 9207 `iss`, token endpoint (code, rotating refresh,
+        reuse revokes the grant), RFC 7009 revocation
+  - [x] 20e. Resource side: `/mcp` accepts the built-in tokens as the key's identity (quotas,
+        expiry header); protected resource metadata names the own issuer; key revocation or
+        expiry ends access at once
+  - [x] 20f. Docs and tests: agent docs, `/privacy`, README, PRIVATE.md, SELF-HOSTED.md,
+        DEPLOYMENT.md, `evals/CHAT_CLIENTS.md`, AGENTS.md; unit and PostgreSQL tests; version
+        0.27.0
+  - [ ] 20g. Connect claude.ai and ChatGPT to the deployed private instance by hand (operator
+        step, after item 22)
 - [ ] **22. Home server deployment** (decided 2026-11-27, [SELF-HOSTED.md](SELF-HOSTED.md),
       [ADR 0011](adr/0011-home-server-runs-single-node-k3s-with-flux.md)): a private instance on a
       single-node k3s cluster at home, delivered by Flux from GHCR images, public through a

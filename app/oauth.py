@@ -1,9 +1,10 @@
 """Optional OAuth resource server for `/mcp` (ADR 0006).
 
-The API never issues tokens. An operator points `FOOTBALL_RESULTS_OAUTH_ISSUER` at an external
-authorization server; `/mcp` then publishes RFC 9728 protected resource metadata and accepts JWT
-access tokens signed with one of the issuer's JWKS keys (asymmetric algorithms only) whose `iss`,
-`aud`, `exp`, and `nbf` are valid. Tokens are never forwarded: callers get an identity instead.
+An operator points `FOOTBALL_RESULTS_OAUTH_ISSUER` at an external authorization server; `/mcp`
+then publishes RFC 9728 protected resource metadata and accepts JWT access tokens signed with one
+of the issuer's JWKS keys (asymmetric algorithms only) whose `iss`, `aud`, `exp`, and `nbf` are
+valid. Alternatively, `FOOTBALL_RESULTS_OAUTH_BUILTIN` makes the API its own issuer (ADR 0012,
+`app/oauth_server.py`) with opaque tokens. Tokens are never forwarded: callers get an identity.
 """
 
 import asyncio
@@ -44,12 +45,27 @@ class OAuthConfig:
     scopes: tuple[str, ...]
     jwks_url: str | None
     metadata_url: str
+    # The API's own authorization server issued the tokens (ADR 0012), not an external one.
+    builtin: bool = False
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "OAuthConfig | None":
-        if not settings.oauth_issuer or not settings.public_base_url:
+        if not settings.public_base_url:
             return None
         resource = f"{settings.public_base_url}/mcp"
+        if settings.oauth_builtin:
+            return cls(
+                issuer=settings.public_base_url,
+                audience=resource,
+                resource=resource,
+                mode=settings.oauth_mode,
+                scopes=(),
+                jwks_url=None,
+                metadata_url=f"{settings.public_base_url}{METADATA_PATH}",
+                builtin=True,
+            )
+        if not settings.oauth_issuer:
+            return None
         return cls(
             issuer=settings.oauth_issuer,
             audience=settings.oauth_audience or resource,

@@ -30,7 +30,7 @@ container images go to GHCR, because the cluster pulls them from there.
 | Isolation | Per experiment: namespace, default-deny NetworkPolicy, Pod Security `restricted`, ResourceQuota and LimitRange |
 | Environments | Production only. Compose on the Mac stays the development and integration-test setup |
 | Data | Start empty; the scheduler fills current seasons, past seasons are imported with the admin refresh job |
-| Out of scope | OAuth for `/mcp` (roadmap item 20), demo instance, publishing (item 15), multi-node, log aggregation |
+| Out of scope | Demo instance, publishing (item 15), multi-node, log aggregation |
 
 ## Architecture
 
@@ -262,7 +262,10 @@ Kubelet rotates container logs by size, not age, so:
 
 ## Later
 
-- OAuth for chat clients (roadmap item 20).
+- Built-in sign-in for claude.ai and ChatGPT (roadmap item 20g,
+  [PRIVATE.md](PRIVATE.md#8-chat-clients-claudeai-chatgpt)): set `FOOTBALL_RESULTS_OAUTH_BUILTIN`
+  once the tunnel serves the public https URL. The clients call `/mcp`, `/oauth/*`, and
+  `/.well-known/*` from their servers, so no Cloudflare bot challenge may apply to those paths.
 - A demo instance in its own namespace and subdomain (`compose.demo.yaml` equivalent,
   ADR 0007).
 - Publishing the CLI and MCP Registry entry (item 15, by hand with `scripts/publish-wizard.sh`).

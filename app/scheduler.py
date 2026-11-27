@@ -12,6 +12,7 @@ from app.logs import configure_logging
 from app.models import Competition, SeasonSource
 from app.repository import (
     CLAIM_WINDOW,
+    OAUTH_REFRESH_LIFETIME,
     UNAPPROVED_RETENTION,
     PostgresResultRepository,
     RefreshTarget,
@@ -299,6 +300,30 @@ async def purge_access_requests(
     return now
 
 
+async def purge_oauth(
+    repository: PostgresResultRepository, last_purged_at: datetime | None, now: datetime
+) -> datetime | None:
+    """Delete expired codes, grants, and tokens of the built-in authorization server (ADR 0012)
+    at most every `ACCESS_REQUEST_PURGE_INTERVAL`; returns when it last succeeded. Logs only
+    counts."""
+    if last_purged_at is not None and now - last_purged_at < ACCESS_REQUEST_PURGE_INTERVAL:
+        return last_purged_at
+    try:
+        codes, grants, tokens = await repository.purge_oauth()
+    except Exception:
+        logger.exception("OAuth purge failed; will retry")
+        return last_purged_at
+    if codes or grants or tokens:
+        logger.info(
+            "OAuth: deleted %d expired codes, %d grants not refreshed within %d days, %d expired tokens",
+            codes,
+            grants,
+            OAUTH_REFRESH_LIFETIME.days,
+            tokens,
+        )
+    return now
+
+
 def describe_idle(next_refresh: ScheduledRefresh | None, now: datetime) -> str:
     if next_refresh is None:
         return "idle; no current season has automatic refresh enabled"
@@ -341,6 +366,7 @@ async def run() -> None:
     )
     last_idle_message = None
     last_purged_at: datetime | None = None
+    last_oauth_purged_at: datetime | None = None
     while True:
         try:
             config, changed = config_watcher.load_if_changed()
@@ -357,6 +383,9 @@ async def run() -> None:
             await recover_abandoned_runs(repository)
             last_purged_at = await purge_access_requests(
                 repository, last_purged_at, datetime.now(UTC)
+            )
+            last_oauth_purged_at = await purge_oauth(
+                repository, last_oauth_purged_at, datetime.now(UTC)
             )
             for competition in await repository.claim_season_checks(settings.scheduler_claim_limit):
                 try:

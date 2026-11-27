@@ -23,6 +23,8 @@ visitor ──HTTPS, no key─────────────┴─▶ Cadd
 - These stay public, so people and agents can learn how to ask for access: `/health`,
   `/llms.txt`, `/llms-full.txt`, `/agents`, `/agents.md`, `/problems/*`, `/skills/...`,
   `/openapi.json`, `/docs`, and the OAuth metadata. The agent docs say that a key is required.
+  With [built-in sign-in](#8-chat-clients-claudeai-chatgpt), the sign-in page and token
+  endpoints are public as well; they hand out nothing without a valid key.
 - The landing page (`/`, the `web` service) stays public too, and has no key of its own: it
   calls only `list_competitions` (the competition list) and `create_access_request` (its form),
   and links to the public doc pages.
@@ -226,3 +228,34 @@ too.
 A private instance does not change what your sources allow. Serve a provider's data to your
 invited people only if its terms or written permission cover them, and keep each key tied to a
 person so you can show who had access.
+
+## 8. Chat clients (claude.ai, ChatGPT)
+
+claude.ai and ChatGPT connect to remote MCP servers only through OAuth, so they cannot use an
+API key directly. The built-in sign-in (ADR 0012) lets an invited person connect them with their
+own key; nothing else needs to run. Add to `.env` and restart the API:
+
+```bash
+FOOTBALL_RESULTS_OAUTH_BUILTIN=true
+# The hosts whose clients may sign in (the default)
+FOOTBALL_RESULTS_OAUTH_CLIENT_HOSTS=claude.ai,chatgpt.com
+```
+
+It needs the https `FOOTBALL_RESULTS_PUBLIC_BASE_URL` from step 1 (no path: it is the issuer)
+and no `FOOTBALL_RESULTS_OAUTH_ISSUER`. Caddy already routes `/.well-known/*` and `/oauth/*` to
+the API. Check with `python -m app.config check` and
+`curl -s https://football.example.com/.well-known/oauth-authorization-server`.
+
+The invited person then:
+
+1. In claude.ai: **Settings → Connectors → Add custom connector**. In ChatGPT: turn on developer
+   mode, then **Settings → Apps & Connectors → Create**. Either way, enter
+   `https://football.example.com/mcp`.
+2. Signs in on the page that opens by pasting their API key and choosing **Allow**.
+
+The client stores its own tokens, never the key. It gets the key's name, role, and quotas, and
+`revoke` or expiry of the key (step 5) cuts it off at the next request. A sign-in nobody uses for
+30 days expires. The API logs each sign-in with the client's host and the key name, and
+`/privacy` describes what it stores. To accept another client, add its Client ID Metadata
+Document host to `FOOTBALL_RESULTS_OAUTH_CLIENT_HOSTS`; clients without such a document (dynamic
+client registration only) cannot sign in.

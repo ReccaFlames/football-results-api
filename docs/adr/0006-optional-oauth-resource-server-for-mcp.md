@@ -11,6 +11,10 @@ a token `subject` instead of a key hash. Unknown subjects become `client`s with 
 quotas. API keys keep working, and anonymous read tools stay available unless the operator sets
 `required`. OAuth covers `/mcp` only; the REST API keeps `X-API-Key`.
 
+> Amended by [ADR 0012](0012-built-in-authorization-server-signs-in-with-api-keys.md): private
+> instances may enable a minimal built-in authorization server that signs chat clients in with an
+> API key. The rejection below still holds for a general one with users and passwords.
+
 ## Considered options
 
 - **Built-in authorization server** (the `mcp` SDK's `OAuthAuthorizationServerProvider`):

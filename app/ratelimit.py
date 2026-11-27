@@ -21,6 +21,7 @@ EXEMPT_PATHS = frozenset(
         "/openapi.json",
         "/robots.txt",
         "/.well-known/oauth-protected-resource/mcp",
+        "/.well-known/oauth-authorization-server",
     }
 )
 

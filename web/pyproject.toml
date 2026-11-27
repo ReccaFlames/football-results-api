@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "football-results-web"
-version = "0.26.0"
+version = "0.27.0"
 description = "Landing page for the Football Results API"
 license = "MIT"
 license-files = ["LICENSE"]

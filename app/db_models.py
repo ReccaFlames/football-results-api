@@ -281,3 +281,53 @@ class AccessRequestRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class OAuthCodeRow(Base):
+    """A one-time authorization code of the built-in authorization server (ADR 0012)."""
+
+    __tablename__ = "oauth_authorization_code"
+
+    code_hash: Mapped[str] = mapped_column(String(71), primary_key=True)
+    client_id: Mapped[str] = mapped_column(String(2048))
+    client_name: Mapped[str] = mapped_column(String(200))
+    redirect_uri: Mapped[str] = mapped_column(String(2048))
+    code_challenge: Mapped[str] = mapped_column(String(128))
+    resource: Mapped[str] = mapped_column(String(2048))
+    # The hash of the API key the user signed in with; never the key.
+    key_hash: Mapped[str] = mapped_column(String(71))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class OAuthGrantRow(Base):
+    """A client's sign-in with one API key; its tokens are deleted with it (ADR 0012)."""
+
+    __tablename__ = "oauth_grant"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    client_id: Mapped[str] = mapped_column(String(2048))
+    client_name: Mapped[str] = mapped_column(String(200))
+    key_hash: Mapped[str] = mapped_column(String(71))
+    resource: Mapped[str] = mapped_column(String(2048))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_used_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Slides forward with every refresh.
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class OAuthTokenRow(Base):
+    """An access or refresh token of a grant, stored only as a hash."""
+
+    __tablename__ = "oauth_token"
+    __table_args__ = (CheckConstraint("kind IN ('access', 'refresh')", name="ck_oauth_token_kind"),)
+
+    token_hash: Mapped[str] = mapped_column(String(71), primary_key=True)
+    grant_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("oauth_grant.id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[str] = mapped_column(String(10))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    # Set when a refresh token is exchanged; a second use revokes the grant.
+    rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -579,13 +579,16 @@ class RateLimits:
 
 @dataclass(frozen=True)
 class OAuthInfo:
-    """Optional OAuth on `/mcp` (ADR 0006), shown only when an issuer is configured."""
+    """Optional OAuth on `/mcp` (ADR 0006), shown only when an issuer is configured; `builtin`
+    when this instance is its own authorization server with API-key sign-in (ADR 0012)."""
 
     issuer: str
     audience: str
     metadata_url: str
     required: bool
     scopes: tuple[str, ...] = ()
+    builtin: bool = False
+    client_hosts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1127,6 +1130,13 @@ def _oauth_auth_text(guide: AgentGuide) -> str:
         if guide.oauth.required
         else "also works anonymously and with an API key"
     )
+    if guide.oauth.builtin:
+        return (
+            f" Chat clients such as claude.ai and ChatGPT connect to the MCP server "
+            f"(`{guide.url(MCP_PATH)}`) with OAuth: this instance's sign-in page asks for an API "
+            f"key once, and the client then sends its own access token. MCP clients discover "
+            f"this from `{guide.oauth.metadata_url}`. The REST API uses `X-API-Key` only."
+        )
     return (
         f" The MCP server (`{MCP_PATH}`) accepts OAuth access tokens from "
         f"`{guide.oauth.issuer}` as `Authorization: Bearer` and {access}; MCP clients discover "
@@ -1326,6 +1336,24 @@ def _mcp_oauth_blocks(guide: AgentGuide) -> list[Block]:
         "client (for example `/mcp auth` in GitHub Copilot CLI or `claude mcp login "
         f"{MCP_SERVER_NAME}` in Claude Code)."
     )
+    if oauth.builtin:
+        hosts = ", ".join(f"`{host}`" for host in oauth.client_hosts)
+        return [
+            Paragraph(
+                f"**OAuth:** this MCP server is an OAuth protected resource (metadata at "
+                f"`{oauth.metadata_url}`), and this instance is its own authorization server "
+                f"(`{oauth.issuer}`, RFC 8414 metadata at "
+                f"`{oauth.issuer}/.well-known/oauth-authorization-server`). To connect a chat "
+                f"client, add `{guide.url(MCP_PATH)}` as a custom connector and sign in with "
+                "an API key on the page that opens; the key is not stored by the client, which "
+                "gets its own short-lived access token and a rotating refresh token. Clients "
+                "are identified by a Client ID Metadata Document (an `https` `client_id` URL) "
+                f"on an allowed host ({hosts}); dynamic client registration is not offered. "
+                f"{mode} The client gets the role and quota of the key it signed in with, and "
+                "loses access as soon as that key expires or is revoked; an invalid or expired "
+                'token gets `401` with `error="invalid_token"`.'
+            )
+        ]
     scopes = (
         " Scopes: " + ", ".join(f"`{item}`" for item in oauth.scopes) + "." if oauth.scopes else ""
     )
@@ -1420,6 +1448,15 @@ class AccessRequestPrivacy:
 
 
 @dataclass(frozen=True)
+class OAuthServerPrivacy:
+    """Lifetimes of the built-in authorization server's records (ADR 0012)."""
+
+    code_lifetime: timedelta
+    access_lifetime: timedelta
+    refresh_lifetime: timedelta
+
+
+@dataclass(frozen=True)
 class PrivacyInfo:
     """What `/privacy` states about this instance (settings, not request data)."""
 
@@ -1431,6 +1468,8 @@ class PrivacyInfo:
     oauth_enabled: bool
     # None where access requests cannot be created (the read-only demo).
     access_requests: AccessRequestPrivacy | None = None
+    # None unless the built-in authorization server is on (ADR 0012).
+    oauth_server: OAuthServerPrivacy | None = None
 
 
 def _window(seconds: int) -> str:
@@ -1495,6 +1534,42 @@ def _access_request_blocks(info: AccessRequestPrivacy, rate_limited: bool) -> li
     return blocks
 
 
+def _oauth_server_blocks(info: OAuthServerPrivacy) -> list[Block]:
+    return [
+        Heading(2, "Chat-client sign-in"),
+        Paragraph(
+            "If you connect a chat client (for example claude.ai or ChatGPT) to this instance's "
+            "MCP server and sign in with your API key, this instance stores the client's ID and "
+            "name, a SHA-256 hash of the key you signed in with (never the key), and SHA-256 "
+            "hashes of the tokens issued to the client, with their times."
+        ),
+        Bullets(
+            (
+                (
+                    "**Purpose**: to let the client use the MCP server on your behalf, with your "
+                    "key's role and quota, until the key expires or is revoked."
+                ),
+                (
+                    f"**Retention**: sign-in codes expire after {_window(_seconds(info.code_lifetime))}"
+                    f" and access tokens after {_window(_seconds(info.access_lifetime))}. A "
+                    f"sign-in that is not refreshed within {_days(info.refresh_lifetime)} is "
+                    "deleted with its tokens (an hourly job deletes expired records)."
+                ),
+                ("**Logs**: each sign-in is logged with the client's host and the key name."),
+                (
+                    "**Client hosts**: to read a client's description, this instance fetches its "
+                    "`client_id` URL from the client's host (for example claude.ai). That "
+                    "request carries nothing about you."
+                ),
+            )
+        ),
+    ]
+
+
+def _seconds(value: timedelta) -> int:
+    return int(value.total_seconds())
+
+
 def privacy_blocks(info: PrivacyInfo, base_url: str) -> list[Block]:
     """The `/privacy` page: personal data this instance processes, why, and for how long."""
     contact = (
@@ -1539,6 +1614,7 @@ def privacy_blocks(info: PrivacyInfo, base_url: str) -> list[Block]:
         if info.access_requests is not None
         else []
     )
+    oauth_server = _oauth_server_blocks(info.oauth_server) if info.oauth_server else []
     return [
         Heading(1, "Privacy"),
         Paragraph(
@@ -1548,6 +1624,7 @@ def privacy_blocks(info: PrivacyInfo, base_url: str) -> list[Block]:
         Heading(2, "What is processed"),
         Bullets(tuple(processed)),
         *access_requests,
+        *oauth_server,
         Heading(2, "Legal basis and your rights"),
         Paragraph(
             "Processing is limited to what is needed to operate and secure the service "

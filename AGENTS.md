@@ -24,13 +24,14 @@ API.
 | `app/access.py` | Named API keys (ADR 0005, 0008): keys-file models with required expiry, SHA-256 hashing, constant-time key resolution to an `Identity` (name, role, quotas, expiry), `KeysFileWatcher` (reload on change), `issue_key`/`extend_key`/`revoke_key`; `PUBLIC_OPERATIONS`; access-request claim secrets (`generate_claim_secret`, `claim_secret_matches`) |
 | `app/agent_docs.py` | Pure generator of `/llms.txt`, `/agents`, `/agents.md`, `/llms-full.txt`, `/problems/<slug>`, `/robots.txt`, `/privacy` from the OpenAPI spec and competitions; `SKILL_PATH`/`SKILL_FILE` for the served skill; `MCP_TOOLS` (tool → operation) |
 | `app/oauth.py` | Optional OAuth for `/mcp` (ADR 0006): `OAuthConfig` (RFC 9728 metadata, `WWW-Authenticate` challenge), `JwksCache`, `JwtVerifier`; `create_http_client` is the test seam |
+| `app/oauth_server.py` | Optional built-in OAuth authorization server for `/mcp` (ADR 0012): sign-in with an API key, RFC 8414 metadata, CIMD client registry (host allowlist), authorize/consent page, token (PKCE S256, rotating refresh), revocation; `create_http_client` is the test seam |
 | `app/notify.py` | Telegram notification of new access requests (ADR 0010): pure HTML-escaped message (never the email or message), background send with a short timeout, token redacted from httpx logs; `create_http_client` is the test seam (`tests/conftest.py` blocks it by default) |
 | `app/mcp_server.py` | Curated MCP server (`mcp` SDK `MCPServer`) at `/mcp`: 5 tools calling the API in-process, output models, Host/Origin checks, `McpRoute` |
 | `app/caching.py` | Weak body-hash `ETag`, `If-None-Match`, and `Cache-Control` rules for read endpoints |
 | `app/observability.py` | Stale-season and stalled-scheduler rules (`STALE_GRACE`, `stall_window`), Prometheus rendering for `/metrics`, HTTP request metrics |
 | `app/logs.py` | `configure_logging` (`FOOTBALL_RESULTS_LOG_FORMAT`: `text` or `json`) for the API and scheduler; access-log IP anonymisation |
 | `app/standings.py` | Pure league-table calculation and tie-breakers from finished matches |
-| `app/scheduler.py` | Scheduler loop (`python -m app.scheduler`): seed → heartbeat → hourly access-request purge (ADR 0010) → season checks (discovery/rollover) → claim due seasons → scrape → persist |
+| `app/scheduler.py` | Scheduler loop (`python -m app.scheduler`): seed → heartbeat → hourly access-request (ADR 0010) and OAuth (ADR 0012) purges → season checks (discovery/rollover) → claim due seasons → scrape → persist |
 | `app/scheduling.py` | Pure rules driven by `SchedulePolicy`: `calculate_next_check`, `failure_backoff`, `rollover_target` |
 | `app/scraper.py` | Provider adapters (`NinetyMinutScraper`, `FootballDataScraper`), parsers, `ScraperRegistry` |
 | `app/seasons.py` | Season formats (`2026-2027`, `2026`) and season/date mapping |
@@ -42,7 +43,7 @@ API.
 | `docs/PRIVATE.md` | Private instance guide (ADR 0008): invited users, expiring keys, `keys` commands |
 | `docs/DEPLOYMENT.md` | First-deployment checklist; services, Caddy path routes, and the trusted-proxy chain |
 | `docs/SELF-HOSTED.md` | Home server plan (ADR 0011): private instance on single-node k3s, Flux from GHCR, Cloudflare Tunnel, Tailscale; roadmap item 22 |
-| `app/repository.py` | `PostgresResultRepository`: seeding, queries, atomic season replace, scheduler claims; access requests (create, list, approve, reject, claim, purge; `CLAIM_WINDOW`, `UNAPPROVED_RETENTION`) |
+| `app/repository.py` | `PostgresResultRepository`: seeding, queries, atomic season replace, scheduler claims; access requests (create, list, approve, reject, claim, purge; `CLAIM_WINDOW`, `UNAPPROVED_RETENTION`); OAuth codes, grants, and tokens (`OAUTH_*` lifetimes, refresh rotation with reuse detection) |
 | `app/models.py` | Pydantic API/domain models (`Competition`, `SeasonSource`, `ScrapedMatch`, `MatchResult`, ...) |
 | `app/db_models.py` | SQLAlchemy ORM tables |
 | `migrations/` | Alembic migrations (schema changes go here only; no `create_all`) |
@@ -154,8 +155,17 @@ CI (`.github/workflows/ci.yml`) runs all of these on every push and pull request
   rate-limited again; inner writes count against the outer client's write quota. `server.json`
   `version` must equal `pyproject.toml` (a test checks). MCP tests need
   `with TestClient(app, base_url="http://localhost")` so the lifespan starts the session manager.
-- OAuth (ADR 0006) covers `/mcp` only; the API is a resource server, never an authorization
-  server, and does not use the SDK's `auth=`/`token_verifier=`. `McpEndpoint` resolves the caller
+- OAuth (ADR 0006) covers `/mcp` only and does not use the SDK's `auth=`/`token_verifier=`.
+  The API is a resource server for an external issuer, or (`FOOTBALL_RESULTS_OAUTH_BUILTIN`,
+  ADR 0012, mutually exclusive) its own minimal authorization server whose only "login" is an
+  API key: no accounts, passwords, or dynamic client registration; clients only by Client ID
+  Metadata Document from `FOOTBALL_RESULTS_OAUTH_CLIENT_HOSTS`. Codes and tokens are stored as
+  `sha256:` hashes bound to the key's hash and re-resolved on every use (`access.resolve_digest`),
+  so a key's revocation or expiry ends its tokens. The OAuth routes have no operation ID (public
+  on private instances; not in `/openapi.json`), never redirect for an unknown client or
+  redirect URI, and use RFC 6749 error JSON, not problems. Lifetimes are the `OAUTH_*`
+  constants in `app/repository.py` (also used by `/privacy`); the scheduler purges expired
+  records hourly. `McpEndpoint` resolves the caller
   once per request (`AUTH_SCOPE_KEY`, also used for the rate-limit client) and passes the identity
   to inner calls in `IDENTITY_SCOPE_KEY`; never forward the token. A valid `X-API-Key` wins over a
   token. Tests generate keys locally and patch `app.oauth.create_http_client`.

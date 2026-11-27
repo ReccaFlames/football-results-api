@@ -144,6 +144,9 @@ visitor ─▶ (Cloudflare, demo only) ─▶ Caddy on the host ─┬─▶ API
   `scripts/set_demo_host.py <host>` to replace `FOOTBALL_DEMO_HOST` and `DEMO_URL`, set up the
   PyPI pending publisher, and tag `v1.0.0` for the release workflow. That closes roadmap item 15
   (MCP Registry).
-- Roadmap items 17d (more providers) and 20 (OAuth for chat clients on private instances).
+- Roadmap item 17d (more providers).
+- On a private instance, built-in sign-in for claude.ai and ChatGPT
+  ([PRIVATE.md](PRIVATE.md#8-chat-clients-claudeai-chatgpt), roadmap item 20g). Caddy needs no
+  change: `/oauth/*` and `/.well-known/*` already go to the API.
 - A paid TheSportsDB key, so the Polish fallback stays reliable on busy matchdays.
 - Pre-build the image in CI (GHCR) instead of running `--build` on the VM.
