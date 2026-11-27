@@ -33,7 +33,7 @@ Changelog = "https://github.com/ReccaFlames/football-results-api/releases"
 dev = [
   "football-results-cli",
   "football-results-web",
-  "pytest>=8.4,<9",
+  "pytest>=8.4,<10",
   "pytest-asyncio>=1.1,<2",
   "ruff>=0.12,<1",
 ]
